@@ -1,0 +1,64 @@
+# ============================================================================
+# Wasteland .gitignore
+# ============================================================================
+
+# Build artifacts
+/build/
+/cmake-build-*/
+/out/
+
+# Python venv (used for cmake installation)
+/.venv/
+
+# Models (large binary files, never commit)
+/models/*.gguf
+/models/*.bin
+
+# Object files, libraries, executables
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dll
+*.dylib
+*.exe
+Wasteland
+
+# Generated files
+Makefile
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+CTestTestfile.cmake
+_deps/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.user
+*.sublime-*
+
+# OS metadata
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Debug / Profiling
+*.dSYM/
+*.pdb
+*.ilk
+*.stackdump
+core
+core.*
+vgcore.*
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+*.bak
