@@ -137,36 +137,12 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
+    /* No auto-load and no auto-lockdown on boot. The seccomp filter is
+     * irreversible for the lifetime of the process, so applying it before
+     * the user has a chance to download is a one-way trap. The user picks
+     * a model (and thereby triggers lockdown) from the UI after launch. */
     char status_msg[256] = "";
-    int selected_model = -1;
-    if (model_count > 0) {
-        selected_model = 0;
-        struct stat fst;
-        char sz_str[32] = "";
-        if (stat(models_tmp[0], &fst) == 0) {
-            if (fst.st_size >= 1024LL * 1024 * 1024)
-                snprintf(sz_str, sizeof(sz_str), "%.2f GB",
-                         fst.st_size / (1024.0 * 1024 * 1024));
-            else
-                snprintf(sz_str, sizeof(sz_str), "%.2f MB",
-                         fst.st_size / (1024.0 * 1024));
-        }
-        if (inference_load_model(inference, models_tmp[0]) == 0) {
-            if (lockdown_network() == 0) {
-                snprintf(status_msg, sizeof(status_msg),
-                         "Loaded %s. Lockdown active.", sz_str);
-            } else {
-                snprintf(status_msg, sizeof(status_msg),
-                         "Loaded %s. Lockdown FAILED!", sz_str);
-            }
-        } else {
-            snprintf(status_msg, sizeof(status_msg),
-                     "Failed to load model (%s).", sz_str);
-        }
-    } else {
-        snprintf(status_msg, sizeof(status_msg),
-                 "No models found. Place .gguf files in ./models/ or download.");
-    }
+    int  selected_model  = -1;
 
     /* Force X11 on Linux to avoid NVIDIA EGL/Wayland issues */
     #ifdef __linux__
