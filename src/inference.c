@@ -357,9 +357,17 @@ static void emit_filtered_piece(inference_ctx_t *ictx,
         }
 
         if (m) {
-            /* Emit safe content before the tag, then skip the tag itself. */
+            /* Emit safe content before the tag, then emit a line marker instead of stripping. */
             size_t safe = (size_t)(m - buf);
             if (safe > pos) output_append_locked(ictx, buf + pos, safe - pos);
+            
+            if (m == m_open) {
+                const char *marker = "\n-- THINK --\n";
+                output_append_locked(ictx, marker, strlen(marker));
+            } else {
+                const char *marker = "\n-- END THINK --\n";
+                output_append_locked(ictx, marker, strlen(marker));
+            }
             pos = safe + mlen;
         } else {
             /* No tag in [pos, blen). Anything before (blen - reserve) can't

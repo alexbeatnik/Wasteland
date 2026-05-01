@@ -64,6 +64,8 @@ typedef struct {
     int  download_complete_flag; /* set by download thread, cleared by main */
     int  download_success;
     char status_msg[256];
+    char last_status_msg[256];
+    unsigned int status_timer;
 
     inference_ctx_t *inference;
 

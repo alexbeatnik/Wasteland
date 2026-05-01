@@ -318,6 +318,19 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
 {
     ui_apply_amber_theme(nk);
 
+    /* Track status_msg changes to reset timer */
+    if (strcmp(state->status_msg, state->last_status_msg) != 0) {
+        strncpy(state->last_status_msg, state->status_msg, sizeof(state->last_status_msg) - 1);
+        state->last_status_msg[sizeof(state->last_status_msg) - 1] = '\0';
+        state->status_timer = SDL_GetTicks();
+    }
+
+    /* Auto-clear status message after 3000ms */
+    if (state->status_msg[0] != '\0' && (SDL_GetTicks() - state->status_timer) > 3000) {
+        state->status_msg[0] = '\0';
+        state->last_status_msg[0] = '\0';
+    }
+
     struct nk_color amber = col_amber();
 
     /* Poll async model load completion. Runs every frame so the UI can
@@ -639,12 +652,6 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                                  NK_TEXT_CENTERED, amber);
             }
 
-            if (state->status_msg[0]) {
-                nk_layout_row_dynamic(nk, 20, 1);
-                nk_label_colored(nk, state->status_msg,
-                                 NK_TEXT_CENTERED, amber);
-            }
-
             nk_group_end(nk);
         }
 
@@ -701,7 +708,8 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                 s_code_buf[0] = '\0';
                 s_asst_buf[0] = '\0';
 
-                int in_code = 0; /* currently inside a ```...``` block */
+                int in_code  = 0; /* currently inside a ```...``` block */
+                int in_think = 0; /* currently inside a -- THINK -- block */
 
                 /* amber_dim: slightly dimmer colour for code-block chrome */
                 struct nk_color amber_dim = nk_rgb(0xCC, 0x8C, 0x00);
@@ -728,7 +736,18 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                     int is_user = (!in_code && llen >= 2 &&
                                    line[0] == '>' && line[1] == ' ');
 
-                    if (is_fence) {
+                    int is_think_start = (!in_code && llen >= 11 && strncmp(line, "-- THINK --", 11) == 0);
+                    int is_think_end   = (!in_code && llen >= 15 && strncmp(line, "-- END THINK --", 15) == 0);
+
+                    if (is_think_start) {
+                        in_think = 1;
+                        nk_layout_row_dynamic(nk, font_h, 1);
+                        nk_label_colored(nk, "◈ thinking...", NK_TEXT_LEFT, amber_dim);
+                    } else if (is_think_end) {
+                        in_think = 0;
+                        nk_layout_row_dynamic(nk, 6, 1);
+                        nk_spacing(nk, 1);
+                    } else if (is_fence) {
                         if (!in_code) {
                             /* ---- Opening fence ---- */
                             /* Flush any pending assistant block first */
@@ -830,24 +849,34 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                             nk_label_colored_wrap(nk, line, amber);
                         }
                     } else {
-                        /* Normal assistant line — accumulate + render */
-                        if (llen > 0 &&
-                            s_asst_len + (int)llen + 1 < (int)sizeof(s_asst_buf)) {
-                            memcpy(s_asst_buf + s_asst_len, line, llen);
-                            s_asst_len += (int)llen;
-                            s_asst_buf[s_asst_len++] = '\n';
-                            s_asst_buf[s_asst_len]   = '\0';
-                        }
-                        if (llen == 0) {
-                            nk_layout_row_dynamic(nk, font_h, 1);
-                            nk_label_colored(nk, "", NK_TEXT_LEFT, amber);
+                        /* Normal assistant line or thought line */
+                        if (in_think) {
+                            /* Render dim, do NOT append to s_asst_buf */
+                            if (llen == 0) {
+                                nk_layout_row_dynamic(nk, font_h, 1);
+                                nk_label_colored(nk, "", NK_TEXT_LEFT, amber_dim);
+                            } else {
+                                int wraps = count_wrap_lines(font, line, (int)llen, panel_w);
+                                nk_layout_row_dynamic(nk, font_h * (float)wraps + 2.0f, 1);
+                                nk_label_colored_wrap(nk, line, amber_dim);
+                            }
                         } else {
-                            int wraps = count_wrap_lines(font, line,
-                                                         (int)llen, panel_w);
-                            nk_layout_row_dynamic(nk,
-                                                  font_h * (float)wraps + 2.0f,
-                                                  1);
-                            nk_label_colored_wrap(nk, line, amber);
+                            /* Normal assistant line — accumulate + render */
+                            if (llen > 0 &&
+                                s_asst_len + (int)llen + 1 < (int)sizeof(s_asst_buf)) {
+                                memcpy(s_asst_buf + s_asst_len, line, llen);
+                                s_asst_len += (int)llen;
+                                s_asst_buf[s_asst_len++] = '\n';
+                                s_asst_buf[s_asst_len]   = '\0';
+                            }
+                            if (llen == 0) {
+                                nk_layout_row_dynamic(nk, font_h, 1);
+                                nk_label_colored(nk, "", NK_TEXT_LEFT, amber);
+                            } else {
+                                int wraps = count_wrap_lines(font, line, (int)llen, panel_w);
+                                nk_layout_row_dynamic(nk, font_h * (float)wraps + 2.0f, 1);
+                                nk_label_colored_wrap(nk, line, amber);
+                            }
                         }
                     }
                     p = eol ? eol + 1 : end;
@@ -924,7 +953,14 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
 
             nk_layout_row_end(nk);
 
-
+            /* Status message below input */
+            nk_layout_row_dynamic(nk, 14, 1);
+            if (state->status_msg[0]) {
+                struct nk_color amber_dim = nk_rgb(0xCC, 0x8C, 0x00);
+                nk_label_colored(nk, state->status_msg, NK_TEXT_LEFT, amber_dim);
+            } else {
+                nk_label_colored(nk, "", NK_TEXT_LEFT, amber);
+            }
             nk_group_end(nk);
         }
     }
