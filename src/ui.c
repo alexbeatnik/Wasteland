@@ -139,6 +139,40 @@ void load_chat_history(const char *chat_name, char *history, size_t max_len)
     }
 }
 
+static void generate_chat_name_from_prompt(const char *prompt, char *out_name, size_t out_len)
+{
+    char base[64] = {0};
+    int b = 0;
+    while (*prompt == ' ') prompt++;
+    
+    for (int i = 0; prompt[i] && b < 40; i++) {
+        unsigned char c = (unsigned char)prompt[i];
+        if (c >= 0x80 || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+            base[b++] = (char)c;
+        } else if (c == ' ' || c == '-') {
+            if (b > 0 && base[b-1] != ' ') {
+                base[b++] = ' ';
+            }
+        }
+    }
+    while (b > 0 && base[b-1] == ' ') b--;
+    base[b] = '\0';
+    
+    if (b == 0) strcpy(base, "Session");
+    
+    snprintf(out_name, out_len, "%s.txt", base);
+    
+    char path[512];
+    snprintf(path, sizeof(path), "chats/%s", out_name);
+    struct stat st;
+    int suffix = 1;
+    while (stat(path, &st) == 0 && suffix < 100) {
+        snprintf(out_name, out_len, "%s_%d.txt", base, suffix);
+        snprintf(path, sizeof(path), "chats/%s", out_name);
+        suffix++;
+    }
+}
+
 /* ---------------------------------------------------------------------------
  * format_file_size
  * --------------------------------------------------------------------------- */
@@ -723,15 +757,24 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
             nk_layout_row_dynamic(nk, 20, 1);
             if (nk_button_label(nk, "[ NEW CHAT ]")) {
                 char new_chat[256];
-                time_t t = time(NULL);
-                struct tm *tm_info = localtime(&t);
-                strftime(new_chat, sizeof(new_chat), "Session_%Y%m%d_%H%M%S.txt", tm_info);
+                char base[] = "New Chat";
+                snprintf(new_chat, sizeof(new_chat), "%s.txt", base);
+                char path[512];
+                snprintf(path, sizeof(path), "chats/%s", new_chat);
+                struct stat st;
+                int suffix = 1;
+                while (stat(path, &st) == 0 && suffix < 100) {
+                    snprintf(new_chat, sizeof(new_chat), "%s_%d.txt", base, suffix);
+                    snprintf(path, sizeof(path), "chats/%s", new_chat);
+                    suffix++;
+                }
                 
                 if (state->selected_chat >= 0 && state->selected_chat < state->chat_count) {
                     save_chat_history(state->chats[state->selected_chat], state->chat_history);
                 }
                 
                 state->chat_history[0] = '\0';
+                state->chat_last_len = 0;
                 
                 if (state->chat_count < 64) {
                     snprintf(state->chats[state->chat_count], 256, "%s", new_chat);
@@ -1094,12 +1137,20 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                     /* Auto-create chat if none active */
                     if (state->selected_chat == -1 && state->chat_count < 64) {
                         char new_chat[256];
-                        time_t t = time(NULL);
-                        struct tm *tm_info = localtime(&t);
-                        strftime(new_chat, sizeof(new_chat), "Session_%Y%m%d_%H%M%S.txt", tm_info);
+                        generate_chat_name_from_prompt(state->input_buffer, new_chat, sizeof(new_chat));
                         snprintf(state->chats[state->chat_count], 256, "%s", new_chat);
                         state->selected_chat = state->chat_count;
                         state->chat_count++;
+                    } else if (state->selected_chat >= 0 && 
+                               strncmp(state->chats[state->selected_chat], "New Chat", 8) == 0) {
+                        /* Rename "New Chat" based on first prompt */
+                        char old_path[512], new_path[512];
+                        snprintf(old_path, sizeof(old_path), "chats/%s", state->chats[state->selected_chat]);
+                        char new_chat[256];
+                        generate_chat_name_from_prompt(state->input_buffer, new_chat, sizeof(new_chat));
+                        snprintf(new_path, sizeof(new_path), "chats/%s", new_chat);
+                        rename(old_path, new_path);
+                        snprintf(state->chats[state->selected_chat], 256, "%s", new_chat);
                     }
 
                     pthread_mutex_lock(&state->chat_mutex);
