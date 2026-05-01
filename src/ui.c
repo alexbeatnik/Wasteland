@@ -806,15 +806,20 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
             state->chat_scroll_x = sx;
             state->chat_scroll_y = sy;
 
-            /* Spacer — restored to original size, no COPY CHAT button here */
-            nk_layout_row_dynamic(nk, 10, 1);
+            /* Spacer */
+            nk_layout_row_dynamic(nk, 6, 1);
             nk_spacing(nk, 1);
 
-            /* Prompt line */
-            nk_layout_row_dynamic(nk, 25, 1);
+            /* Prompt label */
+            nk_layout_row_dynamic(nk, 18, 1);
             nk_label_colored(nk, ">", NK_TEXT_LEFT, amber);
 
-            nk_layout_row_dynamic(nk, 30, 1);
+            /* Input field + icon button in one row.
+             *   \xe2\x96\xb6 = U+25B6 BLACK RIGHT-POINTING TRIANGLE (▶) — send
+             *   \xe2\x96\xa0 = U+25A0 BLACK SQUARE (■)                 — stop */
+            nk_layout_row_begin(nk, NK_DYNAMIC, 34, 2);
+
+            nk_layout_row_push(nk, 0.87f);
             int input_len = (int)strlen(state->input_buffer);
             nk_flags active = nk_edit_string(nk,
                 NK_EDIT_FIELD | NK_EDIT_SIG_ENTER,
@@ -824,22 +829,19 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                 nk_filter_default);
             state->input_buffer[input_len] = '\0';
 
-            /* While the model is generating, swap TRANSMIT for STOP so the
-             * same screen real estate doubles as the cancel control. Enter
-             * is also routed through this gate so the user can't queue a
-             * second prompt mid-generation. */
-            nk_layout_row_dynamic(nk, 30, 1);
+            nk_layout_row_push(nk, 0.13f);
             if (state->is_generating) {
-                if (nk_button_label(nk, "STOP")) {
+                /* ■ — click to cancel */
+                if (nk_button_label(nk, "\xe2\x96\xa0")) {
                     inference_cancel_generation(state->inference);
                 }
-            } else if ((active & NK_EDIT_COMMITED) ||
-                       nk_button_label(nk, "TRANSMIT"))
-            {
-                if (state->input_buffer[0] &&
+            } else {
+                /* ▶ — click (or Enter) to send */
+                int send = (active & NK_EDIT_COMMITED) ||
+                           nk_button_label(nk, "\xe2\x96\xb6");
+                if (send && state->input_buffer[0] &&
                     inference_is_model_loaded(state->inference))
                 {
-                    /* Append user message to visible history */
                     pthread_mutex_lock(&state->chat_mutex);
                     size_t hlen = strlen(state->chat_history);
                     size_t room = WASTELAND_MAX_CHAT_HISTORY - hlen - 1;
@@ -849,12 +851,14 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                     }
                     pthread_mutex_unlock(&state->chat_mutex);
 
-                    /* Hand prompt to the inference worker */
                     inference_submit_prompt(state->inference,
                                             state->input_buffer);
                     state->input_buffer[0] = '\0';
                 }
             }
+
+            nk_layout_row_end(nk);
+
 
             nk_group_end(nk);
         }

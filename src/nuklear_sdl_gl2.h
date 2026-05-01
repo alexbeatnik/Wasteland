@@ -64,11 +64,13 @@ static const char *nk_sdl_font_candidates[] = {
     NULL
 };
 
-/* Unicode ranges to bake: Basic Latin + Latin-1 Supplement + Cyrillic */
+/* Unicode ranges to bake: Basic Latin + Latin-1 Supplement + Cyrillic +
+ * Geometric Shapes (▶ ■ etc.) */
 static const nk_rune nk_sdl_unicode_ranges[] = {
     0x0020, 0x00FF,   /* Basic Latin + Latin-1 Supplement */
     0x0400, 0x04FF,   /* Cyrillic */
     0x2010, 0x2027,   /* General Punctuation subset */
+    0x25A0, 0x25FF,   /* Geometric Shapes (▶ ■ ◀ etc.) */
     0
 };
 
