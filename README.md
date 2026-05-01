@@ -114,7 +114,8 @@ GitHub Actions automatically builds and releases for all platforms on every tag:
 | Platform | Artifact |
 |----------|----------|
 | Linux | `Wasteland-linux.tar.gz` |
-| macOS | `Wasteland.dmg` |
+| macOS (Intel) | `Wasteland-macos-intel.dmg` |
+| macOS (Apple Silicon) | `Wasteland-macos-arm64.dmg` |
 | Windows | `Wasteland-windows.zip` |
 
 Push a tag to trigger a release:
