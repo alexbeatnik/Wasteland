@@ -47,6 +47,7 @@ struct inference_ctx {
     pthread_mutex_t prompt_mutex;
     pthread_cond_t  prompt_cond;
     char   prompt[MAX_PROMPT_LEN];
+    char   sys_prompt[MAX_PROMPT_LEN];
     int    has_prompt;
 
     /* Model / context (loaded from main, consumed by worker) */
@@ -240,11 +241,17 @@ int inference_take_load_result(inference_ctx_t *ictx)
 /* ---------------------------------------------------------------------------
  * Prompt / output
  * --------------------------------------------------------------------------- */
-void inference_submit_prompt(inference_ctx_t *ictx, const char *prompt)
+void inference_submit_prompt(inference_ctx_t *ictx, const char *sys_prompt, const char *prompt)
 {
     if (!ictx || !prompt) return;
 
     pthread_mutex_lock(&ictx->prompt_mutex);
+    if (sys_prompt) {
+        strncpy(ictx->sys_prompt, sys_prompt, MAX_PROMPT_LEN - 1);
+        ictx->sys_prompt[MAX_PROMPT_LEN - 1] = '\0';
+    } else {
+        ictx->sys_prompt[0] = '\0';
+    }
     strncpy(ictx->prompt, prompt, MAX_PROMPT_LEN - 1);
     ictx->prompt[MAX_PROMPT_LEN - 1] = '\0';
     ictx->has_prompt = 1;
@@ -421,8 +428,11 @@ void* inference_worker_thread(void *arg)
             break;
         }
         char prompt[MAX_PROMPT_LEN];
+        char sys_prompt[MAX_PROMPT_LEN];
         strncpy(prompt, ictx->prompt, MAX_PROMPT_LEN - 1);
         prompt[MAX_PROMPT_LEN - 1] = '\0';
+        strncpy(sys_prompt, ictx->sys_prompt, MAX_PROMPT_LEN - 1);
+        sys_prompt[MAX_PROMPT_LEN - 1] = '\0';
         ictx->has_prompt = 0;
         pthread_mutex_unlock(&ictx->prompt_mutex);
 
@@ -458,10 +468,18 @@ void* inference_worker_thread(void *arg)
 
         const char *tmpl = llama_model_chat_template(model, NULL);
         if (tmpl) {
-            struct llama_chat_message msgs[1];
-            msgs[0].role    = "user";
-            msgs[0].content = prompt;
-            int32_t fl = llama_chat_apply_template(tmpl, msgs, 1, true,
+            struct llama_chat_message msgs[2];
+            int n_msgs = 0;
+            if (sys_prompt[0] != '\0') {
+                msgs[n_msgs].role = "system";
+                msgs[n_msgs].content = sys_prompt;
+                n_msgs++;
+            }
+            msgs[n_msgs].role = "user";
+            msgs[n_msgs].content = prompt;
+            n_msgs++;
+
+            int32_t fl = llama_chat_apply_template(tmpl, msgs, n_msgs, true,
                                                    fmtd, (int32_t)sizeof(fmtd));
             if (fl > 0 && fl < (int32_t)sizeof(fmtd)) {
                 fmtd[fl] = '\0';

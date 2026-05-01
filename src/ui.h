@@ -38,6 +38,7 @@ typedef struct {
     pthread_mutex_t chat_mutex;
 
     char input_buffer[WASTELAND_MAX_PROMPT_LEN];
+    char system_prompt[1024];
 
     /* Local model vault */
     char models[WASTELAND_MAX_MODELS][WASTELAND_MAX_MODEL_PATH_LEN];
@@ -58,6 +59,11 @@ typedef struct {
     nk_uint chat_scroll_x;
     nk_uint chat_scroll_y;
     size_t  chat_last_len;
+
+    /* Multiple chats */
+    char chats[64][256];
+    int  chat_count;
+    int  selected_chat; /* index, -1 if no chat loaded */
     int  download_progress;      /* 0-100 */
     int  download_active;
     int  download_cancel;        /* set by UI, read by worker */
@@ -74,6 +80,13 @@ typedef struct {
 
 /* Scan models/ directory for .gguf files. Returns count (0..max_models). */
 int scan_local_models(char models_list[][WASTELAND_MAX_MODEL_PATH_LEN], int max_models);
+
+/* Scan chats/ directory for .txt files. Returns count. */
+int scan_local_chats(char chats_list[][256], int max_chats);
+
+/* Save and load chat history */
+void save_chat_history(const char *chat_name, const char *history);
+void load_chat_history(const char *chat_name, char *history, size_t max_len);
 
 /* Apply the retro amber-on-black Pip-Boy aesthetic. */
 void ui_apply_amber_theme(struct nk_context *nk);

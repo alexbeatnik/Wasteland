@@ -114,6 +114,11 @@ static void ensure_models_dir(void)
             perror("[main] mkdir(models)");
         }
     }
+    if (stat("chats", &st) == -1) {
+        if (platform_mkdir("chats") != 0) {
+            perror("[main] mkdir(chats)");
+        }
+    }
 }
 
 /* scan_local_models() is now defined in ui.c and declared in ui.h */
@@ -208,12 +213,36 @@ int main(int argc, char **argv)
     pthread_mutex_init(&state.chat_mutex, NULL);
     state.model_count = model_count;
     memcpy(state.models, models_tmp, sizeof(models_tmp));
+    
+    char chats_tmp[64][256] = {0};
+    state.chat_count = scan_local_chats(chats_tmp, 64);
+    memcpy(state.chats, chats_tmp, sizeof(chats_tmp));
+    if (state.chat_count > 0) {
+        state.selected_chat = 0;
+        load_chat_history(state.chats[0], state.chat_history, WASTELAND_MAX_CHAT_HISTORY);
+        state.chat_last_len = strlen(state.chat_history);
+        state.chat_scroll_y = (nk_uint)0x7FFFFFFF;
+    } else {
+        state.selected_chat = -1;
+    }
+
     state.selected_hub_model = -1;
     state.loading_model_index = -1;
     state.custom_hf_id[0] = '\0';
     state.download_cancel = 0;
     state.inference = inference;
     strncpy(state.status_msg, status_msg, sizeof(state.status_msg) - 1);
+
+    /* Load system prompt */
+    state.system_prompt[0] = '\0';
+    FILE *sys_fp = fopen("system_prompt.txt", "r");
+    if (sys_fp) {
+        size_t n = fread(state.system_prompt, 1, sizeof(state.system_prompt) - 1, sys_fp);
+        state.system_prompt[n] = '\0';
+        fclose(sys_fp);
+    }
+    char last_system_prompt[1024];
+    strcpy(last_system_prompt, state.system_prompt);
 
     /* Do not auto-load model on boot — loading llama.cpp model breaks
        NVIDIA GL context. Model must be loaded manually via UI after
@@ -287,6 +316,16 @@ int main(int argc, char **argv)
         }
 
         /* --- UI layout --- */
+        /* Auto-save system prompt if changed */
+        if (strcmp(state.system_prompt, last_system_prompt) != 0) {
+            strcpy(last_system_prompt, state.system_prompt);
+            FILE *f = fopen("system_prompt.txt", "w");
+            if (f) {
+                fputs(state.system_prompt, f);
+                fclose(f);
+            }
+        }
+
         int win_w, win_h;
         SDL_GetWindowSize(win, &win_w, &win_h);
         ui_render(nk, &state, win_w, win_h);
@@ -312,10 +351,16 @@ int main(int argc, char **argv)
      * code path can run between _Exit and process termination.
      * ----------------------------------------------------------------------- */
     state.running = 0;
+    
+    /* Save current chat on exit */
+    if (state.selected_chat >= 0 && state.selected_chat < state.chat_count) {
+        save_chat_history(state.chats[state.selected_chat], state.chat_history);
+    }
+    
     SDL_HideWindow(win);
 
     /* Wake the worker so any cond-wait returns. */
-    inference_submit_prompt(state.inference, "");
+    inference_submit_prompt(state.inference, "", "");
 
     int join_ok = platform_thread_join_timeout(worker_thread, 1500);
     if (join_ok == 0) {

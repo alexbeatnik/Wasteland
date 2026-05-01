@@ -30,7 +30,7 @@ int  inference_is_loading(inference_ctx_t *ctx);
 int  inference_take_load_result(inference_ctx_t *ctx);
 
 /* Prompt / output --------------------------------------------------------- */
-void   inference_submit_prompt(inference_ctx_t *ctx, const char *prompt);
+void   inference_submit_prompt(inference_ctx_t *ctx, const char *sys_prompt, const char *prompt);
 size_t inference_read_output(inference_ctx_t *ctx, char *buf, size_t size);
 int    inference_is_generating(inference_ctx_t *ctx);
 

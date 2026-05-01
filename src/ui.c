@@ -79,6 +79,67 @@ int scan_local_models(char models_list[][WASTELAND_MAX_MODEL_PATH_LEN], int max_
 }
 
 /* ---------------------------------------------------------------------------
+ * Chat persistence
+ * --------------------------------------------------------------------------- */
+int scan_local_chats(char chats_list[][256], int max_chats)
+{
+#ifdef _WIN32
+    WIN32_FIND_DATA fd;
+    HANDLE hFind = FindFirstFile("chats\\*.txt", &fd);
+    if (hFind == INVALID_HANDLE_VALUE) return 0;
+    int count = 0;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            snprintf(chats_list[count], 256, "%s", fd.cFileName);
+            count++;
+        }
+    } while (FindNextFile(hFind, &fd) != 0 && count < max_chats);
+    FindClose(hFind);
+    return count;
+#else
+    DIR *d = opendir("chats");
+    if (!d) return 0;
+    int count = 0;
+    struct dirent *ent;
+    while ((ent = readdir(d)) != NULL && count < max_chats) {
+        size_t len = strlen(ent->d_name);
+        if (len > 4 && strcmp(ent->d_name + len - 4, ".txt") == 0) {
+            snprintf(chats_list[count], 256, "%s", ent->d_name);
+            count++;
+        }
+    }
+    closedir(d);
+    return count;
+#endif
+}
+
+void save_chat_history(const char *chat_name, const char *history)
+{
+    if (!chat_name || !chat_name[0]) return;
+    char path[512];
+    snprintf(path, sizeof(path), "chats/%s", chat_name);
+    FILE *f = fopen(path, "w");
+    if (f) {
+        fputs(history, f);
+        fclose(f);
+    }
+}
+
+void load_chat_history(const char *chat_name, char *history, size_t max_len)
+{
+    history[0] = '\0';
+    if (!chat_name || !chat_name[0]) return;
+    char path[512];
+    snprintf(path, sizeof(path), "chats/%s", chat_name);
+    FILE *f = fopen(path, "r");
+    if (f) {
+        size_t n = fread(history, 1, max_len - 1, f);
+        history[n] = '\0';
+        fclose(f);
+    }
+}
+
+/* ---------------------------------------------------------------------------
  * format_file_size
  * --------------------------------------------------------------------------- */
 static void format_file_size(off_t bytes, char *out, size_t out_size)
@@ -640,6 +701,100 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
             nk_layout_row_dynamic(nk, 10, 1);
             nk_spacing(nk, 1);
 
+            /* ===== SYSTEM PROMPT ===== */
+            nk_layout_row_dynamic(nk, 20, 1);
+            nk_label_colored(nk, "SYSTEM PROMPT", NK_TEXT_LEFT, amber);
+            nk_layout_row_dynamic(nk, 2, 1);
+            nk_button_color(nk, amber);
+
+            nk_layout_row_dynamic(nk, 100, 1);
+            int sys_len = (int)strlen(state->system_prompt);
+            nk_edit_string(nk, NK_EDIT_BOX | NK_EDIT_MULTILINE,
+                           state->system_prompt, &sys_len, 1024,
+                           nk_filter_default);
+            state->system_prompt[sys_len] = '\0';
+
+            /* ===== CHATS ===== */
+            nk_layout_row_dynamic(nk, 20, 1);
+            nk_label_colored(nk, "CHATS", NK_TEXT_LEFT, amber);
+            nk_layout_row_dynamic(nk, 2, 1);
+            nk_button_color(nk, amber);
+
+            nk_layout_row_dynamic(nk, 20, 1);
+            if (nk_button_label(nk, "[ NEW CHAT ]")) {
+                char new_chat[256];
+                time_t t = time(NULL);
+                struct tm *tm_info = localtime(&t);
+                strftime(new_chat, sizeof(new_chat), "Session_%Y%m%d_%H%M%S.txt", tm_info);
+                
+                if (state->selected_chat >= 0 && state->selected_chat < state->chat_count) {
+                    save_chat_history(state->chats[state->selected_chat], state->chat_history);
+                }
+                
+                state->chat_history[0] = '\0';
+                
+                if (state->chat_count < 64) {
+                    snprintf(state->chats[state->chat_count], 256, "%s", new_chat);
+                    state->selected_chat = state->chat_count;
+                    state->chat_count++;
+                    save_chat_history(new_chat, "");
+                }
+            }
+
+            if (state->chat_count == 0) {
+                nk_layout_row_dynamic(nk, 20, 1);
+                nk_label_colored(nk, "No chats found.", NK_TEXT_CENTERED, col_dark_grey());
+            } else {
+                for (int i = 0; i < state->chat_count; i++) {
+                    int is_loaded = (state->selected_chat == i);
+                    nk_layout_row_dynamic(nk, 20, 1);
+                    if (is_loaded) {
+                        nk_label_colored(nk, state->chats[i], NK_TEXT_CENTERED, amber);
+                    } else {
+                        nk_label_colored(nk, state->chats[i], NK_TEXT_CENTERED, col_dark_grey());
+                    }
+
+                    nk_layout_row_dynamic(nk, 20, 2);
+                    char btn_label[128];
+                    if (is_loaded) {
+                        snprintf(btn_label, sizeof(btn_label), "[ ACTIVE ]");
+                    } else {
+                        snprintf(btn_label, sizeof(btn_label), "[ LOAD ]");
+                    }
+                    if (nk_button_label(nk, btn_label)) {
+                        if (!is_loaded) {
+                            if (state->selected_chat >= 0) {
+                                save_chat_history(state->chats[state->selected_chat], state->chat_history);
+                            }
+                            load_chat_history(state->chats[i], state->chat_history, WASTELAND_MAX_CHAT_HISTORY);
+                            state->selected_chat = i;
+                            state->chat_last_len = 0;
+                            state->chat_scroll_y = (nk_uint)0x7FFFFFFF;
+                        }
+                    }
+                    if (nk_button_label(nk, "[ DEL ]")) {
+                        char path[512];
+                        snprintf(path, sizeof(path), "chats/%s", state->chats[i]);
+                        remove(path);
+                        if (state->selected_chat == i) {
+                            state->chat_history[0] = '\0';
+                            state->selected_chat = -1;
+                        } else if (state->selected_chat > i) {
+                            state->selected_chat--;
+                        }
+                        for (int j = i; j < state->chat_count - 1; j++) {
+                            strcpy(state->chats[j], state->chats[j+1]);
+                        }
+                        state->chat_count--;
+                        i--;
+                    }
+                }
+            }
+
+            /* Spacer */
+            nk_layout_row_dynamic(nk, 10, 1);
+            nk_spacing(nk, 1);
+
             /* --- Network status footer --- */
             nk_layout_row_dynamic(nk, 2, 1);
             nk_button_color(nk, amber);
@@ -936,6 +1091,17 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                 if (send && state->input_buffer[0] &&
                     inference_is_model_loaded(state->inference))
                 {
+                    /* Auto-create chat if none active */
+                    if (state->selected_chat == -1 && state->chat_count < 64) {
+                        char new_chat[256];
+                        time_t t = time(NULL);
+                        struct tm *tm_info = localtime(&t);
+                        strftime(new_chat, sizeof(new_chat), "Session_%Y%m%d_%H%M%S.txt", tm_info);
+                        snprintf(state->chats[state->chat_count], 256, "%s", new_chat);
+                        state->selected_chat = state->chat_count;
+                        state->chat_count++;
+                    }
+
                     pthread_mutex_lock(&state->chat_mutex);
                     size_t hlen = strlen(state->chat_history);
                     size_t room = WASTELAND_MAX_CHAT_HISTORY - hlen - 1;
@@ -946,6 +1112,7 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                     pthread_mutex_unlock(&state->chat_mutex);
 
                     inference_submit_prompt(state->inference,
+                                            state->system_prompt,
                                             state->input_buffer);
                     state->input_buffer[0] = '\0';
                 }
