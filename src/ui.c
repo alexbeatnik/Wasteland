@@ -6,8 +6,13 @@
 #include "network.h"
 #include <string.h>
 #include <stdio.h>
-#include <dirent.h>
 #include <sys/stat.h>
+
+#ifdef _WIN32
+#  include <windows.h>
+#else
+#  include <dirent.h>
+#endif
 
 /* Nuklear declarations are pulled in via ui.h.  The actual implementation
  * lives in nuklear_impl.c so the header-guarded NK_IMPLEMENTATION is only
@@ -38,6 +43,22 @@ static struct nk_color col_mid_grey(void)   { return nk_rgb(0x44, 0x44, 0x44); }
  * --------------------------------------------------------------------------- */
 int scan_local_models(char models_list[][WASTELAND_MAX_MODEL_PATH_LEN], int max_models)
 {
+#ifdef _WIN32
+    WIN32_FIND_DATAA ffd;
+    HANDLE hFind = FindFirstFileA("models\\*.gguf", &ffd);
+    if (hFind == INVALID_HANDLE_VALUE) return 0;
+
+    int count = 0;
+    do {
+        if (count < max_models) {
+            snprintf(models_list[count], WASTELAND_MAX_MODEL_PATH_LEN,
+                     "models/%s", ffd.cFileName);
+            count++;
+        }
+    } while (FindNextFileA(hFind, &ffd) != 0);
+    FindClose(hFind);
+    return count;
+#else
     DIR *d = opendir("models");
     if (!d) return 0;
 
@@ -53,6 +74,7 @@ int scan_local_models(char models_list[][WASTELAND_MAX_MODEL_PATH_LEN], int max_
     }
     closedir(d);
     return count;
+#endif
 }
 
 /* ---------------------------------------------------------------------------
@@ -195,6 +217,44 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
     ui_apply_amber_theme(nk);
 
     struct nk_color amber = col_amber();
+
+    /* Poll async model load completion. Runs every frame so the UI can
+     * react the moment the load thread finishes. */
+    if (state->loading_model_index >= 0 &&
+        !inference_is_loading(state->inference)) {
+        int idx = state->loading_model_index;
+        const char *p = state->models[idx];
+        const char *slash = strrchr(p, '/');
+        const char *basename = slash ? slash + 1 : p;
+        struct stat fst;
+        char sz_str[32] = "?";
+        if (stat(p, &fst) == 0)
+            format_file_size(fst.st_size, sz_str, sizeof(sz_str));
+
+        int result = inference_take_load_result(state->inference);
+        if (result == 1) {
+            state->selected_model = idx;
+            if (!state->network_lockdown) {
+                if (lockdown_network() == 0) {
+                    state->network_lockdown = 1;
+                    snprintf(state->status_msg, sizeof(state->status_msg),
+                             "Loaded %s (%s). Lockdown active.",
+                             basename, sz_str);
+                } else {
+                    snprintf(state->status_msg, sizeof(state->status_msg),
+                             "Loaded %s. Lockdown FAILED.", basename);
+                }
+            } else {
+                snprintf(state->status_msg, sizeof(state->status_msg),
+                         "Switched to %s (%s).", basename, sz_str);
+            }
+        } else {
+            snprintf(state->status_msg, sizeof(state->status_msg),
+                     "Failed to load %s.", basename);
+            state->selected_model = -1;
+        }
+        state->loading_model_index = -1;
+    }
 
     if (nk_begin(nk, "Wasteland",
                  nk_rect(0, 0, width, height),
@@ -380,48 +440,45 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                     }
 
                     char btn_label[WASTELAND_MAX_MODEL_PATH_LEN + 32];
-                    if (state->selected_model == i) {
+                    int is_loaded  = (state->selected_model == i);
+                    int is_loading = (state->loading_model_index == i);
+                    if (is_loading) {
                         snprintf(btn_label, sizeof(btn_label),
-                                 "[ LOADED: %s | %s ]", basename, sz_str);
+                                 "[ LOADING: %s | %s ... ]", basename, sz_str);
+                    } else if (is_loaded) {
+                        snprintf(btn_label, sizeof(btn_label),
+                                 "[ UNLOAD: %s | %s ]", basename, sz_str);
                     } else {
                         snprintf(btn_label, sizeof(btn_label),
                                  "[ LOAD: %s | %s ]", basename, sz_str);
                     }
 
-                    if (nk_button_label(nk, btn_label)) {
-                        state->selected_model = i;
-                        snprintf(state->status_msg, sizeof(state->status_msg),
-                                 "Loading %s (%s)...", basename, sz_str);
-                        if (inference_load_model(state->inference,
-                                                  state->models[i]) == 0) {
-                            if (!state->network_lockdown) {
-                                if (lockdown_network() == 0) {
-                                    state->network_lockdown = 1;
-                                    snprintf(state->status_msg,
-                                             sizeof(state->status_msg),
-                                             "Loaded %s (%s). Lockdown active.",
-                                             basename, sz_str);
-                                } else {
-                                    snprintf(state->status_msg,
-                                             sizeof(state->status_msg),
-                                             "Loaded %s. Lockdown FAILED.",
-                                             basename);
-                                }
-                            } else {
-                                snprintf(state->status_msg,
-                                         sizeof(state->status_msg),
-                                         "Switched to %s (%s).",
-                                         basename, sz_str);
-                            }
+                    int load_busy = (state->loading_model_index >= 0);
+                    int gen_busy  = inference_is_generating(state->inference);
+                    if (nk_button_label(nk, btn_label) && !load_busy && !gen_busy) {
+                        if (is_loaded) {
+                            inference_unload_model(state->inference);
+                            state->selected_model = -1;
+                            snprintf(state->status_msg,
+                                     sizeof(state->status_msg),
+                                     "Unloaded %s.", basename);
                         } else {
                             snprintf(state->status_msg,
                                      sizeof(state->status_msg),
-                                     "Failed to load %s.", basename);
-                            state->selected_model = -1;
+                                     "Loading %s (%s)...", basename, sz_str);
+                            if (inference_load_model_async(state->inference,
+                                                           state->models[i]) == 0) {
+                                state->loading_model_index = i;
+                            } else {
+                                snprintf(state->status_msg,
+                                         sizeof(state->status_msg),
+                                         "Failed to start load for %s.",
+                                         basename);
+                            }
                         }
                     }
 
-                    if (nk_button_label(nk, "[ DELETE ]")) {
+                    if (nk_button_label(nk, "[ DELETE ]") && !load_busy && !gen_busy) {
                         if (remove(state->models[i]) == 0) {
                             /* If deleted model was loaded, unload it */
                             if (state->selected_model == i) {
@@ -455,6 +512,7 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
             /* --- Network status footer --- */
             nk_layout_row_dynamic(nk, 2, 1);
             nk_button_color(nk, amber);
+            nk_layout_row_dynamic(nk, 20, 1);
             if (state->network_lockdown) {
                 nk_label_colored(nk, "NET: LOCKDOWN ACTIVE",
                                  NK_TEXT_CENTERED, amber);

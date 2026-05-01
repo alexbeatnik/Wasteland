@@ -1,5 +1,10 @@
 /* ============================================================================
  * network.c — libcurl Downloader & seccomp Lockdown
+ * ============================================================================
+ *
+ * Cross-platform notes:
+ *   - seccomp is Linux-only; on macOS/Windows lockdown_network() is a no-op.
+ *   - curl and the HF API discovery work on all platforms.
  * ============================================================================ */
 
 #include "network.h"
@@ -7,8 +12,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <curl/curl.h>
-#include <seccomp.h>
-#include <sys/syscall.h>
+
+#ifdef __linux__
+#  include <seccomp.h>
+#  include <sys/syscall.h>
+#  include <sys/socket.h>
+#endif
 
 /* ---------------------------------------------------------------------------
  * In-memory curl buffer (used by HuggingFace API discovery)
@@ -228,31 +237,32 @@ int network_download_model(const char *model_id, const char *output_dir,
 }
 
 /* ---------------------------------------------------------------------------
- * seccomp network lockdown
+ * seccomp network lockdown (Linux only)
  * --------------------------------------------------------------------------- */
 int lockdown_network(void)
 {
+#ifdef __linux__
     scmp_filter_ctx ctx = seccomp_init(SCMP_ACT_ALLOW);
     if (ctx == NULL) {
         perror("[seccomp] seccomp_init");
         return -1;
     }
 
+    /* Block creation of new IP sockets only. Filtering on address-family
+     * args lets the X11 / Wayland Unix-domain socket keep working — those
+     * are already open and use AF_UNIX, while we only want to deny new
+     * outbound IPv4/IPv6/raw network endpoints.
+     *
+     * We can't filter connect/bind/sendto by sockaddr family because
+     * seccomp cannot dereference user-space pointers; gating socket()
+     * itself is sufficient since no new INET fd can be obtained. */
     int rc = 0;
-    rc |= seccomp_rule_add(ctx, SCMP_ACT_KILL, SCMP_SYS(socket),      0);
-    rc |= seccomp_rule_add(ctx, SCMP_ACT_KILL, SCMP_SYS(socketpair),  0);
-    rc |= seccomp_rule_add(ctx, SCMP_ACT_KILL, SCMP_SYS(bind),        0);
-    rc |= seccomp_rule_add(ctx, SCMP_ACT_KILL, SCMP_SYS(listen),      0);
-    rc |= seccomp_rule_add(ctx, SCMP_ACT_KILL, SCMP_SYS(accept),      0);
-    rc |= seccomp_rule_add(ctx, SCMP_ACT_KILL, SCMP_SYS(accept4),     0);
-    rc |= seccomp_rule_add(ctx, SCMP_ACT_KILL, SCMP_SYS(connect),     0);
-    rc |= seccomp_rule_add(ctx, SCMP_ACT_KILL, SCMP_SYS(sendto),      0);
-    rc |= seccomp_rule_add(ctx, SCMP_ACT_KILL, SCMP_SYS(recvfrom),    0);
-    rc |= seccomp_rule_add(ctx, SCMP_ACT_KILL, SCMP_SYS(sendmsg),     0);
-    rc |= seccomp_rule_add(ctx, SCMP_ACT_KILL, SCMP_SYS(recvmsg),     0);
-    rc |= seccomp_rule_add(ctx, SCMP_ACT_KILL, SCMP_SYS(setsockopt),  0);
-    rc |= seccomp_rule_add(ctx, SCMP_ACT_KILL, SCMP_SYS(getsockopt),  0);
-    rc |= seccomp_rule_add(ctx, SCMP_ACT_KILL, SCMP_SYS(shutdown),    0);
+    rc |= seccomp_rule_add(ctx, SCMP_ACT_KILL, SCMP_SYS(socket), 1,
+                           SCMP_A0(SCMP_CMP_EQ, AF_INET));
+    rc |= seccomp_rule_add(ctx, SCMP_ACT_KILL, SCMP_SYS(socket), 1,
+                           SCMP_A0(SCMP_CMP_EQ, AF_INET6));
+    rc |= seccomp_rule_add(ctx, SCMP_ACT_KILL, SCMP_SYS(socket), 1,
+                           SCMP_A0(SCMP_CMP_EQ, AF_PACKET));
 
     if (rc != 0) {
         fprintf(stderr, "[seccomp] Failed to add kill rules\n");
@@ -269,6 +279,10 @@ int lockdown_network(void)
     }
 
     printf("[seccomp] Network lockdown active. "
-           "Process will be SIGKILL'd on any socket syscall.\n");
+           "New AF_INET/AF_INET6/AF_PACKET sockets will SIGKILL.\n");
     return 0;
+#else
+    fprintf(stderr, "[seccomp] Network lockdown not available on this platform.\n");
+    return 0; /* no-op on macOS / Windows */
+#endif
 }

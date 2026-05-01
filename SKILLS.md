@@ -5,8 +5,9 @@
 This project does not use a formal skill system. The following domains are relevant for contributors:
 
 ### Systems Programming
-- Linux pthreads, mutexes, condition variables
-- POSIX file I/O and directory scanning (`dirent.h`, `sys/stat.h`)
+- POSIX / Windows threads (`pthreads`, `CreateThread`)
+- Mutexes, condition variables, thread-safe queues
+- Cross-platform file I/O (`dirent.h` vs `FindFirstFileA`)
 - Signal-safe and async-cancel-safe thread design
 
 ### Graphics & UI
@@ -20,17 +21,20 @@ This project does not use a formal skill system. The following domains are relev
 - GGUF model format
 - Tokenization (`llama_tokenize`, `llama_token_to_piece`)
 - KV-cache management and batch decoding
+- Sampling strategies (greedy, temperature, top-p)
 
 ### Network & Security
 - libcurl multi/easy API
 - HTTP file download with progress callbacks
-- Linux seccomp-bpf filter installation
-- Syscall interception and process sandboxing
+- HuggingFace API discovery (`/api/models/.../tree/main`)
+- Linux seccomp-bpf filter installation (`SCMP_ACT_KILL`)
+- Cross-platform security model (feature degrade gracefully)
 
 ### Build Engineering
 - CMake target configuration
+- Cross-platform `find_package` / `find_library` handling
 - Git submodule management
-- Cross-platform library linking (SDL2, OpenGL, curl, seccomp)
+- Platform-specific linking (SDL2, OpenGL, curl, seccomp, ws2_32, winmm)
 
 ## Version
 

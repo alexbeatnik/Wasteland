@@ -1,0 +1,153 @@
+name: Build
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake libsdl2-dev libcurl4-openssl-dev libseccomp-dev
+
+      - name: Build
+        run: |
+          mkdir build && cd build
+          cmake .. -DCMAKE_BUILD_TYPE=Release
+          make -j$(nproc)
+
+      - name: Package
+        run: |
+          mkdir -p Wasteland-linux
+          cp build/Wasteland Wasteland-linux/
+          cp -r models Wasteland-linux/ || true
+          tar czf Wasteland-linux.tar.gz Wasteland-linux
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Wasteland-linux
+          path: Wasteland-linux.tar.gz
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          brew install cmake sdl2 curl
+
+      - name: Build
+        run: |
+          mkdir build && cd build
+          cmake .. -DCMAKE_BUILD_TYPE=Release
+          make -j$(sysctl -n hw.ncpu)
+
+      - name: Package
+        run: |
+          mkdir -p Wasteland.app/Contents/MacOS
+          mkdir -p Wasteland.app/Contents/Resources
+          cp build/Wasteland Wasteland.app/Contents/MacOS/
+          # Create basic Info.plist
+          cat > Wasteland.app/Contents/Info.plist << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key>
+              <string>Wasteland</string>
+              <key>CFBundleIdentifier</key>
+              <string>com.wasteland.terminal</string>
+              <key>CFBundleName</key>
+              <string>Wasteland Terminal</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>0.1</string>
+          </dict>
+          </plist>
+          EOF
+          hdiutil create -volname "Wasteland" -srcfolder Wasteland.app -ov -format UDZO Wasteland.dmg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Wasteland-macos
+          path: Wasteland.dmg
+
+  build-windows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install MinGW and dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64 cmake
+          # Download prebuilt SDL2 and curl for MinGW
+          mkdir -p mingw-deps
+          cd mingw-deps
+          wget -q https://github.com/libsdl-org/SDL/releases/download/release-2.30.0/SDL2-devel-2.30.0-mingw.tar.gz
+          tar xzf SDL2-devel-2.30.0-mingw.tar.gz
+          cp -r SDL2-2.30.0/x86_64-w64-mingw32/* /usr/x86_64-w64-mingw32/
+
+      - name: Build
+        run: |
+          mkdir build-win && cd build-win
+          cmake .. -DCMAKE_TOOLCHAIN_FILE=../cmake/mingw-w64-x86_64.cmake -DCMAKE_BUILD_TYPE=Release
+          cmake --build . -j$(nproc)
+
+      - name: Package
+        run: |
+          mkdir -p Wasteland-windows
+          cp build-win/Wasteland.exe Wasteland-windows/
+          # Copy SDL2 DLL
+          cp /usr/x86_64-w64-mingw32/bin/SDL2.dll Wasteland-windows/ || true
+          # Copy curl DLLs
+          cp /usr/x86_64-w64-mingw32/bin/libcurl*.dll Wasteland-windows/ || true
+          cp /usr/x86_64-w64-mingw32/bin/libwinpthread*.dll Wasteland-windows/ || true
+          zip -r Wasteland-windows.zip Wasteland-windows
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Wasteland-windows
+          path: Wasteland-windows.zip
+
+  release:
+    needs: [build-linux, build-macos, build-windows]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Wasteland-linux
+      - uses: actions/download-artifact@v4
+        with:
+          name: Wasteland-macos
+      - uses: actions/download-artifact@v4
+        with:
+          name: Wasteland-windows
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            Wasteland-linux.tar.gz
+            Wasteland.dmg
+            Wasteland-windows.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

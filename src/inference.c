@@ -43,6 +43,13 @@ struct inference_ctx {
     struct llama_model  *model;
     struct llama_context *ctx;
 
+    /* Async load state */
+    pthread_t    load_thread;
+    char         load_path[1024];
+    volatile int loading;       /* 1 while a load is in flight */
+    volatile int load_result;   /* 0 = none, 1 = ok, -1 = fail */
+    volatile int load_thread_started; /* 1 if load_thread is joinable */
+
     volatile int running;
 };
 
@@ -74,6 +81,13 @@ void inference_shutdown(inference_ctx_t *ictx)
     pthread_cond_broadcast(&ictx->prompt_cond);
     pthread_mutex_unlock(&ictx->prompt_mutex);
 
+    /* If a model load is still in flight, wait for it before tearing
+     * down — llama.cpp internals are not async-cancel-safe. */
+    if (ictx->load_thread_started) {
+        pthread_join(ictx->load_thread, NULL);
+        ictx->load_thread_started = 0;
+    }
+
     pthread_mutex_destroy(&ictx->output_mutex);
     pthread_mutex_destroy(&ictx->prompt_mutex);
     pthread_cond_destroy(&ictx->prompt_cond);
@@ -103,6 +117,8 @@ int inference_load_model(inference_ctx_t *ictx, const char *path)
 
     struct llama_model_params mparams = llama_model_default_params();
     mparams.n_gpu_layers = 0; /* CPU-only default for portability */
+    mparams.use_mmap   = false; /* avoid mmap conflicting with NVIDIA GL driver */
+    mparams.use_mlock  = false;
 
     ictx->model = llama_model_load_from_file(path, mparams);
     if (!ictx->model) {
@@ -121,12 +137,12 @@ int inference_load_model(inference_ctx_t *ictx, const char *path)
         llama_model_free(ictx->model);
         ictx->model = NULL;
         pthread_mutex_unlock(&ictx->model_mutex);
-        fprintf(stderr, "[inference] Failed to create context\n");
+        fprintf(stderr, "[inference] Failed to init context: %s\n", path);
         return -1;
     }
 
     pthread_mutex_unlock(&ictx->model_mutex);
-    fprintf(stderr, "[inference] Model loaded: %s\n", path);
+    fprintf(stderr, "[inference] Model + ctx loaded: %s\n", path);
     return 0;
 }
 
@@ -152,6 +168,62 @@ int inference_is_model_loaded(inference_ctx_t *ictx)
     int loaded = (ictx->model != NULL && ictx->ctx != NULL);
     pthread_mutex_unlock(&ictx->model_mutex);
     return loaded;
+}
+
+/* ---------------------------------------------------------------------------
+ * Async model loading — keeps the UI thread responsive during multi-second
+ * GGUF mmap/decode work.
+ * --------------------------------------------------------------------------- */
+static void* inference_load_thread_fn(void *arg)
+{
+    inference_ctx_t *ictx = (inference_ctx_t *)arg;
+    int rc = inference_load_model(ictx, ictx->load_path);
+    ictx->load_result = (rc == 0) ? 1 : -1;
+    ictx->loading = 0;
+    return NULL;
+}
+
+int inference_load_model_async(inference_ctx_t *ictx, const char *path)
+{
+    if (!ictx || !path) return -1;
+    if (ictx->loading) return -1;
+
+    /* Reap a previously finished thread so we can reuse load_thread. */
+    if (ictx->load_thread_started) {
+        pthread_join(ictx->load_thread, NULL);
+        ictx->load_thread_started = 0;
+    }
+
+    strncpy(ictx->load_path, path, sizeof(ictx->load_path) - 1);
+    ictx->load_path[sizeof(ictx->load_path) - 1] = '\0';
+    ictx->load_result = 0;
+    ictx->loading = 1;
+
+    if (pthread_create(&ictx->load_thread, NULL,
+                       inference_load_thread_fn, ictx) != 0) {
+        ictx->loading = 0;
+        return -1;
+    }
+    ictx->load_thread_started = 1;
+    return 0;
+}
+
+int inference_is_loading(inference_ctx_t *ictx)
+{
+    if (!ictx) return 0;
+    return ictx->loading;
+}
+
+int inference_take_load_result(inference_ctx_t *ictx)
+{
+    if (!ictx) return 0;
+    int r = ictx->load_result;
+    ictx->load_result = 0;
+    if (r != 0 && ictx->load_thread_started) {
+        pthread_join(ictx->load_thread, NULL);
+        ictx->load_thread_started = 0;
+    }
+    return r;
 }
 
 /* ---------------------------------------------------------------------------
@@ -238,7 +310,7 @@ void* inference_worker_thread(void *arg)
         ictx->generating = 1;
         pthread_mutex_unlock(&ictx->output_mutex);
 
-        /* ---- Tokenize prompt ---- */
+        /* ---- Tokenize raw prompt (chat template disabled for stability) ---- */
         const struct llama_vocab *vocab = llama_model_get_vocab(model);
         llama_token prompt_tokens[4096];
         int n_tokens = llama_tokenize(vocab, prompt, (int)strlen(prompt),
@@ -309,8 +381,7 @@ void* inference_worker_thread(void *arg)
             if (llama_decode(ctx, next) != 0)
                 break;
 
-            /* Brief yield — creates a natural typing cadence and prevents
-               the worker from monopolising a CPU core. */
+            /* Brief yield — creates a natural typing cadence */
             usleep(5000); /* 5 ms */
         }
 

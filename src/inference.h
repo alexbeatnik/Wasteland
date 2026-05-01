@@ -21,6 +21,14 @@ int  inference_load_model(inference_ctx_t *ctx, const char *path);
 void inference_unload_model(inference_ctx_t *ctx);
 int  inference_is_model_loaded(inference_ctx_t *ctx);
 
+/* Async load. Returns 0 if a load was started, -1 if one is already in
+ * flight or args are bad. UI polls inference_is_loading(); once it goes
+ * back to 0, inference_take_load_result() yields 1 (success), -1 (fail),
+ * or 0 (no pending result). Taking the result clears it. */
+int  inference_load_model_async(inference_ctx_t *ctx, const char *path);
+int  inference_is_loading(inference_ctx_t *ctx);
+int  inference_take_load_result(inference_ctx_t *ctx);
+
 /* Prompt / output --------------------------------------------------------- */
 void   inference_submit_prompt(inference_ctx_t *ctx, const char *prompt);
 size_t inference_read_output(inference_ctx_t *ctx, char *buf, size_t size);

@@ -14,6 +14,7 @@
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_opengl.h>
 #include <GL/gl.h>
+#include <unistd.h>
 
 /* Nuklear forward declarations (assumes <nuklear.h> is included before this) */
 NK_API struct nk_context* nk_sdl_init(SDL_Window *win);

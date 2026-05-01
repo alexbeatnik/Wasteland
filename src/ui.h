@@ -42,7 +42,8 @@ typedef struct {
     /* Local model vault */
     char models[WASTELAND_MAX_MODELS][WASTELAND_MAX_MODEL_PATH_LEN];
     int  model_count;
-    int  selected_model; /* index of currently loaded model, -1 if none */
+    int  selected_model;        /* index of currently loaded model, -1 if none */
+    int  loading_model_index;   /* index being loaded async, -1 if none */
 
     /* Hub / download state */
     int  selected_hub_model; /* 0..WASTELAND_MAX_HUB_MODELS-1, -1 if none */

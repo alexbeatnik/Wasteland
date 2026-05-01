@@ -35,15 +35,23 @@ target_include_directories(Wasteland PRIVATE
 # ---------------------------------------------------------------------------
 # Compiler flags
 # ---------------------------------------------------------------------------
-target_compile_definitions(Wasteland PRIVATE _GNU_SOURCE)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_compile_definitions(Wasteland PRIVATE _GNU_SOURCE)
+endif()
 
-target_compile_options(Wasteland PRIVATE
-    -O0
-    -g
-    -march=native
-    -Wall
-    -Wextra
-)
+if(NOT MSVC)
+    target_compile_options(Wasteland PRIVATE
+        -O3
+        -march=native
+        -Wall
+        -Wextra
+    )
+else()
+    target_compile_options(Wasteland PRIVATE
+        /O2
+        /W4
+    )
+endif()
 
 # ---------------------------------------------------------------------------
 # Dependencies
@@ -52,7 +60,11 @@ find_package(SDL2 REQUIRED)
 find_package(OpenGL REQUIRED)
 find_package(CURL REQUIRED)
 find_package(Threads REQUIRED)
-find_library(SECCOMP_LIBRARY seccomp REQUIRED)
+
+# seccomp is Linux-only
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_library(SECCOMP_LIBRARY seccomp)
+endif()
 
 # SDL2 target compatibility (older FindSDL2 modules)
 if(TARGET SDL2::SDL2)
@@ -81,7 +93,22 @@ target_link_libraries(Wasteland PRIVATE
     OpenGL::GL
     ${SDL2_LINK_TARGET}
     ${CURL_LINK_TARGET}
-    ${SECCOMP_LIBRARY}
     Threads::Threads
-    m
 )
+
+if(SECCOMP_LIBRARY)
+    target_link_libraries(Wasteland PRIVATE ${SECCOMP_LIBRARY})
+    target_compile_definitions(Wasteland PRIVATE WASTELAND_HAS_SECCOMP=1)
+endif()
+
+# Platform-specific libs
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(Wasteland PRIVATE m)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    # macOS frameworks are handled by find_package
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    target_link_libraries(Wasteland PRIVATE
+        ws2_32
+        winmm
+    )
+endif()
