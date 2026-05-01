@@ -52,6 +52,7 @@ typedef struct {
 
     int  network_lockdown;
     int  is_generating;
+    int  left_panel_collapsed; /* 1 = left panel hidden, 0 = visible */
 
     /* Chat scroll state (auto-scroll-to-bottom on new content) */
     nk_uint chat_scroll_x;

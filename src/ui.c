@@ -367,9 +367,18 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
         nk_label_colored(nk, "WASTELAND TERMINAL v0.1",
                          NK_TEXT_CENTERED, amber);
 
-        nk_layout_row_dynamic(nk, 20, 3);
+        /* Status row: [toggle] | SYS | status | NET
+         * \xc2\xab = U+00AB << (collapse)  \xc2\xbb = U+00BB >> (expand) */
+        nk_layout_row_begin(nk, NK_DYNAMIC, 20, 4);
+        nk_layout_row_push(nk, 0.08f);
+        if (nk_button_label(nk, state->left_panel_collapsed
+                                ? "\xc2\xbb" : "\xc2\xab")) {
+            state->left_panel_collapsed = !state->left_panel_collapsed;
+        }
+        nk_layout_row_push(nk, 0.25f);
         nk_label_colored(nk, "SYS: ONLINE", NK_TEXT_LEFT, amber);
 
+        nk_layout_row_push(nk, 0.40f);
         char status[128];
         if (state->is_generating) {
             snprintf(status, sizeof(status), "INF: GENERATING...");
@@ -380,6 +389,7 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
         }
         nk_label_colored(nk, status, NK_TEXT_CENTERED, amber);
 
+        nk_layout_row_push(nk, 0.27f);
         if (state->network_lockdown) {
             nk_label_colored(nk, "NET: DISCONNECTED",
                              NK_TEXT_RIGHT, amber);
@@ -387,12 +397,18 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
             nk_label_colored(nk, "NET: AVAILABLE",
                              NK_TEXT_RIGHT, amber);
         }
+        nk_layout_row_end(nk);
 
         /* =================== MAIN SPLIT AREA =================== */
-        nk_layout_row_dynamic(nk, height - 70, 2);
+        if (state->left_panel_collapsed) {
+            nk_layout_row_dynamic(nk, height - 70, 1);
+        } else {
+            nk_layout_row_dynamic(nk, height - 70, 2);
+        }
 
         /* --------------------- LEFT PANEL --------------------- */
-        if (nk_group_begin(nk, "LeftPanel", NK_WINDOW_BORDER)) {
+        if (!state->left_panel_collapsed &&
+            nk_group_begin(nk, "LeftPanel", NK_WINDOW_BORDER)) {
 
             /* ===== HUB MODELS ===== */
             nk_layout_row_dynamic(nk, 20, 1);
