@@ -210,6 +210,42 @@ static void* download_thread_fn(void *arg)
 }
 
 /* ---------------------------------------------------------------------------
+ * count_wrap_lines
+ *
+ * Estimate how many wrapped lines `nk_label_*_wrap` will produce for `text`
+ * given an available pixel width. Uses the active font's own width measure
+ * so it stays accurate for non-monospace fonts. Greedy: fits as many chars
+ * per line as possible, then prefers to break at the last whitespace.
+ * --------------------------------------------------------------------------- */
+static int count_wrap_lines(const struct nk_user_font *font,
+                            const char *text, int len, float panel_w)
+{
+    if (len <= 0 || !font || !font->width || panel_w <= 1.0f) return 1;
+    int lines = 0;
+    int off = 0;
+    while (off < len) {
+        int lo = 1, hi = len - off, fit = 1;
+        while (lo <= hi) {
+            int mid = (lo + hi) / 2;
+            float w = font->width(font->userdata, font->height,
+                                  text + off, mid);
+            if (w <= panel_w) { fit = mid; lo = mid + 1; }
+            else              { hi = mid - 1; }
+        }
+        if (off + fit < len) {
+            int i = fit;
+            while (i > fit / 2 && text[off + i - 1] != ' ') i--;
+            if (i > fit / 2) fit = i;
+        }
+        off += fit;
+        while (off < len && text[off] == ' ') off++;
+        lines++;
+        if (lines > 200) break; /* sanity */
+    }
+    return lines > 0 ? lines : 1;
+}
+
+/* ---------------------------------------------------------------------------
  * ui_render
  * --------------------------------------------------------------------------- */
 void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
@@ -550,18 +586,42 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                                                "ChatHistory",
                                                NK_WINDOW_BORDER))
             {
+                /* Probe the available content width inside the group by
+                 * placing one tiny invisible row and reading its bounds.
+                 * Subsequent rows use the same width via row_dynamic. */
+                const struct nk_user_font *font = nk->style.font;
+                float font_h = font ? font->height : 14.0f;
+
+                nk_layout_row_dynamic(nk, 1, 1);
+                struct nk_rect probe = nk_widget_bounds(nk);
+                nk_spacing(nk, 1);
+                /* Reserve a few px so the wrap measure is not flush with
+                 * the right edge — Nuklear's wrapper has its own padding. */
+                float panel_w = probe.w - 8.0f;
+                if (panel_w < 32.0f) panel_w = 32.0f;
+
                 const char *p   = state->chat_history;
                 const char *end = p + chat_len;
                 while (p < end) {
                     const char *eol = memchr(p, '\n', (size_t)(end - p));
                     size_t llen = eol ? (size_t)(eol - p)
                                       : (size_t)(end - p);
-                    char line[2048];
-                    if (llen >= sizeof(line)) llen = sizeof(line) - 1;
-                    memcpy(line, p, llen);
-                    line[llen] = '\0';
-                    nk_layout_row_dynamic(nk, 16, 1);
-                    nk_label_colored(nk, line, NK_TEXT_LEFT, amber);
+                    if (llen == 0) {
+                        nk_layout_row_dynamic(nk, font_h, 1);
+                        nk_label_colored(nk, "", NK_TEXT_LEFT, amber);
+                    } else {
+                        char line[4096];
+                        if (llen >= sizeof(line)) llen = sizeof(line) - 1;
+                        memcpy(line, p, llen);
+                        line[llen] = '\0';
+
+                        int wraps = count_wrap_lines(font, line,
+                                                     (int)llen, panel_w);
+                        nk_layout_row_dynamic(nk,
+                                              font_h * (float)wraps + 2.0f,
+                                              1);
+                        nk_label_colored_wrap(nk, line, amber);
+                    }
                     p = eol ? eol + 1 : end;
                 }
                 nk_group_scrolled_end(nk);

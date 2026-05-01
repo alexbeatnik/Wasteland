@@ -24,6 +24,11 @@
 #define MAX_PROMPT_LEN     4096
 #define MAX_NEW_TOKENS     2048
 
+/* Longest literal we strip ("</think>" = 8 bytes). The carry buffer must
+ * hold up to (longest - 1) trailing bytes between pieces so a tag split
+ * across two tokens still matches. */
+#define TAG_CARRY_MAX 7
+
 struct inference_ctx {
     /* Output buffer (producer: worker, consumer: main) */
     pthread_mutex_t output_mutex;
@@ -32,6 +37,11 @@ struct inference_ctx {
     size_t output_read_pos;
     int    generating;
     volatile int cancel_generation; /* set by UI, polled by worker */
+
+    /* Per-prompt state for stripping <think>/</think> markers from the
+     * stream while keeping the reasoning text itself. */
+    char   tag_carry[TAG_CARRY_MAX];
+    size_t tag_carry_len;
 
     /* Prompt queue (producer: main, consumer: worker) */
     pthread_mutex_t prompt_mutex;
@@ -279,6 +289,113 @@ void inference_cancel_generation(inference_ctx_t *ictx)
 }
 
 /* ---------------------------------------------------------------------------
+ * <think>-tag stripper
+ *
+ * Qwen3-style models emit reasoning wrapped in literal "<think>...</think>"
+ * markers. The user wants the reasoning text but not the markup, so we drop
+ * just the tag bytes from the byte stream. A carry buffer holds the last
+ * few unprocessed bytes between calls so a tag split across two token
+ * pieces (e.g. "<th" then "ink>") is still detected.
+ * --------------------------------------------------------------------------- */
+static void output_append_locked(inference_ctx_t *ictx,
+                                 const char *src, size_t n)
+{
+    if (n == 0) return;
+    size_t space = OUTPUT_BUFFER_SIZE - ictx->output_write_pos - 1;
+    if (n > space) n = space;
+    if (n == 0) return;
+    memcpy(ictx->output_buffer + ictx->output_write_pos, src, n);
+    ictx->output_write_pos += n;
+    ictx->output_buffer[ictx->output_write_pos] = '\0';
+}
+
+static void emit_filtered_piece(inference_ctx_t *ictx,
+                                const char *piece, size_t n)
+{
+    static const char  tag_open[]  = "<think>";
+    static const char  tag_close[] = "</think>";
+    static const size_t open_len   = sizeof(tag_open)  - 1; /* 7 */
+    static const size_t close_len  = sizeof(tag_close) - 1; /* 8 */
+    static const size_t reserve    = TAG_CARRY_MAX;         /* 7 */
+
+    /* Stage = previous carry + new piece. Cap at the local buffer size. */
+    char buf[256];
+    size_t blen = 0;
+    if (ictx->tag_carry_len > 0) {
+        memcpy(buf, ictx->tag_carry, ictx->tag_carry_len);
+        blen = ictx->tag_carry_len;
+    }
+    size_t take = sizeof(buf) - blen;
+    if (n < take) take = n;
+    memcpy(buf + blen, piece, take);
+    blen += take;
+
+    pthread_mutex_lock(&ictx->output_mutex);
+
+    size_t pos = 0;
+    while (pos < blen) {
+        /* Find the earliest occurrence of either tag at or after pos. */
+        const char *m_open  = NULL;
+        const char *m_close = NULL;
+        for (size_t i = pos; i + open_len <= blen; i++) {
+            if (memcmp(buf + i, tag_open, open_len) == 0) {
+                m_open = buf + i; break;
+            }
+        }
+        for (size_t i = pos; i + close_len <= blen; i++) {
+            if (memcmp(buf + i, tag_close, close_len) == 0) {
+                m_close = buf + i; break;
+            }
+        }
+
+        const char *m = NULL;
+        size_t      mlen = 0;
+        if (m_open && (!m_close || m_open <= m_close)) {
+            m = m_open; mlen = open_len;
+        } else if (m_close) {
+            m = m_close; mlen = close_len;
+        }
+
+        if (m) {
+            /* Emit safe content before the tag, then skip the tag itself. */
+            size_t safe = (size_t)(m - buf);
+            if (safe > pos) output_append_locked(ictx, buf + pos, safe - pos);
+            pos = safe + mlen;
+        } else {
+            /* No tag in [pos, blen). Anything before (blen - reserve) can't
+             * be the start of a future tag, so it's safe to emit. The last
+             * up-to-`reserve` bytes go into carry for next call. */
+            size_t safe_end = pos;
+            if (blen > reserve && blen - reserve > pos) safe_end = blen - reserve;
+            if (safe_end > pos) {
+                output_append_locked(ictx, buf + pos, safe_end - pos);
+                pos = safe_end;
+            }
+            break;
+        }
+    }
+
+    pthread_mutex_unlock(&ictx->output_mutex);
+
+    /* Save unprocessed tail as the new carry. */
+    size_t tail = blen - pos;
+    if (tail > TAG_CARRY_MAX) tail = TAG_CARRY_MAX;
+    if (tail > 0) memcpy(ictx->tag_carry, buf + pos, tail);
+    ictx->tag_carry_len = tail;
+}
+
+static void emit_filtered_flush(inference_ctx_t *ictx)
+{
+    /* End of generation: any leftover carry can't be the start of a tag,
+     * so flush it verbatim. */
+    if (ictx->tag_carry_len == 0) return;
+    pthread_mutex_lock(&ictx->output_mutex);
+    output_append_locked(ictx, ictx->tag_carry, ictx->tag_carry_len);
+    pthread_mutex_unlock(&ictx->output_mutex);
+    ictx->tag_carry_len = 0;
+}
+
+/* ---------------------------------------------------------------------------
  * Worker thread
  * --------------------------------------------------------------------------- */
 void* inference_worker_thread(void *arg)
@@ -309,8 +426,9 @@ void* inference_worker_thread(void *arg)
 
         if (!model || !ctx) continue;
 
-        /* ---- Reset output buffer + cancel flag ---- */
+        /* ---- Reset output buffer + cancel flag + tag carry ---- */
         ictx->cancel_generation = 0;
+        ictx->tag_carry_len = 0;
         pthread_mutex_lock(&ictx->output_mutex);
         ictx->output_write_pos = 0;
         ictx->output_read_pos  = 0;
@@ -397,24 +515,13 @@ void* inference_worker_thread(void *arg)
             if (llama_vocab_is_eog(vocab, new_token))
                 break;
 
-            /* Convert token to UTF-8 piece */
+            /* Convert token to UTF-8 piece, then strip <think>/</think>
+             * markers as we stream — see emit_filtered_piece(). */
             char piece[128];
             int n = llama_token_to_piece(vocab, new_token,
                                          piece, sizeof(piece) - 1,
                                          0, true);
-            if (n > 0) {
-                piece[n] = '\0';
-
-                pthread_mutex_lock(&ictx->output_mutex);
-                size_t space = OUTPUT_BUFFER_SIZE - ictx->output_write_pos - 1;
-                if ((size_t)n < space) {
-                    memcpy(ictx->output_buffer + ictx->output_write_pos,
-                           piece, n);
-                    ictx->output_write_pos += n;
-                    ictx->output_buffer[ictx->output_write_pos] = '\0';
-                }
-                pthread_mutex_unlock(&ictx->output_mutex);
-            }
+            if (n > 0) emit_filtered_piece(ictx, piece, (size_t)n);
 
             /* Feed token back for autoregressive sampling */
             llama_batch next = llama_batch_get_one(&new_token, 1);
@@ -426,6 +533,9 @@ void* inference_worker_thread(void *arg)
         }
 
         llama_sampler_free(smpl);
+
+        /* Flush any unprocessed tail in the tag carry buffer. */
+        emit_filtered_flush(ictx);
 
         pthread_mutex_lock(&ictx->output_mutex);
         ictx->generating = 0;
