@@ -7,6 +7,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <sys/stat.h>
+#include <SDL2/SDL.h>
 
 #ifdef _WIN32
 #  include <windows.h>
@@ -217,6 +218,14 @@ static void* download_thread_fn(void *arg)
  * so it stays accurate for non-monospace fonts. Greedy: fits as many chars
  * per line as possible, then prefers to break at the last whitespace.
  * --------------------------------------------------------------------------- */
+/* utf8_safe_fit: trim `fit` bytes so we don't cut a multi-byte UTF-8
+ * sequence in the middle.  UTF-8 continuation bytes are 0x80..0xBF. */
+static int utf8_safe_fit(const char *text, int fit)
+{
+    while (fit > 0 && (text[fit] & 0xC0) == 0x80) fit--;
+    return fit > 0 ? fit : 1;
+}
+
 static int count_wrap_lines(const struct nk_user_font *font,
                             const char *text, int len, float panel_w)
 {
@@ -232,7 +241,10 @@ static int count_wrap_lines(const struct nk_user_font *font,
             if (w <= panel_w) { fit = mid; lo = mid + 1; }
             else              { hi = mid - 1; }
         }
+        /* Ensure we don't cut mid-UTF-8-sequence */
+        fit = utf8_safe_fit(text + off, fit);
         if (off + fit < len) {
+            /* Prefer to break at a space (ASCII 0x20) */
             int i = fit;
             while (i > fit / 2 && text[off + i - 1] != ' ') i--;
             if (i > fit / 2) fit = i;
@@ -579,7 +591,10 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
             }
             state->chat_last_len = chat_len;
 
-            nk_layout_row_dynamic(nk, height - 170, 1);
+            /* Chat area: total right-panel minus header/footer controls.
+             * Controls below consume: spacer(10)+label(25)+input(30)+btn(30)=95px
+             * plus Nuklear group padding (~20px) → reserve 200px total. */
+            nk_layout_row_dynamic(nk, height - 200, 1);
             nk_uint sx = state->chat_scroll_x;
             nk_uint sy = state->chat_scroll_y;
             if (nk_group_scrolled_offset_begin(nk, &sx, &sy,
@@ -600,36 +615,198 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                 float panel_w = probe.w - 8.0f;
                 if (panel_w < 32.0f) panel_w = 32.0f;
 
+                /* -------------------------------------------------------
+                 * Chat rendering state machine:
+                 *   - detects ```code blocks``` → [COPY CODE] button
+                 *   - detects assistant response blocks → [COPY] button
+                 * All copy buttons live inside the scroll group so the
+                 * input area below is never affected.
+                 * ------------------------------------------------------- */
+
+                /* Persistent per-frame accumulators (static = no stack pressure) */
+                static char s_code_buf[8192];
+                static char s_asst_buf[8192];
+                int s_code_len = 0;
+                int s_asst_len = 0;
+                s_code_buf[0] = '\0';
+                s_asst_buf[0] = '\0';
+
+                int in_code = 0; /* currently inside a ```...``` block */
+
+                /* amber_dim: slightly dimmer colour for code-block chrome */
+                struct nk_color amber_dim = nk_rgb(0xCC, 0x8C, 0x00);
+
                 const char *p   = state->chat_history;
                 const char *end = p + chat_len;
                 while (p < end) {
                     const char *eol = memchr(p, '\n', (size_t)(end - p));
                     size_t llen = eol ? (size_t)(eol - p)
                                       : (size_t)(end - p);
-                    if (llen == 0) {
-                        nk_layout_row_dynamic(nk, font_h, 1);
-                        nk_label_colored(nk, "", NK_TEXT_LEFT, amber);
-                    } else {
-                        char line[4096];
-                        if (llen >= sizeof(line)) llen = sizeof(line) - 1;
-                        memcpy(line, p, llen);
-                        line[llen] = '\0';
 
-                        int wraps = count_wrap_lines(font, line,
-                                                     (int)llen, panel_w);
+                    char line[4096];
+                    if (llen >= sizeof(line)) llen = sizeof(line) - 1;
+                    memcpy(line, p, llen);
+                    line[llen] = '\0';
+
+                    /* Is this a ``` fence line? */
+                    int is_fence = (llen >= 3 &&
+                                    line[0] == '`' &&
+                                    line[1] == '`' &&
+                                    line[2] == '`');
+
+                    /* Is this a user-prompt line?  ("> text") */
+                    int is_user = (!in_code && llen >= 2 &&
+                                   line[0] == '>' && line[1] == ' ');
+
+                    if (is_fence) {
+                        if (!in_code) {
+                            /* ---- Opening fence ---- */
+                            /* Flush any pending assistant block first */
+                            if (s_asst_len > 0) {
+                                /* keep a snapshot so the button closure is safe */
+                                static char snap_asst[8192];
+                                strncpy(snap_asst, s_asst_buf,
+                                        sizeof(snap_asst) - 1);
+                                snap_asst[sizeof(snap_asst) - 1] = '\0';
+                                nk_layout_row_dynamic(nk, 22, 1);
+                                if (nk_button_label(nk, "[ COPY ]")) {
+                                    SDL_SetClipboardText(snap_asst);
+                                    snprintf(state->status_msg,
+                                             sizeof(state->status_msg),
+                                             "Response copied to clipboard.");
+                                }
+                                s_asst_len = 0;
+                                s_asst_buf[0] = '\0';
+                            }
+                            in_code = 1;
+                            s_code_len = 0;
+                            s_code_buf[0] = '\0';
+                            /* Thin separator + language hint */
+                            nk_layout_row_dynamic(nk, 2, 1);
+                            nk_button_color(nk, amber_dim);
+                            char hdr[80];
+                            if (llen > 3) {
+                                char lang[48] = "";
+                                size_t hl = llen - 3;
+                                if (hl >= sizeof(lang)) hl = sizeof(lang) - 1;
+                                memcpy(lang, line + 3, hl);
+                                lang[hl] = '\0';
+                                snprintf(hdr, sizeof(hdr),
+                                         "-- CODE: %s --", lang);
+                            } else {
+                                snprintf(hdr, sizeof(hdr), "-- CODE --");
+                            }
+                            nk_layout_row_dynamic(nk, font_h + 2, 1);
+                            nk_label_colored(nk, hdr, NK_TEXT_LEFT, amber_dim);
+                        } else {
+                            /* ---- Closing fence ---- */
+                            in_code = 0;
+                            /* Copy button for this code block */
+                            static char snap_code[8192];
+                            strncpy(snap_code, s_code_buf,
+                                    sizeof(snap_code) - 1);
+                            snap_code[sizeof(snap_code) - 1] = '\0';
+                            nk_layout_row_dynamic(nk, 24, 1);
+                            if (nk_button_label(nk, "[ COPY CODE ]")) {
+                                SDL_SetClipboardText(snap_code);
+                                snprintf(state->status_msg,
+                                         sizeof(state->status_msg),
+                                         "Code block copied to clipboard.");
+                            }
+                            nk_layout_row_dynamic(nk, 2, 1);
+                            nk_button_color(nk, amber_dim);
+                        }
+                    } else if (in_code) {
+                        /* Accumulate code content */
+                        if (s_code_len + (int)llen + 1 < (int)sizeof(s_code_buf)) {
+                            memcpy(s_code_buf + s_code_len, line, llen);
+                            s_code_len += (int)llen;
+                            s_code_buf[s_code_len++] = '\n';
+                            s_code_buf[s_code_len]   = '\0';
+                        }
+                        /* Render code line with slight indent marker */
+                        char indented[4098];
+                        snprintf(indented, sizeof(indented), "  %s", line);
+                        int ilen = (int)strlen(indented);
+                        int wraps = count_wrap_lines(font, indented,
+                                                     ilen, panel_w);
                         nk_layout_row_dynamic(nk,
                                               font_h * (float)wraps + 2.0f,
                                               1);
-                        nk_label_colored_wrap(nk, line, amber);
+                        nk_label_colored_wrap(nk, indented, amber_dim);
+                    } else if (is_user) {
+                        /* Flush any previous assistant block */
+                        if (s_asst_len > 0) {
+                            static char snap_asst[8192];
+                            strncpy(snap_asst, s_asst_buf,
+                                    sizeof(snap_asst) - 1);
+                            snap_asst[sizeof(snap_asst) - 1] = '\0';
+                            nk_layout_row_dynamic(nk, 22, 1);
+                            if (nk_button_label(nk, "[ COPY ]")) {
+                                SDL_SetClipboardText(snap_asst);
+                                snprintf(state->status_msg,
+                                         sizeof(state->status_msg),
+                                         "Response copied to clipboard.");
+                            }
+                            s_asst_len = 0;
+                            s_asst_buf[0] = '\0';
+                        }
+                        /* Render user line */
+                        if (llen == 0) {
+                            nk_layout_row_dynamic(nk, font_h, 1);
+                            nk_label_colored(nk, "", NK_TEXT_LEFT, amber);
+                        } else {
+                            int wraps = count_wrap_lines(font, line,
+                                                         (int)llen, panel_w);
+                            nk_layout_row_dynamic(nk,
+                                                  font_h * (float)wraps + 2.0f,
+                                                  1);
+                            nk_label_colored_wrap(nk, line, amber);
+                        }
+                    } else {
+                        /* Normal assistant line — accumulate + render */
+                        if (llen > 0 &&
+                            s_asst_len + (int)llen + 1 < (int)sizeof(s_asst_buf)) {
+                            memcpy(s_asst_buf + s_asst_len, line, llen);
+                            s_asst_len += (int)llen;
+                            s_asst_buf[s_asst_len++] = '\n';
+                            s_asst_buf[s_asst_len]   = '\0';
+                        }
+                        if (llen == 0) {
+                            nk_layout_row_dynamic(nk, font_h, 1);
+                            nk_label_colored(nk, "", NK_TEXT_LEFT, amber);
+                        } else {
+                            int wraps = count_wrap_lines(font, line,
+                                                         (int)llen, panel_w);
+                            nk_layout_row_dynamic(nk,
+                                                  font_h * (float)wraps + 2.0f,
+                                                  1);
+                            nk_label_colored_wrap(nk, line, amber);
+                        }
                     }
                     p = eol ? eol + 1 : end;
                 }
+
+                /* Flush final assistant block if any */
+                if (s_asst_len > 0 && !in_code) {
+                    static char snap_asst[8192];
+                    strncpy(snap_asst, s_asst_buf, sizeof(snap_asst) - 1);
+                    snap_asst[sizeof(snap_asst) - 1] = '\0';
+                    nk_layout_row_dynamic(nk, 22, 1);
+                    if (nk_button_label(nk, "[ COPY ]")) {
+                        SDL_SetClipboardText(snap_asst);
+                        snprintf(state->status_msg,
+                                 sizeof(state->status_msg),
+                                 "Response copied to clipboard.");
+                    }
+                }
+
                 nk_group_scrolled_end(nk);
             }
             state->chat_scroll_x = sx;
             state->chat_scroll_y = sy;
 
-            /* Spacer */
+            /* Spacer — restored to original size, no COPY CHAT button here */
             nk_layout_row_dynamic(nk, 10, 1);
             nk_spacing(nk, 1);
 
@@ -651,6 +828,7 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
              * same screen real estate doubles as the cancel control. Enter
              * is also routed through this gate so the user can't queue a
              * second prompt mid-generation. */
+            nk_layout_row_dynamic(nk, 30, 1);
             if (state->is_generating) {
                 if (nk_button_label(nk, "STOP")) {
                     inference_cancel_generation(state->inference);

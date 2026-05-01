@@ -52,6 +52,26 @@ static struct nk_sdl {
     struct nk_sdl_device dev;
 } sdl;
 
+/* ---------------------------------------------------------------------------
+ * Candidate TTF paths searched in order for Cyrillic/Unicode support.
+ * --------------------------------------------------------------------------- */
+static const char *nk_sdl_font_candidates[] = {
+    "fonts/DejaVuSansMono.ttf",
+    "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+    "/usr/share/fonts/noto/NotoSansMono-Regular.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",   /* Debian/Ubuntu */
+    "/usr/share/fonts/TTF/Hack-Regular.ttf",
+    NULL
+};
+
+/* Unicode ranges to bake: Basic Latin + Latin-1 Supplement + Cyrillic */
+static const nk_rune nk_sdl_unicode_ranges[] = {
+    0x0020, 0x00FF,   /* Basic Latin + Latin-1 Supplement */
+    0x0400, 0x04FF,   /* Cyrillic */
+    0x2010, 0x2027,   /* General Punctuation subset */
+    0
+};
+
 NK_API struct nk_context*
 nk_sdl_init(SDL_Window *win)
 {
@@ -64,8 +84,32 @@ nk_sdl_init(SDL_Window *win)
     nk_font_atlas_init_default(&sdl.atlas);
     nk_font_atlas_begin(&sdl.atlas);
 
-    struct nk_font_config cfg = nk_font_config(14);
-    struct nk_font *font = nk_font_atlas_add_default(&sdl.atlas, 14, &cfg);
+    struct nk_font *font = NULL;
+
+    /* Try TTF candidates for Cyrillic support */
+    for (int ci = 0; nk_sdl_font_candidates[ci] != NULL; ci++) {
+        FILE *fp = fopen(nk_sdl_font_candidates[ci], "rb");
+        if (!fp) continue;
+        fclose(fp);
+
+        struct nk_font_config cfg = nk_font_config(15);
+        cfg.range = nk_sdl_unicode_ranges;
+        cfg.oversample_h = 2;
+        cfg.oversample_v = 2;
+        font = nk_font_atlas_add_from_file(&sdl.atlas, nk_sdl_font_candidates[ci],
+                                           15, &cfg);
+        if (font) {
+            fprintf(stderr, "[font] Loaded: %s\n", nk_sdl_font_candidates[ci]);
+            break;
+        }
+    }
+
+    /* Fallback: built-in ASCII-only Proggy Clean */
+    if (!font) {
+        fprintf(stderr, "[font] No TTF found — falling back to built-in (ASCII only).\n");
+        struct nk_font_config cfg = nk_font_config(14);
+        font = nk_font_atlas_add_default(&sdl.atlas, 14, &cfg);
+    }
 
     int w, h;
     const void *image = nk_font_atlas_bake(&sdl.atlas, &w, &h, NK_FONT_ATLAS_RGBA32);
