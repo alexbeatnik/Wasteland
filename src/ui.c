@@ -211,6 +211,60 @@ static void* download_thread_fn(void *arg)
 }
 
 /* ---------------------------------------------------------------------------
+ * chat_copy_icon
+ *
+ * Renders a tiny right-aligned copy icon (◈ U+25C8) inside the current
+ * Nuklear layout. The button is visually dim (amber_dim border + text) so it
+ * stays out of the way; hovering lights it up to full amber.
+ * Returns non-zero when clicked.
+ * --------------------------------------------------------------------------- */
+static int chat_copy_icon(struct nk_context *nk,
+                          struct nk_color dim, struct nk_color bright)
+{
+    const struct nk_user_font *fnt = nk->style.font;
+    float fh = (fnt && fnt->height > 0) ? fnt->height : 14.0f;
+
+    /* Row: invisible left spacer + small button on the right */
+    nk_layout_row_begin(nk, NK_DYNAMIC, fh, 2);
+    nk_layout_row_push(nk, 0.80f);
+    nk_spacing(nk, 1);
+    nk_layout_row_push(nk, 0.20f);
+
+    /* Temporarily dim the button style */
+    struct nk_color    save_tn = nk->style.button.text_normal;
+    struct nk_color    save_th = nk->style.button.text_hover;
+    struct nk_color    save_ta = nk->style.button.text_active;
+    struct nk_color    save_bc = nk->style.button.border_color;
+    struct nk_style_item save_n = nk->style.button.normal;
+    struct nk_style_item save_h = nk->style.button.hover;
+    struct nk_style_item save_a = nk->style.button.active;
+
+    nk->style.button.text_normal  = dim;
+    nk->style.button.text_hover   = bright;
+    nk->style.button.text_active  = bright;
+    nk->style.button.border_color = dim;
+    nk->style.button.normal = nk_style_item_color(nk_rgb(0x1A, 0x1A, 0x1A));
+    nk->style.button.hover  = nk_style_item_color(nk_rgb(0x28, 0x28, 0x28));
+    nk->style.button.active = nk_style_item_color(nk_rgb(0x0A, 0x0A, 0x0A));
+
+    /* ◈  U+25C8 — WHITE DIAMOND CONTAINING BLACK SMALL DIAMOND
+     * UTF-8: E2 97 88 — already in the baked 0x25A0-0x25FF glyph range */
+    int clicked = nk_button_label(nk, "\xe2\x97\x88");
+
+    /* Restore button style */
+    nk->style.button.text_normal  = save_tn;
+    nk->style.button.text_hover   = save_th;
+    nk->style.button.text_active  = save_ta;
+    nk->style.button.border_color = save_bc;
+    nk->style.button.normal       = save_n;
+    nk->style.button.hover        = save_h;
+    nk->style.button.active       = save_a;
+
+    nk_layout_row_end(nk);
+    return clicked;
+}
+
+/* ---------------------------------------------------------------------------
  * count_wrap_lines
  *
  * Estimate how many wrapped lines `nk_label_*_wrap` will produce for `text`
@@ -663,17 +717,15 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                             /* ---- Opening fence ---- */
                             /* Flush any pending assistant block first */
                             if (s_asst_len > 0) {
-                                /* keep a snapshot so the button closure is safe */
                                 static char snap_asst[8192];
                                 strncpy(snap_asst, s_asst_buf,
                                         sizeof(snap_asst) - 1);
                                 snap_asst[sizeof(snap_asst) - 1] = '\0';
-                                nk_layout_row_dynamic(nk, 22, 1);
-                                if (nk_button_label(nk, "[ COPY ]")) {
+                                if (chat_copy_icon(nk, amber_dim, amber)) {
                                     SDL_SetClipboardText(snap_asst);
                                     snprintf(state->status_msg,
                                              sizeof(state->status_msg),
-                                             "Response copied to clipboard.");
+                                             "Response copied.");
                                 }
                                 s_asst_len = 0;
                                 s_asst_buf[0] = '\0';
@@ -701,17 +753,16 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                         } else {
                             /* ---- Closing fence ---- */
                             in_code = 0;
-                            /* Copy button for this code block */
+                            /* Small copy icon for this code block */
                             static char snap_code[8192];
                             strncpy(snap_code, s_code_buf,
                                     sizeof(snap_code) - 1);
                             snap_code[sizeof(snap_code) - 1] = '\0';
-                            nk_layout_row_dynamic(nk, 24, 1);
-                            if (nk_button_label(nk, "[ COPY CODE ]")) {
+                            if (chat_copy_icon(nk, amber_dim, amber)) {
                                 SDL_SetClipboardText(snap_code);
                                 snprintf(state->status_msg,
                                          sizeof(state->status_msg),
-                                         "Code block copied to clipboard.");
+                                         "Code copied.");
                             }
                             nk_layout_row_dynamic(nk, 2, 1);
                             nk_button_color(nk, amber_dim);
@@ -741,12 +792,11 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                             strncpy(snap_asst, s_asst_buf,
                                     sizeof(snap_asst) - 1);
                             snap_asst[sizeof(snap_asst) - 1] = '\0';
-                            nk_layout_row_dynamic(nk, 22, 1);
-                            if (nk_button_label(nk, "[ COPY ]")) {
+                            if (chat_copy_icon(nk, amber_dim, amber)) {
                                 SDL_SetClipboardText(snap_asst);
                                 snprintf(state->status_msg,
                                          sizeof(state->status_msg),
-                                         "Response copied to clipboard.");
+                                         "Response copied.");
                             }
                             s_asst_len = 0;
                             s_asst_buf[0] = '\0';
@@ -792,12 +842,11 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                     static char snap_asst[8192];
                     strncpy(snap_asst, s_asst_buf, sizeof(snap_asst) - 1);
                     snap_asst[sizeof(snap_asst) - 1] = '\0';
-                    nk_layout_row_dynamic(nk, 22, 1);
-                    if (nk_button_label(nk, "[ COPY ]")) {
+                    if (chat_copy_icon(nk, amber_dim, amber)) {
                         SDL_SetClipboardText(snap_asst);
                         snprintf(state->status_msg,
                                  sizeof(state->status_msg),
-                                 "Response copied to clipboard.");
+                                 "Response copied.");
                     }
                 }
 
