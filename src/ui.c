@@ -6,6 +6,7 @@
 #include "network.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <sys/stat.h>
 #include <SDL2/SDL.h>
 
@@ -22,11 +23,12 @@
 /* ---------------------------------------------------------------------------
  * Predefined Hub Models (HuggingFace repo IDs)
  * These are resolved via the HF API to find the first .gguf file.
+ * Sorted by parameter count (ascending).
  * --------------------------------------------------------------------------- */
 static const char *hub_models[WASTELAND_MAX_HUB_MODELS] = {
     "ggml-org/gemma-4-E2B-it-GGUF",
-    "ggml-org/gemma-4-26B-A4B-it-GGUF",
     "ggml-org/gemma-4-E4B-it-GGUF",
+    "ggml-org/gemma-4-26B-A4B-it-GGUF",
     "ggml-org/gemma-4-31B-it-GGUF"
 };
 
@@ -113,14 +115,57 @@ int scan_local_chats(char chats_list[][256], int max_chats)
 #endif
 }
 
+/* ---------------------------------------------------------------------------
+ * Simple RC4 stream cipher for chat file encryption.
+ * Protects chats from casual inspection in a file manager / text editor.
+ * --------------------------------------------------------------------------- */
+static const unsigned char chat_key[] = {
+    0x7a, 0x13, 0x4f, 0x9e, 0x2b, 0x81, 0xcc, 0x55,
+    0x3d, 0x67, 0x10, 0xf8, 0x99, 0x44, 0xae, 0x2e,
+    0x5c, 0x77, 0x18, 0xd3, 0xb6, 0x91, 0x0a, 0xe4,
+    0xcf, 0x28, 0x83, 0xfb, 0x41, 0x6d, 0x35, 0x1c
+};
+
+static void rc4_crypt_buffer(unsigned char *data, size_t len)
+{
+    unsigned char s[256];
+    int i, j;
+    for (i = 0; i < 256; i++) s[i] = (unsigned char)i;
+    j = 0;
+    size_t key_len = sizeof(chat_key);
+    for (i = 0; i < 256; i++) {
+        j = (j + s[i] + chat_key[i % key_len]) & 255;
+        unsigned char tmp = s[i]; s[i] = s[j]; s[j] = tmp;
+    }
+    i = j = 0;
+    for (size_t k = 0; k < len; k++) {
+        i = (i + 1) & 255;
+        j = (j + s[i]) & 255;
+        unsigned char tmp = s[i]; s[i] = s[j]; s[j] = tmp;
+        data[k] ^= s[(s[i] + s[j]) & 255];
+    }
+}
+
 void save_chat_history(const char *chat_name, const char *history)
 {
     if (!chat_name || !chat_name[0]) return;
     char path[512];
     snprintf(path, sizeof(path), "chats/%s", chat_name);
-    FILE *f = fopen(path, "w");
+    FILE *f = fopen(path, "wb");
     if (f) {
-        fputs(history, f);
+        size_t len = strlen(history);
+        if (len > 0) {
+            unsigned char *buf = (unsigned char *)malloc(len);
+            if (buf) {
+                memcpy(buf, history, len);
+                rc4_crypt_buffer(buf, len);
+                fwrite("WSTL", 1, 4, f);
+                fwrite(buf, 1, len, f);
+                free(buf);
+            }
+        } else {
+            fwrite("WSTL", 1, 4, f);
+        }
         fclose(f);
     }
 }
@@ -131,10 +176,22 @@ void load_chat_history(const char *chat_name, char *history, size_t max_len)
     if (!chat_name || !chat_name[0]) return;
     char path[512];
     snprintf(path, sizeof(path), "chats/%s", chat_name);
-    FILE *f = fopen(path, "r");
+    FILE *f = fopen(path, "rb");
     if (f) {
-        size_t n = fread(history, 1, max_len - 1, f);
-        history[n] = '\0';
+        char magic[4];
+        if (fread(magic, 1, 4, f) == 4 && memcmp(magic, "WSTL", 4) == 0) {
+            size_t n = fread(history, 1, max_len - 1, f);
+            if (n > 0) {
+                rc4_crypt_buffer((unsigned char *)history, n);
+                history[n] = '\0';
+            } else {
+                history[0] = '\0';
+            }
+        } else {
+            rewind(f);
+            size_t n = fread(history, 1, max_len - 1, f);
+            history[n] = '\0';
+        }
         fclose(f);
     }
 }
@@ -518,6 +575,106 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
         if (!state->left_panel_collapsed &&
             nk_group_begin(nk, "LeftPanel", NK_WINDOW_BORDER)) {
 
+            /* ===== CHATS ===== */
+            nk_layout_row_dynamic(nk, 20, 1);
+            nk_label_colored(nk, "CHATS", NK_TEXT_LEFT, amber);
+            nk_layout_row_dynamic(nk, 2, 1);
+            nk_button_color(nk, amber);
+
+            nk_layout_row_dynamic(nk, 20, 1);
+            if (nk_button_label(nk, "[ NEW CHAT ]")) {
+                char new_chat[256];
+                char base[] = "New Chat";
+                snprintf(new_chat, sizeof(new_chat), "%s.txt", base);
+                char path[512];
+                snprintf(path, sizeof(path), "chats/%s", new_chat);
+                struct stat st;
+                int suffix = 1;
+                while (stat(path, &st) == 0 && suffix < 100) {
+                    snprintf(new_chat, sizeof(new_chat), "%s_%d.txt", base, suffix);
+                    snprintf(path, sizeof(path), "chats/%s", new_chat);
+                    suffix++;
+                }
+                
+                if (state->selected_chat >= 0 && state->selected_chat < state->chat_count) {
+                    save_chat_history(state->chats[state->selected_chat], state->chat_history);
+                }
+                
+                state->chat_history[0] = '\0';
+                state->chat_last_len = 0;
+                
+                if (state->chat_count < 64) {
+                    snprintf(state->chats[state->chat_count], 256, "%s", new_chat);
+                    state->selected_chat = state->chat_count;
+                    state->chat_count++;
+                    save_chat_history(new_chat, "");
+                }
+            }
+
+            if (state->chat_count == 0) {
+                nk_layout_row_dynamic(nk, 20, 1);
+                nk_label_colored(nk, "No chats found.", NK_TEXT_CENTERED, col_dark_grey());
+            } else {
+                for (int i = 0; i < state->chat_count; i++) {
+                    int is_loaded = (state->selected_chat == i);
+                    char chat_display[256];
+                    strncpy(chat_display, state->chats[i], sizeof(chat_display) - 1);
+                    chat_display[sizeof(chat_display) - 1] = '\0';
+                    size_t cdl = strlen(chat_display);
+                    if (cdl > 4 && strcmp(chat_display + cdl - 4, ".txt") == 0) {
+                        chat_display[cdl - 4] = '\0';
+                    }
+                    nk_layout_row_dynamic(nk, 20, 1);
+                    if (is_loaded) {
+                        nk_label_colored(nk, chat_display, NK_TEXT_CENTERED, amber);
+                    } else {
+                        nk_label_colored(nk, chat_display, NK_TEXT_CENTERED, col_dark_grey());
+                    }
+
+                    nk_layout_row_begin(nk, NK_DYNAMIC, 20, 2);
+                    char btn_label[128];
+                    if (is_loaded) {
+                        snprintf(btn_label, sizeof(btn_label), "[ ACTIVE ]");
+                    } else {
+                        snprintf(btn_label, sizeof(btn_label), "[ LOAD ]");
+                    }
+                    nk_layout_row_push(nk, 0.85f);
+                    if (nk_button_label(nk, btn_label)) {
+                        if (!is_loaded) {
+                            if (state->selected_chat >= 0) {
+                                save_chat_history(state->chats[state->selected_chat], state->chat_history);
+                            }
+                            load_chat_history(state->chats[i], state->chat_history, WASTELAND_MAX_CHAT_HISTORY);
+                            state->selected_chat = i;
+                            state->chat_last_len = 0;
+                            state->chat_scroll_y = (nk_uint)0x7FFFFFFF;
+                        }
+                    }
+                    nk_layout_row_push(nk, 0.15f);
+                    if (nk_button_label(nk, "\xc3\x97")) {
+                        char path[512];
+                        snprintf(path, sizeof(path), "chats/%s", state->chats[i]);
+                        remove(path);
+                        if (state->selected_chat == i) {
+                            state->chat_history[0] = '\0';
+                            state->selected_chat = -1;
+                        } else if (state->selected_chat > i) {
+                            state->selected_chat--;
+                        }
+                        for (int j = i; j < state->chat_count - 1; j++) {
+                            strcpy(state->chats[j], state->chats[j+1]);
+                        }
+                        state->chat_count--;
+                        i--;
+                    }
+                    nk_layout_row_end(nk);
+                }
+            }
+
+            /* Spacer */
+            nk_layout_row_dynamic(nk, 10, 1);
+            nk_spacing(nk, 1);
+
             /* ===== HUB MODELS ===== */
             nk_layout_row_dynamic(nk, 20, 1);
             nk_label_colored(nk, "HUB MODELS", NK_TEXT_LEFT, amber);
@@ -657,7 +814,7 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                     const char *basename = slash ? slash + 1 : state->models[i];
 
                     /* Row with LOAD button + DELETE button */
-                    nk_layout_row_dynamic(nk, 26, 2);
+                    nk_layout_row_begin(nk, NK_DYNAMIC, 26, 2);
 
                     struct stat fst;
                     char sz_str[32] = "?";
@@ -681,6 +838,7 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
 
                     int load_busy = (state->loading_model_index >= 0);
                     int gen_busy  = inference_is_generating(state->inference);
+                    nk_layout_row_push(nk, 0.92f);
                     if (nk_button_label(nk, btn_label) && !load_busy && !gen_busy) {
                         if (is_loaded) {
                             inference_unload_model(state->inference);
@@ -704,7 +862,8 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                         }
                     }
 
-                    if (nk_button_label(nk, "[ DELETE ]") && !load_busy && !gen_busy) {
+                    nk_layout_row_push(nk, 0.08f);
+                    if (nk_button_label(nk, "\xc3\x97") && !load_busy && !gen_busy) {
                         if (remove(state->models[i]) == 0) {
                             /* If deleted model was loaded, unload it */
                             if (state->selected_model == i) {
@@ -747,92 +906,6 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                            state->system_prompt, &sys_len, 1024,
                            nk_filter_default);
             state->system_prompt[sys_len] = '\0';
-
-            /* ===== CHATS ===== */
-            nk_layout_row_dynamic(nk, 20, 1);
-            nk_label_colored(nk, "CHATS", NK_TEXT_LEFT, amber);
-            nk_layout_row_dynamic(nk, 2, 1);
-            nk_button_color(nk, amber);
-
-            nk_layout_row_dynamic(nk, 20, 1);
-            if (nk_button_label(nk, "[ NEW CHAT ]")) {
-                char new_chat[256];
-                char base[] = "New Chat";
-                snprintf(new_chat, sizeof(new_chat), "%s.txt", base);
-                char path[512];
-                snprintf(path, sizeof(path), "chats/%s", new_chat);
-                struct stat st;
-                int suffix = 1;
-                while (stat(path, &st) == 0 && suffix < 100) {
-                    snprintf(new_chat, sizeof(new_chat), "%s_%d.txt", base, suffix);
-                    snprintf(path, sizeof(path), "chats/%s", new_chat);
-                    suffix++;
-                }
-                
-                if (state->selected_chat >= 0 && state->selected_chat < state->chat_count) {
-                    save_chat_history(state->chats[state->selected_chat], state->chat_history);
-                }
-                
-                state->chat_history[0] = '\0';
-                state->chat_last_len = 0;
-                
-                if (state->chat_count < 64) {
-                    snprintf(state->chats[state->chat_count], 256, "%s", new_chat);
-                    state->selected_chat = state->chat_count;
-                    state->chat_count++;
-                    save_chat_history(new_chat, "");
-                }
-            }
-
-            if (state->chat_count == 0) {
-                nk_layout_row_dynamic(nk, 20, 1);
-                nk_label_colored(nk, "No chats found.", NK_TEXT_CENTERED, col_dark_grey());
-            } else {
-                for (int i = 0; i < state->chat_count; i++) {
-                    int is_loaded = (state->selected_chat == i);
-                    nk_layout_row_dynamic(nk, 20, 1);
-                    if (is_loaded) {
-                        nk_label_colored(nk, state->chats[i], NK_TEXT_CENTERED, amber);
-                    } else {
-                        nk_label_colored(nk, state->chats[i], NK_TEXT_CENTERED, col_dark_grey());
-                    }
-
-                    nk_layout_row_dynamic(nk, 20, 2);
-                    char btn_label[128];
-                    if (is_loaded) {
-                        snprintf(btn_label, sizeof(btn_label), "[ ACTIVE ]");
-                    } else {
-                        snprintf(btn_label, sizeof(btn_label), "[ LOAD ]");
-                    }
-                    if (nk_button_label(nk, btn_label)) {
-                        if (!is_loaded) {
-                            if (state->selected_chat >= 0) {
-                                save_chat_history(state->chats[state->selected_chat], state->chat_history);
-                            }
-                            load_chat_history(state->chats[i], state->chat_history, WASTELAND_MAX_CHAT_HISTORY);
-                            state->selected_chat = i;
-                            state->chat_last_len = 0;
-                            state->chat_scroll_y = (nk_uint)0x7FFFFFFF;
-                        }
-                    }
-                    if (nk_button_label(nk, "[ DEL ]")) {
-                        char path[512];
-                        snprintf(path, sizeof(path), "chats/%s", state->chats[i]);
-                        remove(path);
-                        if (state->selected_chat == i) {
-                            state->chat_history[0] = '\0';
-                            state->selected_chat = -1;
-                        } else if (state->selected_chat > i) {
-                            state->selected_chat--;
-                        }
-                        for (int j = i; j < state->chat_count - 1; j++) {
-                            strcpy(state->chats[j], state->chats[j+1]);
-                        }
-                        state->chat_count--;
-                        i--;
-                    }
-                }
-            }
 
             /* Spacer */
             nk_layout_row_dynamic(nk, 10, 1);
@@ -1141,24 +1214,20 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                         snprintf(state->chats[state->chat_count], 256, "%s", new_chat);
                         state->selected_chat = state->chat_count;
                         state->chat_count++;
-                    } else if (state->selected_chat >= 0 && 
-                               strncmp(state->chats[state->selected_chat], "New Chat", 8) == 0) {
-                        /* Rename "New Chat" based on first prompt */
-                        char old_path[512], new_path[512];
-                        snprintf(old_path, sizeof(old_path), "chats/%s", state->chats[state->selected_chat]);
-                        char new_chat[256];
-                        generate_chat_name_from_prompt(state->input_buffer, new_chat, sizeof(new_chat));
-                        snprintf(new_path, sizeof(new_path), "chats/%s", new_chat);
-                        rename(old_path, new_path);
-                        snprintf(state->chats[state->selected_chat], 256, "%s", new_chat);
+                        save_chat_history(new_chat, "");
                     }
 
                     pthread_mutex_lock(&state->chat_mutex);
                     size_t hlen = strlen(state->chat_history);
                     size_t room = WASTELAND_MAX_CHAT_HISTORY - hlen - 1;
                     if (room > 0) {
-                        snprintf(state->chat_history + hlen, room,
-                                 "\n> %s\n", state->input_buffer);
+                        /* Append user prompt */
+                        char prompt[WASTELAND_MAX_PROMPT_LEN + 8];
+                        snprintf(prompt, sizeof(prompt), "> %s\n", state->input_buffer);
+                        size_t plen = strlen(prompt);
+                        if (plen > room) plen = room;
+                        memcpy(state->chat_history + hlen, prompt, plen);
+                        state->chat_history[hlen + plen] = '\0';
                     }
                     pthread_mutex_unlock(&state->chat_mutex);
 
@@ -1166,19 +1235,17 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                                             state->system_prompt,
                                             state->input_buffer);
                     state->input_buffer[0] = '\0';
+                    state->chat_scroll_y = (nk_uint)0x7FFFFFFF;
                 }
             }
-
             nk_layout_row_end(nk);
 
-            /* Status message below input */
-            nk_layout_row_dynamic(nk, 14, 1);
+            /* Status message row */
             if (state->status_msg[0]) {
-                struct nk_color amber_dim = nk_rgb(0xCC, 0x8C, 0x00);
-                nk_label_colored(nk, state->status_msg, NK_TEXT_LEFT, amber_dim);
-            } else {
-                nk_label_colored(nk, "", NK_TEXT_LEFT, amber);
+                nk_layout_row_dynamic(nk, 18, 1);
+                nk_label_colored(nk, state->status_msg, NK_TEXT_CENTERED, amber);
             }
+
             nk_group_end(nk);
         }
     }
