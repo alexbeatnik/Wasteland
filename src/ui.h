@@ -52,6 +52,11 @@ typedef struct {
 
     int  network_lockdown;
     int  is_generating;
+
+    /* Chat scroll state (auto-scroll-to-bottom on new content) */
+    nk_uint chat_scroll_x;
+    nk_uint chat_scroll_y;
+    size_t  chat_last_len;
     int  download_progress;      /* 0-100 */
     int  download_active;
     int  download_cancel;        /* set by UI, read by worker */

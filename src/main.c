@@ -327,30 +327,32 @@ int main(int argc, char **argv)
 
     /* -----------------------------------------------------------------------
      * Teardown
+     *
+     * Goal: window disappears the instant the user clicks X. We hide it
+     * first, then make a brief best-effort attempt to drain the worker so
+     * llama.cpp can free its context cleanly. If the worker is mid-decode
+     * (or a model load is still in flight), we just exit — the OS reclaims
+     * memory and kills the threads, which is safe because nothing in our
+     * code path can run between _Exit and process termination.
      * ----------------------------------------------------------------------- */
     state.running = 0;
+    SDL_HideWindow(win);
 
-    /* Wake the worker so it can exit its cond-wait. */
+    /* Wake the worker so any cond-wait returns. */
     inference_submit_prompt(state.inference, "");
 
-    /* Wait up to 10 seconds for graceful worker exit.
-       Do NOT use pthread_cancel — llama.cpp contains C++ code (allocators,
-       mutexes) that is not async-cancel-safe and will SIGABRT if interrupted. */
-    int join_ok = platform_thread_join_timeout(worker_thread, 10000);
-    if (join_ok != 0) {
-        fprintf(stderr, "[main] Worker did not finish in 10s, detaching thread.\n");
-        pthread_detach(worker_thread);
-        /* Skip inference_shutdown() — worker may still touch ctx/model.
-           The OS reclaims all memory when the process exits. */
-    } else {
+    int join_ok = platform_thread_join_timeout(worker_thread, 1500);
+    if (join_ok == 0) {
         inference_shutdown(state.inference);
+        pthread_mutex_destroy(&state.chat_mutex);
+        nk_sdl_shutdown();
+        SDL_GL_DeleteContext(gl_ctx);
+        SDL_DestroyWindow(win);
+        SDL_Quit();
+        return EXIT_SUCCESS;
     }
-    pthread_mutex_destroy(&state.chat_mutex);
 
-    nk_sdl_shutdown();
-    SDL_GL_DeleteContext(gl_ctx);
-    SDL_DestroyWindow(win);
+    fprintf(stderr, "[main] Worker still busy, fast-exit.\n");
     SDL_Quit();
-
-    return EXIT_SUCCESS;
+    _Exit(0);
 }

@@ -532,16 +532,42 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
 
         /* --------------------- RIGHT PANEL --------------------- */
         if (nk_group_begin(nk, "RightPanel", NK_WINDOW_BORDER)) {
-            /* Chat history (read-only multiline edit simulates a terminal) */
+            /* Chat history rendered into a scrollable group of labels.
+             * nk_edit_string provides no public scroll API, so we draw
+             * the lines ourselves and auto-pin scroll to the bottom
+             * whenever new tokens arrive. */
+            size_t chat_len = strlen(state->chat_history);
+            if (chat_len > state->chat_last_len) {
+                /* New text appeared — clamp scroll to the bottom. */
+                state->chat_scroll_y = (nk_uint)0x7FFFFFFF;
+            }
+            state->chat_last_len = chat_len;
+
             nk_layout_row_dynamic(nk, height - 170, 1);
-            int chat_len = (int)strlen(state->chat_history);
-            nk_edit_string(nk,
-                NK_EDIT_READ_ONLY | NK_EDIT_MULTILINE,
-                state->chat_history,
-                &chat_len,
-                WASTELAND_MAX_CHAT_HISTORY,
-                nk_filter_default);
-            state->chat_history[chat_len] = '\0';
+            nk_uint sx = state->chat_scroll_x;
+            nk_uint sy = state->chat_scroll_y;
+            if (nk_group_scrolled_offset_begin(nk, &sx, &sy,
+                                               "ChatHistory",
+                                               NK_WINDOW_BORDER))
+            {
+                const char *p   = state->chat_history;
+                const char *end = p + chat_len;
+                while (p < end) {
+                    const char *eol = memchr(p, '\n', (size_t)(end - p));
+                    size_t llen = eol ? (size_t)(eol - p)
+                                      : (size_t)(end - p);
+                    char line[2048];
+                    if (llen >= sizeof(line)) llen = sizeof(line) - 1;
+                    memcpy(line, p, llen);
+                    line[llen] = '\0';
+                    nk_layout_row_dynamic(nk, 16, 1);
+                    nk_label_colored(nk, line, NK_TEXT_LEFT, amber);
+                    p = eol ? eol + 1 : end;
+                }
+                nk_group_scrolled_end(nk);
+            }
+            state->chat_scroll_x = sx;
+            state->chat_scroll_y = sy;
 
             /* Spacer */
             nk_layout_row_dynamic(nk, 10, 1);
