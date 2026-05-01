@@ -18,6 +18,9 @@ This project does not use a formal skill system. The following domains are relev
 - Off-loading multi-second work (model load, libcurl download) onto background threads with a published-result polling pattern (`is_loading()` / `take_load_result()`).
 - Hiding latency: `SDL_HideWindow` to make the close click feel instant while threads finish in the background.
 - Gating UI buttons on cross-thread state (`load_busy`, `gen_busy`) so the user can't trigger conflicting operations.
+- **Dispatcher-claims-flag pattern:** when spawning a worker that owns a "busy" flag, the dispatcher sets the flag *before* `pthread_create`. Setting it inside the worker leaves a window where a fast double-click sees the old value and double-spawns.
+- **Clean shutdown signalling:** dedicated `inference_request_stop()` flips the running flag, raises a cancel flag, and broadcasts the prompt cond_var. Don't repurpose a "submit empty work item" path for shutdown — downstream chat templates may treat empty as legitimate work and burn a generation cycle on the way out.
+- **Propagating `volatile` through APIs:** every function that takes the address of a `volatile int` field must declare the parameter as `volatile int *`. Silently dropping the qualifier triggers `-Wdiscarded-qualifiers` and hides a real race from the optimiser.
 
 ### Graphics & UI
 
@@ -48,11 +51,15 @@ This project does not use a formal skill system. The following domains are relev
 - Custom UI string parsers to selectively skip reasoning blocks when copying chat text to the clipboard.
 - Generating human-readable filenames (stripping filesystem-unsafe characters) from dynamic prompts.
 - Persisting state across application runs using simple text files (e.g. `system_prompt.txt` and `chats/*.txt`).
+- Magic-prefix + RC4 obfuscation for chat files (`WSTL` header + cipher) — cosmetic-only "encryption" honest about its threat model (keeps file-manager previews clean, *not* a real secret).
+- Trailing-newline injection at end-of-generation so a streaming append + a literal user-prompt append can coexist on a single shared buffer without the two glueing onto the same line.
+- Stable filesystem listings: `qsort` the result of `readdir`/`FindFirstFile` because directory iteration order is filesystem-defined (ext4 hash, btrfs insertion order, NTFS sorted) and inconsistent across launches.
 
 ### Network & Security
 
 - libcurl easy API for `.gguf` downloads with progress callbacks.
 - HuggingFace API discovery (`/api/models/.../tree/main`) to resolve a repo to a concrete file URL.
+- HF URL rewriting: `/blob/main/<file>` → `/resolve/main/<file>` (the public `/blob/` UI URL serves HTML, not bytes). The replacement is `+3` bytes, so you must `memmove` the tail right by 3 *before* the `memcpy` overwrite — the obvious memcpy-then-memmove order corrupts the first 3 bytes of the filename.
 - Linux seccomp-bpf with **argument filtering** (`SCMP_A0(SCMP_CMP_EQ, AF_INET)`) — narrow rules that gate `socket()` creation by address family, leaving X11 / Wayland Unix-domain traffic untouched.
 - Why pointer-deref filtering (sockaddr family on `connect`/`bind`) is impossible in seccomp and what to do instead (gate at `socket()`).
 - Cross-platform security model: features degrade gracefully on macOS / Windows.

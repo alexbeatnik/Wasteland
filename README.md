@@ -9,21 +9,19 @@ Wasteland is a local LLM inference client built in pure C with a vintage PC-insp
 ## Features
 
 - **Offline-first** — All inference happens locally via llama.cpp
-- **Hard network lockdown** — Linux seccomp blocks creation of any new `AF_INET` / `AF_INET6` / `AF_PACKET` socket once a model is loaded (no-op on macOS/Windows)
+- **Hard network lockdown** — Linux seccomp kills the process if it ever opens a new `AF_INET` / `AF_INET6` / `AF_PACKET` socket once a model is loaded (no-op on macOS/Windows)
 - **Retro UI** — Amber (`#FFB000`) monochrome CRT terminal aesthetic via Nuklear
-- **Threaded** — Non-blocking UI at 60 FPS with background inference and async model loading
-- **Async model load** — UI stays responsive during multi-second GGUF mmap/decode
-- **Model Management** — Download from HuggingFace, load / **unload** / delete local `.gguf` files
-- **Stop generation** — `STOP` button cancels an in-flight response mid-token
+- **Threaded** — Non-blocking UI at 60 FPS with background inference, async model loading, and a detached download thread
+- **Async model load** — UI stays responsive during multi-second GGUF load
+- **Model Management** — Download from HuggingFace, load / **unload** / delete local `.gguf` files; the local vault is sorted lexicographically for stable ordering
+- **Stop generation** — `■` button cancels an in-flight response within one token
 - **Chat template** — Uses each model's built-in template (`llama_chat_apply_template`) so instruction-tuned models behave correctly
-- **Multiple Chats** — Create, load, and switch between multiple named chat sessions automatically saved to disk
-- **System Prompt** — Configure and persist a system prompt to guide model behaviour
-- **Cyrillic & Unicode** — Full Cyrillic support and built-in UI icons via `DejaVuSansMono`
-- **Smart Reasoning** — `<think>` reasoning blocks are displayed dimly in the UI, but automatically skipped when copying the final answer
+- **Multiple Chats** — Create, load, and switch between named chat sessions; auto-named from the first user message; persisted to `chats/*.txt` with simple RC4 obfuscation
+- **System Prompt** — Configure and persist a system prompt to guide model behaviour (`system_prompt.txt`)
+- **Smart Reasoning** — `<think>` reasoning blocks are displayed dimmed in the UI but automatically excluded from the `◈` copy-to-clipboard text
 - **Auto-scroll + word wrap** — Chat pins to the bottom and wraps long lines to the panel width
-- **Model Management** — Download from HuggingFace, load / **unload** / delete local `.gguf` files
 - **Download Progress** — Real-time progress bar with filename, percent, and **cancel** support
-- **Fast close** — Clicking X hides the window instantly; the process force-exits if a worker is still mid-decode
+- **Fast close** — Clicking X hides the window instantly, signals the worker via `inference_request_stop()`, joins with a 1.5 s timeout, and falls back to `_Exit` if the worker is still mid-decode
 - **Cross-Platform** — Linux, macOS, Windows (MinGW/MSVC)
 
 ## Tech Stack
@@ -171,8 +169,8 @@ Wasteland/
 
 ### Left Panel
 
-- **Hub Models** — 4 predefined HuggingFace repos with radio buttons
-- **Custom ID or URL** — Enter any HF repo ID or full `/blob/` URL
+- **Hub Models** — 4 predefined HuggingFace repos with radio buttons (small, real, public instruction-tuned GGUFs — Qwen 2.5 0.5B/1.5B, Gemma 3 1B IT, SmolLM2 1.7B Instruct)
+- **Custom ID or URL** — Enter any HF repo ID or full `/blob/main/` URL (the downloader auto-rewrites `/blob/main/` → `/resolve/main/`)
 - **Target** — Shows resolved download target before clicking `[ DOWNLOAD ]`
 - **Progress** — Filename + percent during download, with `[ CANCEL ]` button
 - **Local Vault** — List of `.gguf` files with size:

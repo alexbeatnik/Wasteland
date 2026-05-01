@@ -26,6 +26,8 @@
 #define WASTELAND_MAX_MODEL_PATH_LEN 512
 #define WASTELAND_MAX_PROMPT_LEN   4096
 #define WASTELAND_MAX_HUB_MODELS   4
+#define WASTELAND_MAX_CHATS        64
+#define WASTELAND_CHAT_NAME_LEN    256
 
 /**
  * @brief Global application state shared between UI and worker threads.
@@ -61,14 +63,16 @@ typedef struct {
     size_t  chat_last_len;
 
     /* Multiple chats */
-    char chats[64][256];
+    char chats[WASTELAND_MAX_CHATS][WASTELAND_CHAT_NAME_LEN];
     int  chat_count;
     int  selected_chat; /* index, -1 if no chat loaded */
-    int  download_progress;      /* 0-100 */
-    int  download_active;
-    int  download_cancel;        /* set by UI, read by worker */
-    int  download_complete_flag; /* set by download thread, cleared by main */
-    int  download_success;
+    /* Cross-thread one-way flags — written by the detached download
+     * pthread, read by the main UI thread (or vice versa for cancel). */
+    volatile int download_progress;      /* 0-100 */
+    volatile int download_active;
+    volatile int download_cancel;        /* set by UI, read by worker */
+    volatile int download_complete_flag; /* set by download thread, cleared by main */
+    volatile int download_success;
     char status_msg[256];
     char last_status_msg[256];
     unsigned int status_timer;
@@ -82,7 +86,7 @@ typedef struct {
 int scan_local_models(char models_list[][WASTELAND_MAX_MODEL_PATH_LEN], int max_models);
 
 /* Scan chats/ directory for .txt files. Returns count. */
-int scan_local_chats(char chats_list[][256], int max_chats);
+int scan_local_chats(char chats_list[][WASTELAND_CHAT_NAME_LEN], int max_chats);
 
 /* Save and load chat history */
 void save_chat_history(const char *chat_name, const char *history);

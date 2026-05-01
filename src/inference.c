@@ -295,6 +295,16 @@ void inference_cancel_generation(inference_ctx_t *ictx)
     ictx->cancel_generation = 1;
 }
 
+void inference_request_stop(inference_ctx_t *ictx)
+{
+    if (!ictx) return;
+    ictx->running = 0;
+    ictx->cancel_generation = 1;
+    pthread_mutex_lock(&ictx->prompt_mutex);
+    pthread_cond_broadcast(&ictx->prompt_cond);
+    pthread_mutex_unlock(&ictx->prompt_mutex);
+}
+
 /* ---------------------------------------------------------------------------
  * <think>-tag stripper
  *
@@ -563,7 +573,13 @@ void* inference_worker_thread(void *arg)
         /* Flush any unprocessed tail in the tag carry buffer. */
         emit_filtered_flush(ictx);
 
+        /* Terminate the response with a newline so the next "> prompt"
+         * line is not glued to the trailing token. */
         pthread_mutex_lock(&ictx->output_mutex);
+        if (ictx->output_write_pos == 0 ||
+            ictx->output_buffer[ictx->output_write_pos - 1] != '\n') {
+            output_append_locked(ictx, "\n", 1);
+        }
         ictx->generating = 0;
         pthread_mutex_unlock(&ictx->output_mutex);
     }

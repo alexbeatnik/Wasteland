@@ -19,7 +19,9 @@
  * @return 0 on success, -1 on failure/cancel.
  */
 int network_download_model(const char *model_id, const char *output_dir,
-                           int *progress, int *active, int *cancel);
+                           volatile int *progress,
+                           volatile int *active,
+                           volatile int *cancel);
 
 /**
  * @brief Install a seccomp filter that kills the process if it ever attempts

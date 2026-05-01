@@ -38,6 +38,11 @@ int    inference_is_generating(inference_ctx_t *ctx);
  * Has no effect if no generation is in flight. */
 void   inference_cancel_generation(inference_ctx_t *ctx);
 
+/* Tell the worker to exit its loop and unblock any cond_wait. Safe to call
+ * from any thread; intended for shutdown. After this returns the worker is
+ * either already exiting or about to. */
+void   inference_request_stop(inference_ctx_t *ctx);
+
 /* Worker thread entry point ----------------------------------------------- */
 void* inference_worker_thread(void *arg);
 

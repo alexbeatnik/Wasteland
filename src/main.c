@@ -214,8 +214,8 @@ int main(int argc, char **argv)
     state.model_count = model_count;
     memcpy(state.models, models_tmp, sizeof(models_tmp));
     
-    char chats_tmp[64][256] = {0};
-    state.chat_count = scan_local_chats(chats_tmp, 64);
+    char chats_tmp[WASTELAND_MAX_CHATS][WASTELAND_CHAT_NAME_LEN] = {0};
+    state.chat_count = scan_local_chats(chats_tmp, WASTELAND_MAX_CHATS);
     memcpy(state.chats, chats_tmp, sizeof(chats_tmp));
     if (state.chat_count > 0) {
         state.selected_chat = 0;
@@ -359,8 +359,11 @@ int main(int argc, char **argv)
     
     SDL_HideWindow(win);
 
-    /* Wake the worker so any cond-wait returns. */
-    inference_submit_prompt(state.inference, "", "");
+    /* Tell the worker to stop and wake any cond-wait. We do NOT submit an
+     * empty prompt — with a model loaded, the chat template would still
+     * produce non-empty tokens and the worker would burn a generation
+     * cycle on the way out. */
+    inference_request_stop(state.inference);
 
     int join_ok = platform_thread_join_timeout(worker_thread, 1500);
     if (join_ok == 0) {

@@ -111,8 +111,8 @@ static int hf_find_first_gguf(const char *model_id, char *out_file, size_t out_s
  * --------------------------------------------------------------------------- */
 typedef struct {
     FILE *fp;
-    int  *progress;
-    int  *cancel;
+    volatile int *progress;
+    volatile int *cancel;
 } download_ctx_t;
 
 static size_t write_cb(void *ptr, size_t size, size_t nmemb, void *userdata)
@@ -141,7 +141,9 @@ static int progress_cb(void *clientp,
  * network_download_model
  * --------------------------------------------------------------------------- */
 int network_download_model(const char *model_id, const char *output_dir,
-                           int *progress, int *active, int *cancel)
+                           volatile int *progress,
+                           volatile int *active,
+                           volatile int *cancel)
 {
     if (!model_id || !output_dir || !active)
         return -1;
@@ -152,13 +154,22 @@ int network_download_model(const char *model_id, const char *output_dir,
 
     /* --- Resolve the effective download URL --- */
     if (strncmp(model_id, "http", 4) == 0) {
-        /* Full URL: convert /blob/main/ to /resolve/main/ for raw download */
+        /* Full URL: convert /blob/main/ (11 bytes) to /resolve/main/ (14 bytes).
+         * Order matters — shift the tail right by 3 *first*, then overwrite,
+         * otherwise the memcpy clobbers the first bytes of the filename
+         * before we get a chance to move them. */
         strncpy(url, model_id, sizeof(url) - 1);
         url[sizeof(url) - 1] = '\0';
         char *blob = strstr(url, "/blob/main/");
         if (blob) {
+            size_t tail_len = strlen(blob + 11) + 1; /* includes terminator */
+            size_t needed   = (size_t)(blob - url) + 14 + tail_len;
+            if (needed > sizeof(url)) {
+                fprintf(stderr, "[network] URL too long after rewrite\n");
+                return -1;
+            }
+            memmove(blob + 14, blob + 11, tail_len);
             memcpy(blob, "/resolve/main/", 14);
-            memmove(blob + 14, blob + 11, strlen(blob + 11) + 1);
             fprintf(stderr, "[network] Converted blob URL to resolve: %s\n", url);
         }
     } else if (strstr(model_id, ".gguf")) {

@@ -24,12 +24,13 @@ All mutable cross-thread state is in `app_state_t` (defined in `ui.h`):
 
 - `chat_mutex` protects `chat_history`.
 - `inference_ctx_t` contains internal mutexes for prompt / output / model access.
-- `download_active` / `download_progress` / `download_cancel` are written by the download thread, read by main.
+- `download_progress` / `download_active` / `download_cancel` / `download_complete_flag` / `download_success` are **`volatile int`** one-way flags shared between the detached download pthread and the main UI thread. The UI claims `download_active = 1` *before* `pthread_create` — if we deferred to `network_download_model` setting it, a fast double-click would slip through and spawn two concurrent downloaders writing the same file.
 - `loading_model_index` (UI-side) tracks which row is mid-load so the LOAD/DELETE buttons can be gated.
 - `chat_scroll_x`, `chat_scroll_y`, `chat_last_len` drive the auto-scroll-to-bottom behaviour for the chat group.
 - `system_prompt` stores user instructions and persists to `system_prompt.txt`.
-- `chats` (2D array), `chat_count`, `selected_chat` manage the multi-session functionality, saving state to `chats/*.txt`.
+- `chats` (2D array sized `WASTELAND_MAX_CHATS × WASTELAND_CHAT_NAME_LEN`), `chat_count`, `selected_chat` manage the multi-session functionality, saving state to `chats/*.txt`. Files are written with a 4-byte `WSTL` magic followed by RC4-obfuscated body (cosmetic only — the key lives in the binary; this just hides chat text from a casual file-manager preview). Files lacking the magic are read back as legacy plaintext.
 - `left_panel_collapsed` controls the UI layout state.
+- `scan_local_models()` / `scan_local_chats()` `qsort` their output lexicographically — `readdir` order is filesystem-defined and unstable, so the UI listing would otherwise jump around between launches.
 
 ### Inference Public API (`inference.h`)
 
@@ -49,20 +50,24 @@ void   inference_submit_prompt(inference_ctx_t*, const char *sys_prompt, const c
 size_t inference_read_output(inference_ctx_t*, char *buf, size_t size);
 int    inference_is_generating(inference_ctx_t*);
 void   inference_cancel_generation(inference_ctx_t*);
+void   inference_request_stop(inference_ctx_t*);  /* shutdown signal */
 
 void* inference_worker_thread(void *arg);
 ```
 
+The worker appends a trailing `\n` to the output buffer before clearing `generating`, so the next "> prompt" line in the chat history is never glued onto the last assistant token.
+
 ### Shutdown Protocol
 
 1. `state.running = 0` (set on `SDL_QUIT`).
-2. `SDL_HideWindow(win)` — user sees instant close.
-3. `inference_submit_prompt(ictx, "")` — wakes worker out of `cond_wait`.
-4. `platform_thread_join_timeout(worker_thread, 1500)`:
+2. Persist the active chat with `save_chat_history()`.
+3. `SDL_HideWindow(win)` — user sees instant close.
+4. `inference_request_stop(ictx)` — sets `ictx->running = 0`, raises `cancel_generation`, broadcasts on `prompt_cond`. Do **not** wake the worker by submitting an empty prompt: with a model loaded the chat template would still produce non-empty tokens and the worker would burn a full generation cycle on the way out.
+5. `platform_thread_join_timeout(worker_thread, 1500)`:
    - **Linux:** `pthread_timedjoin_np`.
    - **macOS / Windows:** polls `pthread_kill(thread, 0)` with 100 ms sleeps.
-5. **If join succeeds:** call `inference_shutdown()` (which also joins any in-flight load thread), tear down SDL/GL, return from `main`.
-6. **If join times out:** print a message and call `_Exit(0)` immediately. The OS reclaims the mmap'd model and kills the threads. Do **not** call `pthread_cancel` — llama.cpp contains C++ code (allocators, mutexes) that is not async-cancel-safe and will SIGABRT. `_Exit` is process-level termination, not thread cancellation, so no per-thread cleanup runs and no SIGABRT occurs.
+6. **If join succeeds:** call `inference_shutdown()` (which also joins any in-flight load thread), tear down SDL/GL, return from `main`.
+7. **If join times out:** print a message and call `_Exit(0)` immediately. The OS reclaims the mmap'd model and kills the threads. Do **not** call `pthread_cancel` — llama.cpp contains C++ code (allocators, mutexes) that is not async-cancel-safe and will SIGABRT. `_Exit` is process-level termination, not thread cancellation, so no per-thread cleanup runs and no SIGABRT occurs.
 
 ## API Conventions
 
@@ -95,6 +100,11 @@ void* inference_worker_thread(void *arg);
 - Compiler flags:
   - GCC/Clang: `-O3 -march=native -Wall -Wextra`
   - MSVC: `/O2 /W4`
+
+## Hub Models & URL Rewrite
+
+- `hub_models[]` in `ui.c` is a fixed-size array (`WASTELAND_MAX_HUB_MODELS = 4`) of HF repo IDs. Entries must be **real public GGUF repos** — the downloader resolves them through `hf_find_first_gguf()` against the live HF API, so a fictional ID fails with HTTP 404 at click time. Current set: `Qwen/Qwen2.5-0.5B-Instruct-GGUF`, `ggml-org/gemma-3-1b-it-GGUF`, `Qwen/Qwen2.5-1.5B-Instruct-GGUF`, `ggml-org/SmolLM2-1.7B-Instruct-GGUF`.
+- Custom URLs of the form `…/blob/main/<file>` are rewritten to `…/resolve/main/<file>` because HF only serves raw bytes from the latter. The rewrite is `+3` bytes long, so `network_download_model` must `memmove` the tail right by 3 *before* the `memcpy` overwrite — doing it in the other order corrupts the first 3 bytes of the filename.
 
 ## seccomp Filter Scope
 

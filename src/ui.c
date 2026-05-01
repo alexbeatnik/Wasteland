@@ -23,13 +23,14 @@
 /* ---------------------------------------------------------------------------
  * Predefined Hub Models (HuggingFace repo IDs)
  * These are resolved via the HF API to find the first .gguf file.
- * Sorted by parameter count (ascending).
+ * Sorted by parameter count (ascending). All four are real, public,
+ * instruction-tuned GGUF repos with a working chat template.
  * --------------------------------------------------------------------------- */
 static const char *hub_models[WASTELAND_MAX_HUB_MODELS] = {
-    "ggml-org/gemma-4-E2B-it-GGUF",
-    "ggml-org/gemma-4-E4B-it-GGUF",
-    "ggml-org/gemma-4-26B-A4B-it-GGUF",
-    "ggml-org/gemma-4-31B-it-GGUF"
+    "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+    "ggml-org/gemma-3-1b-it-GGUF",
+    "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+    "ggml-org/SmolLM2-1.7B-Instruct-GGUF"
 };
 
 /* ---------------------------------------------------------------------------
@@ -43,15 +44,24 @@ static struct nk_color col_mid_grey(void)   { return nk_rgb(0x44, 0x44, 0x44); }
 
 /* ---------------------------------------------------------------------------
  * scan_local_models
+ *
+ * readdir() / FindFirstFile() return entries in arbitrary, filesystem-defined
+ * order. We sort lexicographically so the UI listing is stable across
+ * launches and across different filesystems (ext4 vs btrfs vs NTFS).
  * --------------------------------------------------------------------------- */
+static int model_path_cmp(const void *a, const void *b)
+{
+    return strcmp((const char *)a, (const char *)b);
+}
+
 int scan_local_models(char models_list[][WASTELAND_MAX_MODEL_PATH_LEN], int max_models)
 {
+    int count = 0;
 #ifdef _WIN32
     WIN32_FIND_DATAA ffd;
     HANDLE hFind = FindFirstFileA("models\\*.gguf", &ffd);
     if (hFind == INVALID_HANDLE_VALUE) return 0;
 
-    int count = 0;
     do {
         if (count < max_models) {
             snprintf(models_list[count], WASTELAND_MAX_MODEL_PATH_LEN,
@@ -60,12 +70,10 @@ int scan_local_models(char models_list[][WASTELAND_MAX_MODEL_PATH_LEN], int max_
         }
     } while (FindNextFileA(hFind, &ffd) != 0);
     FindClose(hFind);
-    return count;
 #else
     DIR *d = opendir("models");
     if (!d) return 0;
 
-    int count = 0;
     struct dirent *ent;
     while ((ent = readdir(d)) != NULL && count < max_models) {
         size_t len = strlen(ent->d_name);
@@ -76,43 +84,57 @@ int scan_local_models(char models_list[][WASTELAND_MAX_MODEL_PATH_LEN], int max_
         }
     }
     closedir(d);
-    return count;
 #endif
+    if (count > 1) {
+        qsort(models_list, (size_t)count,
+              WASTELAND_MAX_MODEL_PATH_LEN, model_path_cmp);
+    }
+    return count;
 }
 
 /* ---------------------------------------------------------------------------
  * Chat persistence
  * --------------------------------------------------------------------------- */
-int scan_local_chats(char chats_list[][256], int max_chats)
+static int chat_name_cmp(const void *a, const void *b)
 {
+    return strcmp((const char *)a, (const char *)b);
+}
+
+int scan_local_chats(char chats_list[][WASTELAND_CHAT_NAME_LEN], int max_chats)
+{
+    int count = 0;
 #ifdef _WIN32
     WIN32_FIND_DATA fd;
     HANDLE hFind = FindFirstFile("chats\\*.txt", &fd);
     if (hFind == INVALID_HANDLE_VALUE) return 0;
-    int count = 0;
     do {
-        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-            snprintf(chats_list[count], 256, "%s", fd.cFileName);
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+            count < max_chats) {
+            snprintf(chats_list[count], WASTELAND_CHAT_NAME_LEN,
+                     "%s", fd.cFileName);
             count++;
         }
-    } while (FindNextFile(hFind, &fd) != 0 && count < max_chats);
+    } while (FindNextFile(hFind, &fd) != 0);
     FindClose(hFind);
-    return count;
 #else
     DIR *d = opendir("chats");
     if (!d) return 0;
-    int count = 0;
     struct dirent *ent;
     while ((ent = readdir(d)) != NULL && count < max_chats) {
         size_t len = strlen(ent->d_name);
         if (len > 4 && strcmp(ent->d_name + len - 4, ".txt") == 0) {
-            snprintf(chats_list[count], 256, "%s", ent->d_name);
+            snprintf(chats_list[count], WASTELAND_CHAT_NAME_LEN,
+                     "%s", ent->d_name);
             count++;
         }
     }
     closedir(d);
-    return count;
 #endif
+    if (count > 1) {
+        qsort(chats_list, (size_t)count,
+              WASTELAND_CHAT_NAME_LEN, chat_name_cmp);
+    }
+    return count;
 }
 
 /* ---------------------------------------------------------------------------
@@ -583,7 +605,7 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
 
             nk_layout_row_dynamic(nk, 20, 1);
             if (nk_button_label(nk, "[ NEW CHAT ]")) {
-                char new_chat[256];
+                char new_chat[WASTELAND_CHAT_NAME_LEN];
                 char base[] = "New Chat";
                 snprintf(new_chat, sizeof(new_chat), "%s.txt", base);
                 char path[512];
@@ -603,8 +625,9 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                 state->chat_history[0] = '\0';
                 state->chat_last_len = 0;
                 
-                if (state->chat_count < 64) {
-                    snprintf(state->chats[state->chat_count], 256, "%s", new_chat);
+                if (state->chat_count < WASTELAND_MAX_CHATS) {
+                    snprintf(state->chats[state->chat_count],
+                             WASTELAND_CHAT_NAME_LEN, "%s", new_chat);
                     state->selected_chat = state->chat_count;
                     state->chat_count++;
                     save_chat_history(new_chat, "");
@@ -743,10 +766,22 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                         strncpy(state->hf_model_id, target_id,
                                 sizeof(state->hf_model_id) - 1);
                         state->hf_model_id[sizeof(state->hf_model_id)-1] = '\0';
+                        /* Claim the download slot here, before pthread_create.
+                         * If we deferred this to network_download_model() a
+                         * fast double-click would slip through and spawn two
+                         * concurrent downloaders writing the same file. */
+                        state->download_active   = 1;
+                        state->download_progress = 0;
+                        state->download_cancel   = 0;
                         pthread_t tid;
-                        pthread_create(&tid, NULL,
-                                       download_thread_fn, state);
-                        pthread_detach(tid);
+                        if (pthread_create(&tid, NULL,
+                                           download_thread_fn, state) != 0) {
+                            state->download_active = 0;
+                            snprintf(state->status_msg, sizeof(state->status_msg),
+                                     "ERROR: Failed to spawn download thread.");
+                        } else {
+                            pthread_detach(tid);
+                        }
                     }
                 }
 
@@ -1208,10 +1243,14 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                     inference_is_model_loaded(state->inference))
                 {
                     /* Auto-create chat if none active */
-                    if (state->selected_chat == -1 && state->chat_count < 64) {
-                        char new_chat[256];
-                        generate_chat_name_from_prompt(state->input_buffer, new_chat, sizeof(new_chat));
-                        snprintf(state->chats[state->chat_count], 256, "%s", new_chat);
+                    if (state->selected_chat == -1 &&
+                        state->chat_count < WASTELAND_MAX_CHATS) {
+                        char new_chat[WASTELAND_CHAT_NAME_LEN];
+                        generate_chat_name_from_prompt(state->input_buffer,
+                                                       new_chat,
+                                                       sizeof(new_chat));
+                        snprintf(state->chats[state->chat_count],
+                                 WASTELAND_CHAT_NAME_LEN, "%s", new_chat);
                         state->selected_chat = state->chat_count;
                         state->chat_count++;
                         save_chat_history(new_chat, "");
