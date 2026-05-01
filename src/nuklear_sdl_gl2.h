@@ -74,6 +74,37 @@ static const nk_rune nk_sdl_unicode_ranges[] = {
     0
 };
 
+/* ---------------------------------------------------------------------------
+ * Clipboard glue: Nuklear delivers Ctrl-C/Ctrl-V/Ctrl-X as NK_KEY_* events,
+ * but the actual byte transfer goes through ctx->clip.{copy,paste}. Without
+ * these hooks installed, the keystrokes hit a no-op sink and pasting is
+ * silently dead — which is exactly the bug we're fixing here.
+ * --------------------------------------------------------------------------- */
+static void
+nk_sdl_clipboard_paste(nk_handle usr, struct nk_text_edit *edit)
+{
+    (void)usr;
+    char *text = SDL_GetClipboardText();
+    if (!text) return;
+    nk_textedit_paste(edit, text, nk_strlen(text));
+    SDL_free(text);
+}
+
+static void
+nk_sdl_clipboard_copy(nk_handle usr, const char *text, int len)
+{
+    (void)usr;
+    if (!text || len <= 0) return;
+    /* SDL_SetClipboardText needs a NUL-terminated string and Nuklear's
+     * selection text is not, so copy into a scratch buffer first. */
+    char *buf = (char *)malloc((size_t)len + 1);
+    if (!buf) return;
+    memcpy(buf, text, (size_t)len);
+    buf[len] = '\0';
+    SDL_SetClipboardText(buf);
+    free(buf);
+}
+
 NK_API struct nk_context*
 nk_sdl_init(SDL_Window *win)
 {
@@ -81,6 +112,10 @@ nk_sdl_init(SDL_Window *win)
     nk_init_default(&sdl.ctx, 0);
     nk_buffer_init_default(&sdl.dev.cmds);
     sdl.dev.font_tex = 0;
+
+    sdl.ctx.clip.copy     = nk_sdl_clipboard_copy;
+    sdl.ctx.clip.paste    = nk_sdl_clipboard_paste;
+    sdl.ctx.clip.userdata = nk_handle_ptr(0);
 
     /* --- Font baking --- */
     nk_font_atlas_init_default(&sdl.atlas);
