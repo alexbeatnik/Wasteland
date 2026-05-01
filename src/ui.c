@@ -587,9 +587,16 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                 nk_filter_default);
             state->input_buffer[input_len] = '\0';
 
-            /* Transmit button (or Enter key) */
-            if ((active & NK_EDIT_COMMITED) ||
-                nk_button_label(nk, "TRANSMIT"))
+            /* While the model is generating, swap TRANSMIT for STOP so the
+             * same screen real estate doubles as the cancel control. Enter
+             * is also routed through this gate so the user can't queue a
+             * second prompt mid-generation. */
+            if (state->is_generating) {
+                if (nk_button_label(nk, "STOP")) {
+                    inference_cancel_generation(state->inference);
+                }
+            } else if ((active & NK_EDIT_COMMITED) ||
+                       nk_button_label(nk, "TRANSMIT"))
             {
                 if (state->input_buffer[0] &&
                     inference_is_model_loaded(state->inference))

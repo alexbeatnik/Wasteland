@@ -34,6 +34,10 @@ void   inference_submit_prompt(inference_ctx_t *ctx, const char *prompt);
 size_t inference_read_output(inference_ctx_t *ctx, char *buf, size_t size);
 int    inference_is_generating(inference_ctx_t *ctx);
 
+/* Request the worker to stop emitting tokens for the current prompt.
+ * Has no effect if no generation is in flight. */
+void   inference_cancel_generation(inference_ctx_t *ctx);
+
 /* Worker thread entry point ----------------------------------------------- */
 void* inference_worker_thread(void *arg);
 

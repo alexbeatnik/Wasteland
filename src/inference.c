@@ -31,6 +31,7 @@ struct inference_ctx {
     size_t output_write_pos;
     size_t output_read_pos;
     int    generating;
+    volatile int cancel_generation; /* set by UI, polled by worker */
 
     /* Prompt queue (producer: main, consumer: worker) */
     pthread_mutex_t prompt_mutex;
@@ -271,6 +272,12 @@ int inference_is_generating(inference_ctx_t *ictx)
     return gen;
 }
 
+void inference_cancel_generation(inference_ctx_t *ictx)
+{
+    if (!ictx) return;
+    ictx->cancel_generation = 1;
+}
+
 /* ---------------------------------------------------------------------------
  * Worker thread
  * --------------------------------------------------------------------------- */
@@ -302,7 +309,8 @@ void* inference_worker_thread(void *arg)
 
         if (!model || !ctx) continue;
 
-        /* ---- Reset output buffer ---- */
+        /* ---- Reset output buffer + cancel flag ---- */
+        ictx->cancel_generation = 0;
         pthread_mutex_lock(&ictx->output_mutex);
         ictx->output_write_pos = 0;
         ictx->output_read_pos  = 0;
@@ -310,10 +318,40 @@ void* inference_worker_thread(void *arg)
         ictx->generating = 1;
         pthread_mutex_unlock(&ictx->output_mutex);
 
-        /* ---- Tokenize raw prompt (chat template disabled for stability) ---- */
+        /* ---- Apply the model's chat template -----------------------------
+         * Without this, an instruction-tuned model never sees its
+         * <|im_start|>/<|im_end|> markers and just continues the raw text
+         * autoregressively — that's the "hallucinated math" output. We
+         * also wipe the KV cache so each turn is a clean conversation
+         * (multi-turn memory is a v0.2 problem). */
+        llama_memory_clear(llama_get_memory(ctx), true);
+
+        char fmtd[8192];
+        const char *to_tokenize = prompt;
+        int to_tokenize_len     = (int)strlen(prompt);
+
+        const char *tmpl = llama_model_chat_template(model, NULL);
+        if (tmpl) {
+            struct llama_chat_message msgs[1];
+            msgs[0].role    = "user";
+            msgs[0].content = prompt;
+            int32_t fl = llama_chat_apply_template(tmpl, msgs, 1, true,
+                                                   fmtd, (int32_t)sizeof(fmtd));
+            if (fl > 0 && fl < (int32_t)sizeof(fmtd)) {
+                fmtd[fl] = '\0';
+                to_tokenize     = fmtd;
+                to_tokenize_len = fl;
+            } else {
+                fprintf(stderr,
+                        "[inference] chat_apply_template rc=%d, falling back\n",
+                        fl);
+            }
+        }
+
         const struct llama_vocab *vocab = llama_model_get_vocab(model);
         llama_token prompt_tokens[4096];
-        int n_tokens = llama_tokenize(vocab, prompt, (int)strlen(prompt),
+        /* parse_special=true so <|im_start|>/<|im_end|> become single tokens. */
+        int n_tokens = llama_tokenize(vocab, to_tokenize, to_tokenize_len,
                                       prompt_tokens, 4096,
                                       true, true);
         if (n_tokens < 0) {
@@ -351,6 +389,8 @@ void* inference_worker_thread(void *arg)
 
         /* ---- Generate response ---- */
         for (int i = 0; i < MAX_NEW_TOKENS && ictx->running; i++) {
+            if (ictx->cancel_generation) break;
+
             llama_token new_token = llama_sampler_sample(smpl, ctx, -1);
 
             /* Stop on end-of-generation tokens */
