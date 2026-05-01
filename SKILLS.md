@@ -23,7 +23,9 @@ This project does not use a formal skill system. The following domains are relev
 
 - Nuklear immediate-mode GUI: layouts, groups, scrolled groups (`nk_group_scrolled_offset_begin`).
 - Custom auto-scroll-to-bottom via the `nk_uint` scroll-offset API (Nuklear clamps oversized values to max).
+- Collapsible UI panels dynamically adjusting layout widths.
 - Word wrap with measured row heights using the active font's `width()` callback.
+- Custom rendering of TTF fonts (`DejaVuSansMono`) mapped with specific Unicode ranges (e.g. Cyrillic `0x0400-0x04FF`).
 - SDL2 windowing and event handling.
 - OpenGL 2.1 fixed-function pipeline.
 - Font atlas baking and vertex buffer rendering.
@@ -39,11 +41,13 @@ This project does not use a formal skill system. The following domains are relev
 - Greedy sampling with `llama_sampler_chain` + `llama_sampler_init_greedy`.
 - Detection of end-of-generation tokens via `llama_vocab_is_eog`.
 
-### Stream Processing
+### Stream Processing & Data Persistence
 
 - Token-by-token streaming with carry buffers for partial-match safety.
-- Stripping reasoning markers (`<think>` / `</think>`) without losing reasoning content.
-- Searching for the **earliest** of multiple substring patterns and only retaining the smallest possible suffix that could begin a future match.
+- Intercepting reasoning markers (`<think>` / `</think>`) and rendering them differently (dimmed text).
+- Custom UI string parsers to selectively skip reasoning blocks when copying chat text to the clipboard.
+- Generating human-readable filenames (stripping filesystem-unsafe characters) from dynamic prompts.
+- Persisting state across application runs using simple text files (e.g. `system_prompt.txt` and `chats/*.txt`).
 
 ### Network & Security
 

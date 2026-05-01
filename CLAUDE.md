@@ -27,6 +27,9 @@ All mutable cross-thread state is in `app_state_t` (defined in `ui.h`):
 - `download_active` / `download_progress` / `download_cancel` are written by the download thread, read by main.
 - `loading_model_index` (UI-side) tracks which row is mid-load so the LOAD/DELETE buttons can be gated.
 - `chat_scroll_x`, `chat_scroll_y`, `chat_last_len` drive the auto-scroll-to-bottom behaviour for the chat group.
+- `system_prompt` stores user instructions and persists to `system_prompt.txt`.
+- `chats` (2D array), `chat_count`, `selected_chat` manage the multi-session functionality, saving state to `chats/*.txt`.
+- `left_panel_collapsed` controls the UI layout state.
 
 ### Inference Public API (`inference.h`)
 
@@ -42,7 +45,7 @@ int  inference_load_model_async(inference_ctx_t*, const char *path);    /* spawn
 int  inference_is_loading(inference_ctx_t*);
 int  inference_take_load_result(inference_ctx_t*);                      /* 1 ok / -1 fail / 0 none */
 
-void   inference_submit_prompt(inference_ctx_t*, const char *prompt);
+void   inference_submit_prompt(inference_ctx_t*, const char *sys_prompt, const char *prompt);
 size_t inference_read_output(inference_ctx_t*, char *buf, size_t size);
 int    inference_is_generating(inference_ctx_t*);
 void   inference_cancel_generation(inference_ctx_t*);
@@ -74,13 +77,13 @@ void* inference_worker_thread(void *arg);
   - `NK_INCLUDE_FIXED_TYPES`, `NK_INCLUDE_DEFAULT_ALLOCATOR`, `NK_INCLUDE_VERTEX_BUFFER_OUTPUT`, `NK_INCLUDE_FONT_BAKING`, `NK_INCLUDE_DEFAULT_FONT`, `NK_INCLUDE_STANDARD_IO`, `NK_INCLUDE_STANDARD_VARARGS`
 - Chat history is rendered as a scrolled group (`nk_group_scrolled_offset_begin`) with per-line `nk_label_colored_wrap`. Row height per logical chat line is computed from `count_wrap_lines()` (binary search via the active font's `width()` callback). Auto-scroll to bottom is achieved by setting `chat_scroll_y` to a large sentinel whenever `chat_history` grows; Nuklear clamps it to the actual max.
 
-## `<think>` Tag Stripping
+## `<think>` Tag Stripping & Rendering
 
-`emit_filtered_piece()` in `inference.c` removes the literal byte sequences `<think>` and `</think>` from the streaming output while preserving everything else (including the reasoning text between the tags). Implementation notes:
+`emit_filtered_piece()` in `inference.c` transforms the literal byte sequences `<think>` and `</think>` from the streaming output into `-- THINK --` and `-- END THINK --` markers. Implementation notes:
 
 - `tag_carry` (7 bytes, `TAG_CARRY_MAX`) is the longest possible partial-tag suffix kept between calls. `</think>` is 8 bytes, so we reserve up to 7 trailing bytes that might be the start of the next tag.
 - Carry is reset (`tag_carry_len = 0`) at the start of each prompt and flushed verbatim at end of generation via `emit_filtered_flush()`.
-- The filter searches for the **earliest** of `<think>` / `</think>` in the staged buffer, emits the prefix, skips the tag bytes, then loops.
+- The UI parser in `ui.c` looks for these `-- THINK --` markers to render reasoning text in a dimmer colour (`amber_dim`) and to explicitly exclude it from the `◈` copy-to-clipboard functionality.
 
 ## Cross-Platform Notes
 

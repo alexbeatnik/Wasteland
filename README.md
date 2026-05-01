@@ -4,7 +4,7 @@ A highly secure, offline-first LLM chat application with a retro-futuristic TUI-
 
 ## Overview
 
-Wasteland is a local LLM inference client built in pure C with a Pip-Boy inspired amber-on-black CRT terminal aesthetic. It runs entirely offline once a model is loaded, and uses Linux seccomp (where available) to physically prevent the process from opening any new IP socket for the rest of its lifetime.
+Wasteland is a local LLM inference client built in pure C with a vintage PC-inspired amber-on-black CRT terminal aesthetic. It runs entirely offline once a model is loaded, and uses Linux seccomp (where available) to physically prevent the process from opening any new IP socket for the rest of its lifetime.
 
 ## Features
 
@@ -16,10 +16,13 @@ Wasteland is a local LLM inference client built in pure C with a Pip-Boy inspire
 - **Model Management** — Download from HuggingFace, load / **unload** / delete local `.gguf` files
 - **Stop generation** — `STOP` button cancels an in-flight response mid-token
 - **Chat template** — Uses each model's built-in template (`llama_chat_apply_template`) so instruction-tuned models behave correctly
-- **Reasoning-tag stripping** — `<think>…</think>` markers from Qwen-style models are dropped from the stream while the reasoning text itself is preserved
+- **Multiple Chats** — Create, load, and switch between multiple named chat sessions automatically saved to disk
+- **System Prompt** — Configure and persist a system prompt to guide model behaviour
+- **Cyrillic & Unicode** — Full Cyrillic support and built-in UI icons via `DejaVuSansMono`
+- **Smart Reasoning** — `<think>` reasoning blocks are displayed dimly in the UI, but automatically skipped when copying the final answer
 - **Auto-scroll + word wrap** — Chat pins to the bottom and wraps long lines to the panel width
+- **Model Management** — Download from HuggingFace, load / **unload** / delete local `.gguf` files
 - **Download Progress** — Real-time progress bar with filename, percent, and **cancel** support
-- **File Sizes** — Model sizes displayed in human-readable format (GB/MB/KB)
 - **Fast close** — Clicking X hides the window instantly; the process force-exits if a worker is still mid-decode
 - **Cross-Platform** — Linux, macOS, Windows (MinGW/MSVC)
 
@@ -177,14 +180,22 @@ Wasteland/
   - `[ UNLOAD: name | size ]` — currently loaded model; click to free it
   - `[ DELETE ]` — remove the file from disk (disabled while a load is in flight or generation is running)
   - `[ REFRESH ]` — re-scan `models/`
+- **System Prompt** — Multi-line input for system instructions, saved between sessions
+- **Chats** — Manage multiple persistent chat sessions:
+  - `[ NEW CHAT ]` — Start a new session. It will be automatically named based on your first message.
+  - `[ LOAD ]` / `[ ACTIVE ]` — Switch between chat sessions
+  - `[ DEL ]` — Delete a chat session
 - **Status footer** — "NET: LOCKDOWN ACTIVE" once a model is loaded; otherwise "NET: DISCONNECTED (READY)"
 
-### Right Panel
+### Right Panel (Collapsible)
 
-- **Chat history** — Scrollable, word-wrapped, auto-pins to the bottom on new tokens. `<think>…</think>` markers from reasoning models are stripped automatically.
+- **Chat history** — Scrollable, word-wrapped, auto-pins to the bottom on new tokens. 
+  - Code blocks and reasoning blocks (`<think>`) are highlighted/dimmed.
+  - Click the **◈** icon to copy code blocks or the final assistant response. Reasoning blocks are automatically excluded from the copied text.
 - **Input** — `>` prompt with text field
-- **`TRANSMIT`** — submit the prompt (Enter also works)
-- **`STOP`** — replaces TRANSMIT while the model is generating; cancels the current response
+- **`▶` (Play)** — submit the prompt (Enter also works)
+- **`■` (Stop)** — replaces Play while the model is generating; cancels the current response
+- **Status message** — temporary non-intrusive notifications (like "Response copied") appear beneath the input box
 
 ## Security Model
 

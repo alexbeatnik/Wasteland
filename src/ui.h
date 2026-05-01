@@ -88,7 +88,7 @@ int scan_local_chats(char chats_list[][256], int max_chats);
 void save_chat_history(const char *chat_name, const char *history);
 void load_chat_history(const char *chat_name, char *history, size_t max_len);
 
-/* Apply the retro amber-on-black Pip-Boy aesthetic. */
+/* Apply the retro amber-on-black vintage PC terminal aesthetic. */
 void ui_apply_amber_theme(struct nk_context *nk);
 
 /* Render one complete frame of the UI. Called from the main thread. */

@@ -39,17 +39,20 @@ Anything that can take >100 ms must not run on the UI thread. The UI thread is t
 
 ## UI Rules
 
-- Amber monochrome palette only: `#FFB000` on dark charcoal / black.
-- Buttons use square brackets and verbs: `[ DOWNLOAD ]`, `[ REFRESH ]`, `[ DELETE ]`, `[ CANCEL ]`, `[ LOAD: name | size ]`, `[ UNLOAD: name | size ]`, `[ LOADING: name | size ... ]`.
-- The right-panel send control has two states: `TRANSMIT` when idle, `STOP` while `state->is_generating` is true. Enter is gated through the same path so it never fires during generation.
+- Amber monochrome palette only: `#FFB000` on dark charcoal / black. `amber_dim` used for reasoning text.
+- Buttons use square brackets and verbs: `[ DOWNLOAD ]`, `[ NEW CHAT ]`, `[ ACTIVE ]`, `[ LOAD ]`, `[ DEL ]`.
+- The right-panel send control has two states: `▶` (Play) when idle, `■` (Stop) while `state->is_generating` is true. Enter is gated through the same path so it never fires during generation.
 - CRT terminal aesthetic — no rounded corners, no gradients.
 - Long chat lines must wrap to the chat-panel width. Use `count_wrap_lines()` + `nk_label_colored_wrap` with a row height of `font_h * wraps + 2`. Hardcoded character counts will mis-wrap on resize and on non-monospace fonts.
-- New chat content auto-scrolls to the bottom by setting `state->chat_scroll_y` to a large sentinel before `nk_group_scrolled_offset_begin`. Do not introduce `nk_edit_string` for the chat — its scrollbar position is not exposed.
+- New chat content auto-scrolls to the bottom by setting `state->chat_scroll_y` to a large sentinel before `nk_group_scrolled_offset_begin`.
+- Left panel is collapsible (`«` / `»` toggle in the header). When collapsed, chat takes the full width.
+- Status messages (e.g. "Response copied") are shown below the input buffer and auto-cleared using `SDL_GetTicks()`.
+- The `◈` icon copies assistant responses. It explicitly skips content inside `-- THINK --` blocks.
 
 ## Stream Filtering
 
-- `<think>` and `</think>` literals are stripped by `emit_filtered_piece()` in `inference.c`. The reasoning text between them is preserved.
-- The filter uses a 7-byte carry buffer (`TAG_CARRY_MAX`) to handle tags that get split across two token pieces. If you change the set of stripped literals, update both the carry size (longest literal − 1) and the search loops.
+- `<think>` and `</think>` literals are intercepted by `emit_filtered_piece()` in `inference.c` and replaced with `-- THINK --` and `-- END THINK --` markers.
+- The filter uses a 7-byte carry buffer (`TAG_CARRY_MAX`) to handle tags that get split across two token pieces.
 - Reset `tag_carry_len = 0` at the start of every new prompt and flush via `emit_filtered_flush()` at end of generation.
 
 ## Testing Protocol
