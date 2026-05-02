@@ -1096,9 +1096,17 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
              * render. The amber theme already paints text/cursor, so the
              * box visually matches the rest of the terminal. */
             size_t chat_len = strlen(state->chat_history);
-            (void)state->chat_last_len;  /* scroll-to-bottom is a no-op now —
-                                            the edit widget keeps its own
-                                            scrollbar tracking the cursor. */
+            /* Auto-scroll to bottom whenever new tokens arrive. The outer
+             * scrolled group (below) holds many sub-edit-boxes — none of
+             * them know about the cursor — so we steer the OUTER scrollbar
+             * by setting chat_scroll_y to a max sentinel; Nuklear clamps it
+             * down to the real max on next layout, which is exactly the
+             * "pinned to bottom" behaviour the user expects while the model
+             * streams its reply. We re-arm on every growth so even a slow
+             * trickle of bytes keeps the view stuck at the bottom. */
+            if (chat_len > state->chat_last_len) {
+                state->chat_scroll_y = (nk_uint)0x7FFFFFFF;
+            }
             state->chat_last_len = chat_len;
 
             /* Chat area: right-panel minus header/footer controls.
