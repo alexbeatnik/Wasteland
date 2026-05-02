@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Wasteland Terminal
+GenericName=Offline LLM Chat
+Comment=Offline-first amber-CRT LLM chat client built on llama.cpp
+Exec=Wasteland
+Icon=wasteland
+Terminal=false
+Categories=Utility;Development;
+Keywords=llm;chat;ai;llama;offline;
+StartupWMClass=Wasteland Terminal

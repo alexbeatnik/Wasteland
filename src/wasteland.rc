@@ -1,0 +1,4 @@
+/* Windows resource: embeds the application icon into Wasteland.exe so
+ * Explorer / taskbar / Alt-Tab show the amber CRT logo. The numeric ID 1
+ * (IDI_ICON1) is what SDL2 looks up by default for SDL_WINDOW_ICON. */
+1 ICON "../assets/icon.ico"
