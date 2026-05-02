@@ -42,7 +42,7 @@ jobs:
     - name: Install Dependencies (macOS)
       if: matrix.target_os == 'macos'
       run: |
-        brew install cmake sdl2 curl
+        brew install cmake sdl2 curl pkg-config
 
     - name: Install Dependencies (Windows)
       if: matrix.target_os == 'windows'
@@ -55,7 +55,13 @@ jobs:
 
     - name: Configure CMake (macOS)
       if: matrix.target_os == 'macos'
-      run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0
+      run: |
+        # Homebrew installs to /opt/homebrew on Apple Silicon and /usr/local on
+        # Intel; point CMake at the right prefix so find_package(SDL2)/CURL
+        # picks up the bottle-shipped Config files.
+        BREW_PREFIX="$(brew --prefix)"
+        cmake -B build -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_PREFIX_PATH="$(brew --prefix sdl2);$(brew --prefix curl);${BREW_PREFIX}"
 
     - name: Configure CMake (Windows)
       if: matrix.target_os == 'windows'

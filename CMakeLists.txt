@@ -66,8 +66,25 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_library(SECCOMP_LIBRARY seccomp)
 endif()
 
-# SDL2 target compatibility (older FindSDL2 modules)
+# SDL2 target compatibility.
+#
+# Homebrew on macOS ships SDL2Config.cmake but historically some bottles have
+# shipped a target without INTERFACE_INCLUDE_DIRECTORIES populated, which makes
+# `#include <SDL2/SDL.h>` fail with "file not found" even though SDL2 is
+# installed. Detect that case and fall back to pkg-config (which always works
+# on macOS / Linux when sdl2.pc is present) so the include path is restored.
 if(TARGET SDL2::SDL2)
+    get_target_property(_sdl2_inc SDL2::SDL2 INTERFACE_INCLUDE_DIRECTORIES)
+    if(NOT _sdl2_inc OR _sdl2_inc STREQUAL "_sdl2_inc-NOTFOUND")
+        find_package(PkgConfig QUIET)
+        if(PkgConfig_FOUND)
+            pkg_check_modules(SDL2_PC QUIET sdl2)
+            if(SDL2_PC_FOUND)
+                set_target_properties(SDL2::SDL2 PROPERTIES
+                    INTERFACE_INCLUDE_DIRECTORIES "${SDL2_PC_INCLUDE_DIRS}")
+            endif()
+        endif()
+    endif()
     set(SDL2_LINK_TARGET SDL2::SDL2)
 else()
     add_library(SDL2::SDL2 INTERFACE IMPORTED)
