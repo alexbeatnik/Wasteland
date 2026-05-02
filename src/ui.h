@@ -21,7 +21,6 @@
 
 #include "inference.h"
 
-#define WASTELAND_MAX_CHAT_HISTORY 65536
 #define WASTELAND_MAX_MODELS       64
 #define WASTELAND_MAX_MODEL_PATH_LEN 512
 #define WASTELAND_MAX_PROMPT_LEN   4096
@@ -103,6 +102,10 @@ typedef struct {
     char          *agent_pending_search;   /* heap, apply_edit search */
     char          *agent_pending_replace;  /* heap, apply_edit replace */
     volatile int   agent_approval;         /* 0=waiting, +1=apply, -1=reject */
+
+    /* Context usage tracking (updated after each generation) */
+    int context_tokens;
+    int context_max;
 
     volatile int running;
 } app_state_t;

@@ -96,8 +96,110 @@ struct inference_ctx {
     char           *pending_replace;   /* heap, apply_edit replace */
     volatile int    pending_approval;  /* 0=waiting, +1=apply, -1=reject */
 
+    /* Full chat history (mirrored from app_state so the worker can build
+     * a multi-turn message list for the chat template). */
+    pthread_mutex_t history_mutex;
+    char chat_history[WASTELAND_MAX_CHAT_HISTORY];
+
     volatile int running;
 };
+
+#define MAX_HISTORY_MSGS 1024
+
+/* ---------------------------------------------------------------------------
+ * Chat-history parser
+ *
+ * Turns the flat UI history string into user/assistant pairs.
+ * Lines starting with "> " are user messages; everything up to the next
+ * "> " line (or EOF) is the assistant reply.
+ * An unterminated user message at the very end is ignored — the current
+ * prompt is supplied separately via ictx->prompt.
+ * --------------------------------------------------------------------------- */
+static int parse_chat_history(const char *history,
+                              struct llama_chat_message *msgs,
+                              char **owned,
+                              int max_msgs)
+{
+    int n = 0;
+    const char *p = history;
+    const char *end = history + strlen(history);
+
+    while (p < end && n < max_msgs) {
+        while (p < end && (*p == '\n' || *p == '\r')) p++;
+        if (p >= end) break;
+
+        if (p + 2 > end || p[0] != '>' || p[1] != ' ') {
+            const char *nl = memchr(p, '\n', (size_t)(end - p));
+            p = nl ? nl + 1 : end;
+            continue;
+        }
+
+        const char *user_start = p + 2;
+        const char *nl = memchr(p, '\n', (size_t)(end - p));
+        const char *line_end = nl ? nl : end;
+        size_t ulen = (size_t)(line_end - user_start);
+
+        char *uc = (char *)malloc(ulen + 1);
+        if (!uc) break;
+        memcpy(uc, user_start, ulen);
+        uc[ulen] = '\0';
+
+        msgs[n].role = "user";
+        msgs[n].content = uc;
+        owned[n] = uc;
+        n++;
+
+        p = line_end + 1;
+        if (p >= end) break;
+
+        const char *assist_start = p;
+        const char *next_user = NULL;
+        while (p < end) {
+            const char *pnl = memchr(p, '\n', (size_t)(end - p));
+            if (!pnl) pnl = end;
+            if (pnl + 2 < end && pnl[1] == '>' && pnl[2] == ' ') {
+                next_user = pnl;
+                break;
+            }
+            p = (pnl < end) ? pnl + 1 : end;
+        }
+
+        if (next_user) {
+            size_t alen = (size_t)(next_user - assist_start);
+            while (alen > 0 && (assist_start[alen - 1] == '\n' ||
+                                assist_start[alen - 1] == '\r')) alen--;
+            if (alen > 0 && n < max_msgs) {
+                char *ac = (char *)malloc(alen + 1);
+                if (ac) {
+                    memcpy(ac, assist_start, alen);
+                    ac[alen] = '\0';
+                    msgs[n].role = "assistant";
+                    msgs[n].content = ac;
+                    owned[n] = ac;
+                    n++;
+                }
+            }
+            p = next_user + 1;
+        } else {
+            /* Reached end — this user message has no assistant reply yet.
+             * Discard it; the current prompt is supplied separately. */
+            n--;
+            free(owned[n]);
+            owned[n] = NULL;
+            break;
+        }
+    }
+
+    return n;
+}
+
+static void free_parsed_msgs(char **owned, int n)
+{
+    for (int i = 0; i < n; i++) {
+        free(owned[i]);
+        owned[i] = NULL;
+    }
+}
 
 /* ---------------------------------------------------------------------------
  * Lifecycle
@@ -113,6 +215,7 @@ inference_ctx_t* inference_init(void)
     pthread_mutex_init(&ictx->model_mutex, NULL);
     pthread_mutex_init(&ictx->agent_mutex, NULL);
     pthread_mutex_init(&ictx->pending_mutex, NULL);
+    pthread_mutex_init(&ictx->history_mutex, NULL);
 
     ictx->running = 1;
     return ictx;
@@ -142,6 +245,7 @@ void inference_shutdown(inference_ctx_t *ictx)
     pthread_mutex_destroy(&ictx->model_mutex);
     pthread_mutex_destroy(&ictx->agent_mutex);
     pthread_mutex_destroy(&ictx->pending_mutex);
+    pthread_mutex_destroy(&ictx->history_mutex);
 
     free(ictx->pending_content);
     free(ictx->pending_search);
@@ -351,6 +455,66 @@ void inference_request_stop(inference_ctx_t *ictx)
 }
 
 /* ---------------------------------------------------------------------------
+ * Chat history mirror
+ * --------------------------------------------------------------------------- */
+void inference_set_chat_history(inference_ctx_t *ictx, const char *history)
+{
+    if (!ictx || !history) return;
+    pthread_mutex_lock(&ictx->history_mutex);
+    strncpy(ictx->chat_history, history, sizeof(ictx->chat_history) - 1);
+    ictx->chat_history[sizeof(ictx->chat_history) - 1] = '\0';
+    pthread_mutex_unlock(&ictx->history_mutex);
+}
+
+/* ---------------------------------------------------------------------------
+ * Context usage stats
+ * --------------------------------------------------------------------------- */
+int inference_get_context_stats(inference_ctx_t *ictx,
+                                const char *history,
+                                int *tokens_out,
+                                int *max_out)
+{
+    if (!ictx || !tokens_out || !max_out) return -1;
+    *tokens_out = 0;
+    *max_out = 0;
+
+    pthread_mutex_lock(&ictx->model_mutex);
+    struct llama_model  *model = ictx->model;
+    struct llama_context *ctx  = ictx->ctx;
+    pthread_mutex_unlock(&ictx->model_mutex);
+
+    if (!model || !ctx) return -1;
+
+    struct llama_chat_message msgs[MAX_HISTORY_MSGS];
+    char *owned[MAX_HISTORY_MSGS] = {0};
+    int n_msgs = parse_chat_history(history, msgs, owned, MAX_HISTORY_MSGS);
+
+    const char *tmpl = llama_model_chat_template(model, NULL);
+    if (!tmpl) {
+        free_parsed_msgs(owned, n_msgs);
+        return -1;
+    }
+
+    static char fmtd[65536];
+    int32_t fl = llama_chat_apply_template(tmpl, msgs, n_msgs, true,
+                                           fmtd, (int32_t)sizeof(fmtd));
+    if (fl <= 0 || fl >= (int32_t)sizeof(fmtd)) {
+        free_parsed_msgs(owned, n_msgs);
+        return -1;
+    }
+    fmtd[fl] = '\0';
+
+    const struct llama_vocab *vocab = llama_model_get_vocab(model);
+    int n_tokens = llama_tokenize(vocab, fmtd, fl, NULL, 0, true, true);
+    free_parsed_msgs(owned, n_msgs);
+
+    if (n_tokens < 0) return -1;
+    *tokens_out = n_tokens;
+    *max_out    = llama_n_ctx(ctx);
+    return 0;
+}
+
+/* ---------------------------------------------------------------------------
  * Agent mode public API
  * --------------------------------------------------------------------------- */
 void inference_set_agent(inference_ctx_t *ictx, int mode, const char *workspace)
@@ -542,7 +706,7 @@ static int run_one_turn(inference_ctx_t *ictx,
         return -1;
     }
 
-    static char fmtd[16384];
+    static char fmtd[65536];
     int32_t fl = llama_chat_apply_template(tmpl, msgs, n_msgs, true,
                                            fmtd, (int32_t)sizeof(fmtd));
     if (fl <= 0 || fl >= (int32_t)sizeof(fmtd)) {
@@ -818,18 +982,35 @@ void* inference_worker_thread(void *arg)
         pthread_mutex_unlock(&ictx->output_mutex);
 
         if (!agent_mode_now) {
-            /* ---- Single-shot chat (legacy path) ---- */
-            struct llama_chat_message msgs[2];
+            /* ---- Multi-turn chat with full history ---- */
+            char local_history[WASTELAND_MAX_CHAT_HISTORY];
+            pthread_mutex_lock(&ictx->history_mutex);
+            strncpy(local_history, ictx->chat_history, sizeof(local_history) - 1);
+            local_history[sizeof(local_history) - 1] = '\0';
+            pthread_mutex_unlock(&ictx->history_mutex);
+
+            struct llama_chat_message msgs[MAX_HISTORY_MSGS];
+            char *owned[MAX_HISTORY_MSGS] = {0};
             int n_msgs = 0;
+
             if (sys_prompt[0]) {
                 msgs[n_msgs].role = "system";
                 msgs[n_msgs].content = sys_prompt;
                 n_msgs++;
             }
+
+            int n_hist = parse_chat_history(local_history,
+                                            msgs + n_msgs,
+                                            owned + n_msgs,
+                                            MAX_HISTORY_MSGS - n_msgs - 1);
+            n_msgs += n_hist;
+
             msgs[n_msgs].role = "user";
             msgs[n_msgs].content = prompt;
             n_msgs++;
+
             run_one_turn(ictx, model, ctx, msgs, n_msgs, NULL, 0);
+            free_parsed_msgs(owned, n_hist);
         } else {
             /* ---- Agent ReAct loop ---- */
             struct llama_chat_message msgs[AGENT_MAX_MSGS];

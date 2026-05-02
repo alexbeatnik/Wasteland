@@ -474,6 +474,25 @@ static void wrap_text_into(char *out, size_t out_size,
 }
 
 /* ---------------------------------------------------------------------------
+ * compact_chat_history
+ *
+ * Remove the oldest N user/assistant pairs from the flat history string.
+ * --------------------------------------------------------------------------- */
+static void compact_chat_history(app_state_t *state, int pairs)
+{
+    for (int i = 0; i < pairs; i++) {
+        char *next = strstr(state->chat_history, "\n> ");
+        if (!next) {
+            /* Only one message left — can't compact further. */
+            break;
+        }
+        size_t len = strlen(next + 1);
+        memmove(state->chat_history, next + 1, len + 1);
+    }
+    state->chat_last_len = strlen(state->chat_history);
+}
+
+/* ---------------------------------------------------------------------------
  * ui_render
  * --------------------------------------------------------------------------- */
 void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
@@ -492,6 +511,27 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
         state->status_msg[0] = '\0';
         state->last_status_msg[0] = '\0';
     }
+
+    /* Auto-compact context when a generation finishes and usage > 80 % */
+    static int was_generating = 0;
+    if (was_generating && !state->is_generating) {
+        if (inference_get_context_stats(state->inference,
+                                        state->chat_history,
+                                        &state->context_tokens,
+                                        &state->context_max) == 0) {
+            if (state->context_max > 0 &&
+                state->context_tokens > (int)(state->context_max * 0.80f)) {
+                compact_chat_history(state, 1);
+                inference_get_context_stats(state->inference,
+                                            state->chat_history,
+                                            &state->context_tokens,
+                                            &state->context_max);
+                snprintf(state->status_msg, sizeof(state->status_msg),
+                         "Context auto-compacted.");
+            }
+        }
+    }
+    was_generating = state->is_generating;
 
     struct nk_color amber = col_amber();
 
@@ -531,6 +571,13 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
             state->selected_model = -1;
         }
         state->loading_model_index = -1;
+        if (inference_get_context_stats(state->inference,
+                                        state->chat_history,
+                                        &state->context_tokens,
+                                        &state->context_max) != 0) {
+            state->context_tokens = 0;
+            state->context_max = 0;
+        }
     }
 
     if (nk_begin(nk, "Wasteland",
@@ -612,6 +659,8 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                 
                 state->chat_history[0] = '\0';
                 state->chat_last_len = 0;
+                state->context_tokens = 0;
+                state->context_max = 0;
                 
                 if (state->chat_count < WASTELAND_MAX_CHATS) {
                     snprintf(state->chats[state->chat_count],
@@ -656,6 +705,13 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                                 save_chat_history(state->chats[state->selected_chat], state->chat_history);
                             }
                             load_chat_history(state->chats[i], state->chat_history, WASTELAND_MAX_CHAT_HISTORY);
+                            if (inference_get_context_stats(state->inference,
+                                                            state->chat_history,
+                                                            &state->context_tokens,
+                                                            &state->context_max) != 0) {
+                                state->context_tokens = 0;
+                                state->context_max = 0;
+                            }
                             state->selected_chat = i;
                             state->chat_last_len = 0;
                             state->chat_scroll_y = (nk_uint)0x7FFFFFFF;
@@ -1246,6 +1302,38 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                 state->chat_scroll_y = sy;
             }
 
+            /* Context bar */
+            int ctx_pct = (state->context_max > 0)
+                ? (state->context_tokens * 100 / state->context_max)
+                : 0;
+            char ctx_label[64];
+            snprintf(ctx_label, sizeof(ctx_label), "CTX: %d / %d (%d%%)",
+                     state->context_tokens, state->context_max, ctx_pct);
+
+            nk_layout_row_begin(nk, NK_DYNAMIC, 18, 3);
+            nk_layout_row_push(nk, 0.55f);
+            struct nk_color ctx_color = amber;
+            if (ctx_pct > 90) ctx_color = nk_rgb(0xCC, 0x44, 0x00);
+            else if (ctx_pct > 75) ctx_color = nk_rgb(0xFF, 0x80, 0x00);
+            nk_label_colored(nk, ctx_label, NK_TEXT_LEFT, ctx_color);
+
+            nk_layout_row_push(nk, 0.27f);
+            nk_size prog = (nk_size)ctx_pct;
+            nk_progress(nk, &prog, 100, NK_FIXED);
+
+            nk_layout_row_push(nk, 0.18f);
+            if (nk_button_label(nk, "[ COMPACT ]")) {
+                compact_chat_history(state, 1);
+                if (inference_get_context_stats(state->inference,
+                                                state->chat_history,
+                                                &state->context_tokens,
+                                                &state->context_max) != 0) {
+                    state->context_tokens = 0;
+                    state->context_max = 0;
+                }
+            }
+            nk_layout_row_end(nk);
+
             /* Spacer */
             nk_layout_row_dynamic(nk, 6, 1);
             nk_spacing(nk, 1);
@@ -1282,6 +1370,16 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                 if (send && state->input_buffer[0] &&
                     inference_is_model_loaded(state->inference))
                 {
+                    /* Pre-send compact if context is near full */
+                    if (state->context_max > 0 &&
+                        state->context_tokens > (int)(state->context_max * 0.75f)) {
+                        compact_chat_history(state, 1);
+                        inference_get_context_stats(state->inference,
+                                                    state->chat_history,
+                                                    &state->context_tokens,
+                                                    &state->context_max);
+                    }
+
                     /* Auto-create chat if none active */
                     if (state->selected_chat == -1 &&
                         state->chat_count < WASTELAND_MAX_CHATS) {
@@ -1310,6 +1408,8 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                     }
                     pthread_mutex_unlock(&state->chat_mutex);
 
+                    inference_set_chat_history(state->inference,
+                                               state->chat_history);
                     inference_submit_prompt(state->inference,
                                             state->system_prompt,
                                             state->input_buffer);

@@ -9,6 +9,8 @@
 
 #include <stddef.h>
 
+#define WASTELAND_MAX_CHAT_HISTORY 65536
+
 /* Opaque handle. */
 typedef struct inference_ctx inference_ctx_t;
 
@@ -33,6 +35,17 @@ int  inference_take_load_result(inference_ctx_t *ctx);
 void   inference_submit_prompt(inference_ctx_t *ctx, const char *sys_prompt, const char *prompt);
 size_t inference_read_output(inference_ctx_t *ctx, char *buf, size_t size);
 int    inference_is_generating(inference_ctx_t *ctx);
+
+/* Pass the full chat history so the worker can feed previous turns to the
+ * model. Must be called before inference_submit_prompt(). */
+void   inference_set_chat_history(inference_ctx_t *ctx, const char *history);
+
+/* Tokenise the current chat history and return usage. Returns 0 on success,
+ * -1 if no model is loaded. */
+int    inference_get_context_stats(inference_ctx_t *ctx,
+                                   const char *history,
+                                   int *tokens_out,
+                                   int *max_out);
 
 /* Request the worker to stop emitting tokens for the current prompt.
  * Has no effect if no generation is in flight. */

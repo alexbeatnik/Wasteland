@@ -415,6 +415,8 @@ int main(int argc, char **argv)
     state.custom_hf_id[0] = '\0';
     state.download_cancel = 0;
     state.inference = inference;
+    state.context_tokens = 0;
+    state.context_max = 0;
     strncpy(state.status_msg, status_msg, sizeof(state.status_msg) - 1);
 
     /* Load system prompt */
