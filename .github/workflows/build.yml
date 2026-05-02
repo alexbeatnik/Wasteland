@@ -12,10 +12,16 @@ jobs:
     name: Build on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
+      # Don't cancel sibling jobs if one platform fails — we still want the
+      # other artifacts uploaded so a partial release can be inspected.
+      fail-fast: false
       matrix:
-        os: [ubuntu-20.04, macos-13, macos-14, windows-latest]
+        # ubuntu-20.04 was removed from GitHub-hosted runners in April 2025;
+        # macos-13 (last Intel runner) is in its retirement window. Stick to
+        # the current LTS-style images.
+        os: [ubuntu-22.04, macos-13, macos-14, windows-latest]
         include:
-          - os: ubuntu-20.04
+          - os: ubuntu-22.04
             artifact_name: wasteland_0.1.0_amd64.deb
             target_os: linux
           - os: macos-13
