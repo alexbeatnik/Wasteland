@@ -157,9 +157,9 @@ include(GNUInstallDirs)
 # Tag every install rule with COMPONENT Runtime so CPack can ship just our
 # files and drop llama.cpp's unconditional install rules (dev headers, static
 # libs, ggml-config.cmake, convert_hf_to_gguf.py) on the floor.
-install(TARGETS Wasteland RUNTIME
-        DESTINATION ${CMAKE_INSTALL_BINDIR}
-        COMPONENT Runtime)
+install(TARGETS Wasteland
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}     COMPONENT Runtime
+        BUNDLE  DESTINATION /Applications              COMPONENT Runtime)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     # Hicolor icon set + .desktop entry so the .deb integrates with the system
