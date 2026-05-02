@@ -11,8 +11,13 @@
  *   - Graceful teardown
  * ============================================================================ */
 
-#include <SDL2/SDL.h>
-#include <SDL2/SDL_opengl.h>
+/* SDL2 headers: use the unprefixed form so the include path provided by both
+ * Debian's libsdl2-dev (-I/usr/include/SDL2) and Homebrew's SDL2Config.cmake
+ * (-I/opt/homebrew/include/SDL2) resolves them. The <SDL2/SDL.h> form only
+ * works on Linux because /usr/include is a system path; on macOS Homebrew
+ * lives outside the default search path and the include fails. */
+#include <SDL.h>
+#include <SDL_opengl.h>
 #include <GL/gl.h>
 #include <stdio.h>
 #include <stdlib.h>

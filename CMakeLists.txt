@@ -21,7 +21,27 @@ add_subdirectory(vendor/llama.cpp)
 # ---------------------------------------------------------------------------
 file(GLOB SOURCES CONFIGURE_DEPENDS src/*.c)
 
-add_executable(Wasteland ${SOURCES})
+# On Windows, embed src/wasteland.rc → Wasteland.exe carries the icon for
+# Explorer / taskbar / Alt-Tab. MSVC and MinGW both accept .rc directly when
+# compiled with the appropriate language enabled.
+if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    enable_language(RC)
+    list(APPEND SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/wasteland.rc")
+endif()
+
+# On macOS, wrap the binary in a .app bundle so Finder shows the icon and the
+# app behaves like a normal Mac app instead of a CLI binary in /Applications.
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    set(MACOSX_BUNDLE_ICON_FILE icon.icns)
+    set(APP_ICON_MACOSX "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon.icns")
+    set_source_files_properties(${APP_ICON_MACOSX} PROPERTIES
+        MACOSX_PACKAGE_LOCATION "Resources")
+    add_executable(Wasteland MACOSX_BUNDLE ${SOURCES} ${APP_ICON_MACOSX})
+    set_target_properties(Wasteland PROPERTIES
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/assets/Info.plist")
+else()
+    add_executable(Wasteland ${SOURCES})
+endif()
 
 # ---------------------------------------------------------------------------
 # Include directories
@@ -128,4 +148,68 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
         ws2_32
         winmm
     )
+endif()
+
+# ---------------------------------------------------------------------------
+# Install / packaging — used by CPack to produce a .deb on Ubuntu CI.
+# ---------------------------------------------------------------------------
+include(GNUInstallDirs)
+# Tag every install rule with COMPONENT Runtime so CPack can ship just our
+# files and drop llama.cpp's unconditional install rules (dev headers, static
+# libs, ggml-config.cmake, convert_hf_to_gguf.py) on the floor.
+install(TARGETS Wasteland RUNTIME
+        DESTINATION ${CMAKE_INSTALL_BINDIR}
+        COMPONENT Runtime)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # Hicolor icon set + .desktop entry so the .deb integrates with the system
+    # menu (GNOME / KDE / XFCE / etc.) and the dock shows the amber CRT logo.
+    foreach(_size 16 32 48 64 128 256 512)
+        install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon-${_size}.png"
+                DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/${_size}x${_size}/apps"
+                RENAME "wasteland.png"
+                COMPONENT Runtime)
+    endforeach()
+    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/assets/wasteland.desktop"
+            DESTINATION "${CMAKE_INSTALL_DATADIR}/applications"
+            COMPONENT Runtime)
+    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon.png"
+            DESTINATION "${CMAKE_INSTALL_DATADIR}/pixmaps"
+            RENAME "wasteland.png"
+            COMPONENT Runtime)
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(CPACK_PACKAGE_NAME            "wasteland")
+    set(CPACK_PACKAGE_VERSION         "0.1.0")
+    set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
+        "Offline-first amber-CRT LLM chat client built on llama.cpp")
+    set(CPACK_PACKAGE_CONTACT         "Wasteland Maintainers")
+    set(CPACK_PACKAGE_HOMEPAGE_URL    "https://github.com/alexbeatnik/Wasteland")
+
+    set(CPACK_GENERATOR "DEB")
+    set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Wasteland Maintainers <noreply@example.com>")
+    set(CPACK_DEBIAN_PACKAGE_SECTION    "utils")
+    set(CPACK_DEBIAN_PACKAGE_PRIORITY   "optional")
+    set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "amd64")
+    # Let dpkg-shlibdeps figure out concrete versioned deps from the linked
+    # SOs (libSDL2, libcurl, libseccomp, libgomp, libstdc++, libgcc_s, libc).
+    # That avoids hard-coding distro-specific versions like libsdl2-2.0-0.
+    set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS  ON)
+    set(CPACK_PACKAGE_FILE_NAME
+        "wasteland_${CPACK_PACKAGE_VERSION}_${CPACK_DEBIAN_PACKAGE_ARCHITECTURE}")
+
+    # Only ship our Runtime component; llama.cpp's unconditional install rules
+    # land in the default 'Unspecified' component which CPack drops in
+    # component-install mode. Override the per-component file naming so we
+    # still emit a single `wasteland_<version>_amd64.deb` instead of the
+    # default `<base>-Runtime.deb`.
+    set(CPACK_COMPONENTS_ALL Runtime)
+    set(CPACK_DEB_COMPONENT_INSTALL ON)
+    set(CPACK_DEBIAN_RUNTIME_PACKAGE_NAME "wasteland")
+    set(CPACK_DEBIAN_RUNTIME_FILE_NAME
+        "wasteland_${CPACK_PACKAGE_VERSION}_${CPACK_DEBIAN_PACKAGE_ARCHITECTURE}.deb")
+    set(CPACK_DEBIAN_RUNTIME_PACKAGE_SHLIBDEPS ON)
+
+    include(CPack)
 endif()

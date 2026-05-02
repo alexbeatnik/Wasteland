@@ -16,7 +16,7 @@ jobs:
         os: [ubuntu-20.04, macos-13, macos-14, windows-latest]
         include:
           - os: ubuntu-20.04
-            artifact_name: Wasteland-linux.tar.gz
+            artifact_name: wasteland_0.1.0_amd64.deb
             target_os: linux
           - os: macos-13
             artifact_name: Wasteland-macos-intel.dmg
@@ -25,7 +25,7 @@ jobs:
             artifact_name: Wasteland-macos-arm64.dmg
             target_os: macos
           - os: windows-latest
-            artifact_name: Wasteland-windows.zip
+            artifact_name: Wasteland-windows.exe
             target_os: windows
 
     steps:
@@ -47,7 +47,10 @@ jobs:
     - name: Install Dependencies (Windows)
       if: matrix.target_os == 'windows'
       run: |
-        vcpkg install sdl2:x64-windows curl:x64-windows
+        # Static triplet so the resulting Wasteland.exe is a single
+        # self-contained binary with SDL2 and libcurl linked in — no
+        # SDL2.dll / libcurl.dll need to ship alongside it.
+        vcpkg install sdl2:x64-windows-static curl:x64-windows-static
 
     - name: Configure CMake (Linux)
       if: matrix.target_os == 'linux'
@@ -65,7 +68,12 @@ jobs:
 
     - name: Configure CMake (Windows)
       if: matrix.target_os == 'windows'
-      run: cmake -B build -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake
+      run: |
+        cmake -B build `
+          -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake `
+          -DVCPKG_TARGET_TRIPLET=x64-windows-static `
+          -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
+          -DBUILD_SHARED_LIBS=OFF
 
     - name: Build
       run: cmake --build build --config Release -j 4
@@ -74,21 +82,29 @@ jobs:
       if: matrix.target_os == 'linux'
       run: |
         cd build
-        tar -czvf ${{ matrix.artifact_name }} Wasteland
+        cpack -G DEB
+        ls -la *.deb
 
     - name: Package (macOS)
       if: matrix.target_os == 'macos'
       run: |
+        # CMake's MACOSX_BUNDLE produces build/Wasteland.app — a directory
+        # containing Contents/MacOS/Wasteland and Contents/Resources/icon.icns.
+        # Drop it into a staging dir + a /Applications symlink for the classic
+        # drag-to-install DMG layout, then compress.
         cd build
-        mkdir dmg_folder
-        cp Wasteland dmg_folder/
-        hdiutil create -volname "Wasteland" -srcfolder dmg_folder -ov -format UDZO ${{ matrix.artifact_name }}
+        mkdir dmg_root
+        cp -R Wasteland.app dmg_root/
+        ln -s /Applications dmg_root/Applications
+        hdiutil create -volname "Wasteland" -srcfolder dmg_root -ov -format UDZO ${{ matrix.artifact_name }}
 
     - name: Package (Windows)
       if: matrix.target_os == 'windows'
       run: |
-        cd build/Release
-        Compress-Archive -Path Wasteland.exe -DestinationPath ../${{ matrix.artifact_name }}
+        # Hand the binary to the upload step at the same path the other
+        # platforms use: build/<artifact_name>. With static linkage the
+        # resulting .exe is the entire deliverable — no DLLs needed.
+        Copy-Item build/Release/Wasteland.exe build/${{ matrix.artifact_name }}
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
