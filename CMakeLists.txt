@@ -144,9 +144,36 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     # macOS frameworks are handled by find_package
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    # SDL2 on Windows redefines main → SDL_main via a header macro; the real
+    # WinMain entry point that translates back lives in SDL2main.lib. Link it
+    # or the linker fails with "unresolved external symbol main".
+    if(TARGET SDL2::SDL2main)
+        target_link_libraries(Wasteland PRIVATE SDL2::SDL2main)
+    endif()
+
+    # MSVC has no <pthread.h>; vcpkg's `pthreads` package (pthreads4w) supplies
+    # the POSIX threading API. find_package(Threads) doesn't pick it up by
+    # itself on MSVC, so wire it explicitly via the vcpkg-provided config.
+    find_package(PThreads4W CONFIG QUIET)
+    if(TARGET PThreads4W::PThreads4W)
+        target_link_libraries(Wasteland PRIVATE PThreads4W::PThreads4W)
+    else()
+        # Fallback: vcpkg also leaves pthreadVC3.lib in the lib search path.
+        target_link_libraries(Wasteland PRIVATE pthreadVC3)
+    endif()
+    # When linking pthreads4w statically (x64-windows-static triplet),
+    # PTW32_STATIC_LIB must be defined or its headers mark every symbol as
+    # __declspec(dllimport) and the linker re-fails on the same names.
+    target_compile_definitions(Wasteland PRIVATE
+        PTW32_STATIC_LIB
+        HAVE_STRUCT_TIMESPEC)
+
     target_link_libraries(Wasteland PRIVATE
         ws2_32
         winmm
+        version    # SDL2 static needs GetFileVersionInfo
+        imm32      # SDL2 IME support
+        setupapi   # SDL2 device enumeration
     )
 endif()
 
