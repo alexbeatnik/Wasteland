@@ -21,17 +21,27 @@ jobs:
         # the current LTS-style images.
         os: [ubuntu-22.04, macos-13, macos-14, windows-latest]
         include:
+          # `file_name` is the on-disk filename CMake/CPack/hdiutil produces and
+          # the name attached to the GitHub Release (raw, no .zip wrapper).
+          # `artifact_name` is the upload-artifact label — GH always re-zips
+          # whatever you upload as `<artifact_name>.zip` for the Actions UI
+          # download, so we deliberately omit the file extension here to avoid
+          # ugly `Wasteland-windows.exe.zip` double-extensions.
           - os: ubuntu-22.04
-            artifact_name: wasteland_0.1.0_amd64.deb
+            file_name: wasteland_0.1.0_amd64.deb
+            artifact_name: wasteland-linux-deb
             target_os: linux
           - os: macos-13
-            artifact_name: Wasteland-macos-intel.dmg
+            file_name: Wasteland-macos-intel.dmg
+            artifact_name: Wasteland-macos-intel
             target_os: macos
           - os: macos-14
-            artifact_name: Wasteland-macos-arm64.dmg
+            file_name: Wasteland-macos-arm64.dmg
+            artifact_name: Wasteland-macos-arm64
             target_os: macos
           - os: windows-latest
-            artifact_name: Wasteland-windows.exe
+            file_name: Wasteland-windows.exe
+            artifact_name: Wasteland-windows
             target_os: windows
 
     steps:
@@ -104,29 +114,36 @@ jobs:
         mkdir dmg_root
         cp -R Wasteland.app dmg_root/
         ln -s /Applications dmg_root/Applications
-        hdiutil create -volname "Wasteland" -srcfolder dmg_root -ov -format UDZO ${{ matrix.artifact_name }}
+        hdiutil create -volname "Wasteland" -srcfolder dmg_root -ov -format UDZO ${{ matrix.file_name }}
 
     - name: Package (Windows)
       if: matrix.target_os == 'windows'
       run: |
         # Hand the binary to the upload step at the same path the other
-        # platforms use: build/<artifact_name>. With static linkage the
+        # platforms use: build/<file_name>. With static linkage the
         # resulting .exe is the entire deliverable — no DLLs needed.
-        Copy-Item build/Release/Wasteland.exe build/${{ matrix.artifact_name }}
+        Copy-Item build/Release/Wasteland.exe build/${{ matrix.file_name }}
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
+        # `name` is the artifact label shown in the Actions UI. GH always
+        # zips the contents on download, so we use a label without an
+        # extension — the result is a clean `<artifact_name>.zip` instead
+        # of `Wasteland-windows.exe.zip`. The actual binary keeps its
+        # platform-correct name inside the zip.
         name: ${{ matrix.artifact_name }}
         path: |
-          build/${{ matrix.artifact_name }}
-          
+          build/${{ matrix.file_name }}
+
     - name: Create Release
       uses: softprops/action-gh-release@v1
       if: startsWith(github.ref, 'refs/tags/')
       with:
+        # Releases attach files raw, no zip wrapping — users get the actual
+        # `Wasteland-windows.exe` / `Wasteland-macos-arm64.dmg` / `*.deb`.
         files: |
-          build/${{ matrix.artifact_name }}
+          build/${{ matrix.file_name }}
         draft: false
         prerelease: false
       env:

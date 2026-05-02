@@ -156,9 +156,12 @@ int main(int argc, char **argv)
     char status_msg[256] = "";
     int  selected_model  = -1;
 
-    /* Force X11 on Linux to avoid NVIDIA EGL/Wayland issues */
+    /* Force X11 on Linux to avoid NVIDIA EGL/Wayland issues. The hint macro
+     * SDL_HINT_VIDEODRIVER was only added in SDL 2.0.22; Ubuntu 22.04 ships
+     * SDL 2.0.20, so we use the underlying string name (stable since 2.0.0)
+     * to keep the build portable across distros. */
     #ifdef __linux__
-    SDL_SetHint(SDL_HINT_VIDEODRIVER, "x11");
+    SDL_SetHint("SDL_VIDEODRIVER", "x11");
     #endif
 
     /* ---- SDL2 ---- */
