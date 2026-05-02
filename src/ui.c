@@ -942,9 +942,34 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                 state->agent_workspace[wlen] = '\0';
 
                 /* Quick visual feedback: does the path exist as a directory? */
+                /* Expand ~/foo and $HOME/foo before stat'ing so the user
+                 * sees OK immediately after typing a portable path. The
+                 * agent module does the same expansion at execute time. */
+                char ws_check[1280];
+                ws_check[0] = '\0';
+                if (state->agent_workspace[0] != '\0') {
+                    const char *home = getenv("HOME");
+                    if (home && state->agent_workspace[0] == '~' &&
+                        (state->agent_workspace[1] == '/' ||
+                         state->agent_workspace[1] == '\0'))
+                    {
+                        snprintf(ws_check, sizeof(ws_check), "%s%s",
+                                 home, state->agent_workspace + 1);
+                    } else if (home &&
+                               strncmp(state->agent_workspace, "$HOME", 5) == 0 &&
+                               (state->agent_workspace[5] == '/' ||
+                                state->agent_workspace[5] == '\0'))
+                    {
+                        snprintf(ws_check, sizeof(ws_check), "%s%s",
+                                 home, state->agent_workspace + 5);
+                    } else {
+                        snprintf(ws_check, sizeof(ws_check), "%s",
+                                 state->agent_workspace);
+                    }
+                }
                 struct stat wst;
-                int valid = (state->agent_workspace[0] != '\0' &&
-                             stat(state->agent_workspace, &wst) == 0 &&
+                int valid = (ws_check[0] != '\0' &&
+                             stat(ws_check, &wst) == 0 &&
                              S_ISDIR(wst.st_mode));
                 nk_layout_row_dynamic(nk, 18, 1);
                 if (state->agent_workspace[0] == '\0') {
