@@ -33,10 +33,53 @@
 #ifdef _WIN32
 #  include <windows.h>
 #  include <direct.h>
+#  include <shellscalingapi.h>  /* SetProcessDpiAwareness fallback */
 #else
 #  include <unistd.h>
 #  include <dirent.h>
 #endif
+
+/* ---------------------------------------------------------------------------
+ * Per-monitor DPI awareness on Windows
+ *
+ * Without this, a 1280x800 window on a 150%/200%-scaled display gets
+ * virtualized by the OS — the window is rendered at logical size then
+ * stretched up so it overflows the screen, and Windows pins it as if it
+ * were maximised, killing the user's ability to drag-resize. Linux/macOS
+ * handle DPI correctly without our involvement.
+ * --------------------------------------------------------------------------- */
+static void platform_enable_dpi_awareness(void)
+{
+#ifdef _WIN32
+    /* Try the Win10 1703+ API first (per-monitor v2: best behaviour). It is
+     * resolved dynamically because older Win10/Win8.1 SDKs don't ship the
+     * import lib stub. Fall back to the Win8.1 API, then the legacy
+     * Win Vista API, so the binary keeps working on every Windows >= 7. */
+    HMODULE user32 = GetModuleHandleA("user32.dll");
+    if (user32) {
+        typedef BOOL (WINAPI *SetProcessDpiAwarenessContext_t)(DPI_AWARENESS_CONTEXT);
+        SetProcessDpiAwarenessContext_t p =
+            (SetProcessDpiAwarenessContext_t)
+            GetProcAddress(user32, "SetProcessDpiAwarenessContext");
+        if (p && p(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) return;
+    }
+
+    HMODULE shcore = LoadLibraryA("shcore.dll");
+    if (shcore) {
+        typedef HRESULT (WINAPI *SetProcessDpiAwareness_t)(int);
+        SetProcessDpiAwareness_t p =
+            (SetProcessDpiAwareness_t)
+            GetProcAddress(shcore, "SetProcessDpiAwareness");
+        if (p && SUCCEEDED(p(2 /* PROCESS_PER_MONITOR_DPI_AWARE */))) {
+            FreeLibrary(shcore);
+            return;
+        }
+        FreeLibrary(shcore);
+    }
+
+    SetProcessDPIAware();
+#endif
+}
 
 /* Nuklear declaration-only includes for main.c */
 #define NK_INCLUDE_FIXED_TYPES
@@ -138,6 +181,10 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
+    /* Must run before SDL_Init / CreateWindow so SDL queries the monitor at
+     * its real DPI and reports physical pixel sizes. No-op on non-Windows. */
+    platform_enable_dpi_awareness();
+
     /* ---- Pre-SDL: load model so llama.cpp mmap does not break NVIDIA GL ---- */
     ensure_models_dir();
     char models_tmp[WASTELAND_MAX_MODELS][WASTELAND_MAX_MODEL_PATH_LEN] = {0};
@@ -182,7 +229,8 @@ int main(int argc, char **argv)
         "Wasteland Terminal",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
         WINDOW_WIDTH, WINDOW_HEIGHT,
-        SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
+        SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN |
+        SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!win) {
         fprintf(stderr, "[main] SDL_CreateWindow error: %s\n", SDL_GetError());
         inference_shutdown(inference);
