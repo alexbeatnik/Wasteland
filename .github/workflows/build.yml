@@ -48,9 +48,11 @@ jobs:
       if: matrix.target_os == 'windows'
       run: |
         # Static triplet so the resulting Wasteland.exe is a single
-        # self-contained binary with SDL2 and libcurl linked in — no
-        # SDL2.dll / libcurl.dll need to ship alongside it.
-        vcpkg install sdl2:x64-windows-static curl:x64-windows-static
+        # self-contained binary with SDL2, libcurl, and pthreads-win32
+        # linked in — no SDL2.dll / libcurl.dll / pthread.dll need to ship
+        # alongside it. pthreads4w (vcpkg name: pthreads) provides the
+        # POSIX threading API on MSVC, where pthread.h doesn't exist.
+        vcpkg install sdl2:x64-windows-static curl:x64-windows-static pthreads:x64-windows-static
 
     - name: Configure CMake (Linux)
       if: matrix.target_os == 'linux'

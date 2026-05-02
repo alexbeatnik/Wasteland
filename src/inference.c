@@ -16,7 +16,17 @@
 #include <string.h>
 #include <stdio.h>
 #include <pthread.h>
-#include <unistd.h>
+
+/* usleep lives in <unistd.h> on POSIX; Windows MSVC has no <unistd.h>, so we
+ * fall back to Sleep(ms) from <windows.h>. The 5 ms inter-token cadence
+ * doesn't need microsecond precision. */
+#ifdef _WIN32
+#  include <windows.h>
+#  define wst_usleep(us) Sleep((DWORD)((us) / 1000))
+#else
+#  include <unistd.h>
+#  define wst_usleep(us) usleep((useconds_t)(us))
+#endif
 
 #include "llama.h"
 
@@ -565,7 +575,7 @@ void* inference_worker_thread(void *arg)
                 break;
 
             /* Brief yield — creates a natural typing cadence */
-            usleep(5000); /* 5 ms */
+            wst_usleep(5000); /* 5 ms */
         }
 
         llama_sampler_free(smpl);
