@@ -14,6 +14,18 @@ set(LLAMA_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_SERVER   OFF CACHE BOOL "" FORCE)
 set(BUILD_SHARED_LIBS    OFF CACHE BOOL "" FORCE)
 
+# Detect universal-binary builds (macOS only — CMAKE_OSX_ARCHITECTURES has
+# more than one entry). When fat-building for arm64+x86_64 we cannot use
+# -march=native or any per-arch ISA flag, since each arch slice needs its
+# own codegen — ggml otherwise hard-fails the configure step.
+list(LENGTH CMAKE_OSX_ARCHITECTURES _osx_arch_count)
+if(_osx_arch_count GREATER 1)
+    set(WASTELAND_UNIVERSAL_BUILD ON)
+    set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
+else()
+    set(WASTELAND_UNIVERSAL_BUILD OFF)
+endif()
+
 add_subdirectory(vendor/llama.cpp)
 
 # ---------------------------------------------------------------------------
@@ -60,12 +72,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 
 if(NOT MSVC)
-    target_compile_options(Wasteland PRIVATE
-        -O3
-        -march=native
-        -Wall
-        -Wextra
-    )
+    target_compile_options(Wasteland PRIVATE -O3 -Wall -Wextra)
+    # `-march=native` produces an ISA bound to the current build host. That
+    # blows up universal macOS builds (each arch slice needs its own ISA flag)
+    # and silently degrades portability of cross-distro binaries on Linux.
+    # Only keep it for single-arch dev builds where the user is the consumer.
+    if(NOT WASTELAND_UNIVERSAL_BUILD)
+        target_compile_options(Wasteland PRIVATE -march=native)
+    endif()
 else()
     target_compile_options(Wasteland PRIVATE
         /O2

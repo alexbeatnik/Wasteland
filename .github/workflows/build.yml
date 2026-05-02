@@ -17,9 +17,10 @@ jobs:
       fail-fast: false
       matrix:
         # ubuntu-20.04 was removed from GitHub-hosted runners in April 2025;
-        # macos-13 (last Intel runner) is in its retirement window. Stick to
-        # the current LTS-style images.
-        os: [ubuntu-22.04, macos-13, macos-14, windows-latest]
+        # macos-13 (last Intel runner) is being retired and frequently queues
+        # indefinitely with no pickup. Apple Silicon is the only macOS runner
+        # we can rely on getting scheduled — Intel users build from source.
+        os: [ubuntu-22.04, macos-14, windows-latest]
         include:
           # `file_name` is the on-disk filename CMake/CPack/hdiutil produces and
           # the name attached to the GitHub Release (raw, no .zip wrapper).
@@ -31,13 +32,9 @@ jobs:
             file_name: wasteland_0.1.0_amd64.deb
             artifact_name: wasteland-linux-deb
             target_os: linux
-          - os: macos-13
-            file_name: Wasteland-macos-intel.dmg
-            artifact_name: Wasteland-macos-intel
-            target_os: macos
           - os: macos-14
-            file_name: Wasteland-macos-arm64.dmg
-            artifact_name: Wasteland-macos-arm64
+            file_name: Wasteland-macos.dmg
+            artifact_name: Wasteland-macos
             target_os: macos
           - os: windows-latest
             file_name: Wasteland-windows.exe
@@ -58,7 +55,34 @@ jobs:
     - name: Install Dependencies (macOS)
       if: matrix.target_os == 'macos'
       run: |
-        brew install cmake sdl2 curl pkg-config
+        # Only need cmake + pkg-config from brew. We deliberately DON'T use
+        # brew's sdl2/curl bottles because those are arm64-only on a macos-14
+        # runner and break the universal build. Instead:
+        #   - SDL2: built from source as a universal static lib below
+        #   - curl: linked against macOS's system /usr/lib/libcurl.dylib,
+        #           which Apple ships as a universal binary already
+        brew install cmake pkg-config
+
+    - name: Build universal SDL2 from source (macOS)
+      if: matrix.target_os == 'macos'
+      run: |
+        # Pin to a known-good SDL2 release. Static + universal so the .dmg
+        # is a single self-contained .app that runs on Intel and Apple Silicon.
+        SDL2_VERSION=2.30.7
+        SDL2_PREFIX="$HOME/sdl2-universal"
+        curl -L "https://github.com/libsdl-org/SDL/releases/download/release-${SDL2_VERSION}/SDL2-${SDL2_VERSION}.tar.gz" \
+          -o /tmp/sdl2.tar.gz
+        tar -xzf /tmp/sdl2.tar.gz -C /tmp
+        cmake -S "/tmp/SDL2-${SDL2_VERSION}" -B /tmp/sdl2-build \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+          -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 \
+          -DSDL_STATIC=ON -DSDL_SHARED=OFF \
+          -DSDL_TEST=OFF \
+          -DCMAKE_INSTALL_PREFIX="${SDL2_PREFIX}"
+        cmake --build /tmp/sdl2-build --config Release -j 4
+        cmake --install /tmp/sdl2-build
+        echo "SDL2_PREFIX=${SDL2_PREFIX}" >> $GITHUB_ENV
 
     - name: Install Dependencies (Windows)
       if: matrix.target_os == 'windows'
@@ -77,12 +101,17 @@ jobs:
     - name: Configure CMake (macOS)
       if: matrix.target_os == 'macos'
       run: |
-        # Homebrew installs to /opt/homebrew on Apple Silicon and /usr/local on
-        # Intel; point CMake at the right prefix so find_package(SDL2)/CURL
-        # picks up the bottle-shipped Config files.
-        BREW_PREFIX="$(brew --prefix)"
+        # Universal build: arm64 + x86_64 in one fat binary.
+        #   - SDL2 prefix points at the universal static lib we just built.
+        #   - We deliberately DO NOT add brew curl to CMAKE_PREFIX_PATH so
+        #     find_package(CURL) falls through to macOS's system libcurl
+        #     (universal) at /usr/lib/libcurl.dylib.
+        #   - Deployment target 11.0 = Big Sur (first version supporting both
+        #     archs natively).
         cmake -B build -DCMAKE_BUILD_TYPE=Release \
-          -DCMAKE_PREFIX_PATH="$(brew --prefix sdl2);$(brew --prefix curl);${BREW_PREFIX}"
+          -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+          -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 \
+          -DCMAKE_PREFIX_PATH="${SDL2_PREFIX}"
 
     - name: Configure CMake (Windows)
       if: matrix.target_os == 'windows'

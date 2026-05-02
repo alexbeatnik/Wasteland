@@ -112,8 +112,7 @@ GitHub Actions automatically builds and releases for all platforms on every tag:
 | Platform | Artifact |
 |----------|----------|
 | Linux (Ubuntu/Debian) | `wasteland_0.1.0_amd64.deb` — install with `sudo apt install ./wasteland_0.1.0_amd64.deb` |
-| macOS (Intel) | `Wasteland-macos-intel.dmg` |
-| macOS (Apple Silicon) | `Wasteland-macos-arm64.dmg` |
+| macOS (universal) | `Wasteland-macos.dmg` — one .app that runs natively on both Apple Silicon and Intel (deployment target 11.0+) |
 | Windows | `Wasteland-windows.exe` — single self-contained binary (SDL2/curl statically linked) |
 
 Push a tag to trigger a release:
