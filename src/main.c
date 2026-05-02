@@ -18,7 +18,9 @@
  * lives outside the default search path and the include fails. */
 #include <SDL.h>
 #include <SDL_opengl.h>
-#include <GL/gl.h>
+/* <SDL_opengl.h> drags in the correct GL header per platform
+ * (<GL/gl.h> on Linux/Windows, <OpenGL/gl.h> on macOS) — don't add a
+ * second hard-coded GL include or the macOS build breaks. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

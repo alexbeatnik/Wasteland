@@ -13,7 +13,6 @@
 
 #include <SDL.h>
 #include <SDL_opengl.h>
-#include <GL/gl.h>
 #include <unistd.h>
 
 /* Nuklear forward declarations (assumes <nuklear.h> is included before this) */
