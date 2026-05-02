@@ -428,6 +428,37 @@ int main(int argc, char **argv)
     char last_system_prompt[1024];
     strcpy(last_system_prompt, state.system_prompt);
 
+    /* Load persistent agent settings (mode toggle + workspace path).
+     * Stored as a tiny key=value file alongside system_prompt.txt. */
+    state.agent_mode = 0;
+    state.agent_workspace[0] = '\0';
+    FILE *cfg_fp = fopen("wasteland.cfg", "r");
+    if (cfg_fp) {
+        char line[1280];
+        while (fgets(line, sizeof(line), cfg_fp)) {
+            /* Trim trailing newline / CR */
+            size_t L = strlen(line);
+            while (L > 0 && (line[L-1] == '\n' || line[L-1] == '\r'))
+                line[--L] = '\0';
+            char *eq = strchr(line, '=');
+            if (!eq) continue;
+            *eq = '\0';
+            const char *key = line;
+            const char *val = eq + 1;
+            if (strcmp(key, "agent_mode") == 0) {
+                state.agent_mode = (val[0] == '1') ? 1 : 0;
+            } else if (strcmp(key, "agent_workspace") == 0) {
+                strncpy(state.agent_workspace, val,
+                        sizeof(state.agent_workspace) - 1);
+                state.agent_workspace[sizeof(state.agent_workspace) - 1] = '\0';
+            }
+        }
+        fclose(cfg_fp);
+    }
+    int  last_agent_mode = state.agent_mode;
+    char last_agent_ws[1024];
+    snprintf(last_agent_ws, sizeof(last_agent_ws), "%s", state.agent_workspace);
+
     /* Do not auto-load model on boot — loading llama.cpp model breaks
        NVIDIA GL context. Model must be loaded manually via UI after
        the window is visible. */
@@ -511,6 +542,22 @@ int main(int argc, char **argv)
             FILE *f = fopen("system_prompt.txt", "w");
             if (f) {
                 fputs(state.system_prompt, f);
+                fclose(f);
+            }
+        }
+
+        /* Persist agent toggle + workspace whenever they change. Tiny file
+         * so rewriting on every change is fine. */
+        if (state.agent_mode != last_agent_mode ||
+            strcmp(state.agent_workspace, last_agent_ws) != 0)
+        {
+            last_agent_mode = state.agent_mode;
+            snprintf(last_agent_ws, sizeof(last_agent_ws),
+                     "%s", state.agent_workspace);
+            FILE *f = fopen("wasteland.cfg", "w");
+            if (f) {
+                fprintf(f, "agent_mode=%d\n",      state.agent_mode);
+                fprintf(f, "agent_workspace=%s\n", state.agent_workspace);
                 fclose(f);
             }
         }

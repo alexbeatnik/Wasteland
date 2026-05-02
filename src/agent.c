@@ -87,6 +87,38 @@ static int path_is_inside(const char *child, const char *parent)
     return child[plen] == '\0' || child[plen] == '/' || child[plen] == '\\';
 }
 
+/* Expand a leading "~/" or "$HOME/" to the actual home directory. Writes
+ * into `out` (size out_size). Falls back to copying input verbatim if HOME
+ * is unset or input doesn't begin with one of those prefixes. Caller can
+ * then pass the result to realpath / fopen / mkdir.
+ *
+ * This makes per-user wasteland.cfg files portable across machines —
+ * users can write `~/projects/foo` instead of a hard-coded absolute path. */
+static void expand_home(const char *in, char *out, size_t out_size)
+{
+    if (!in || !out || out_size == 0) {
+        if (out && out_size) out[0] = '\0';
+        return;
+    }
+    const char *home = getenv("HOME");
+#ifdef _WIN32
+    if (!home || !*home) home = getenv("USERPROFILE");
+#endif
+    if (home && *home) {
+        if (in[0] == '~' && (in[1] == '/' || in[1] == '\\' || in[1] == '\0')) {
+            snprintf(out, out_size, "%s%s", home, in + 1);
+            return;
+        }
+        if (strncmp(in, "$HOME", 5) == 0 &&
+            (in[5] == '/' || in[5] == '\\' || in[5] == '\0'))
+        {
+            snprintf(out, out_size, "%s%s", home, in + 5);
+            return;
+        }
+    }
+    snprintf(out, out_size, "%s", in);
+}
+
 int agent_resolve_path(const char *workspace, const char *user_path,
                        char *out, size_t out_size)
 {
@@ -94,7 +126,12 @@ int agent_resolve_path(const char *workspace, const char *user_path,
         !out || out_size < 2)
         return -1;
 
-    char *ws = xrealpath(workspace);
+    /* Expand ~/foo or $HOME/foo BEFORE hitting realpath — neither libc
+     * nor Windows GetFullPathName understands the shell-style expansion. */
+    char ws_expanded[PATH_MAX];
+    expand_home(workspace, ws_expanded, sizeof(ws_expanded));
+
+    char *ws = xrealpath(ws_expanded);
     if (!ws) return -1;
 
     /* Build the joined candidate path. If user gave absolute, use it as-is;
