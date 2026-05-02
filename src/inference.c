@@ -181,11 +181,28 @@ static int parse_chat_history(const char *history,
             }
             p = next_user + 1;
         } else {
-            /* Reached end — this user message has no assistant reply yet.
-             * Discard it; the current prompt is supplied separately. */
-            n--;
-            free(owned[n]);
-            owned[n] = NULL;
+            if (assist_start < end) {
+                /* Last user message HAS an assistant reply — keep both. */
+                size_t alen = (size_t)(end - assist_start);
+                while (alen > 0 && (assist_start[alen - 1] == '\n' ||
+                                    assist_start[alen - 1] == '\r')) alen--;
+                if (alen > 0 && n < max_msgs) {
+                    char *ac = (char *)malloc(alen + 1);
+                    if (ac) {
+                        memcpy(ac, assist_start, alen);
+                        ac[alen] = '\0';
+                        msgs[n].role = "assistant";
+                        msgs[n].content = ac;
+                        owned[n] = ac;
+                        n++;
+                    }
+                }
+            } else {
+                /* No assistant reply — this is the current prompt, discard. */
+                n--;
+                free(owned[n]);
+                owned[n] = NULL;
+            }
             break;
         }
     }
@@ -1010,7 +1027,7 @@ void* inference_worker_thread(void *arg)
             n_msgs++;
 
             run_one_turn(ictx, model, ctx, msgs, n_msgs, NULL, 0);
-            free_parsed_msgs(owned, n_hist);
+            free_parsed_msgs(owned + n_msgs, n_hist);
         } else {
             /* ---- Agent ReAct loop ---- */
             struct llama_chat_message msgs[AGENT_MAX_MSGS];

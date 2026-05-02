@@ -493,6 +493,36 @@ static void compact_chat_history(app_state_t *state, int pairs)
 }
 
 /* ---------------------------------------------------------------------------
+ * Helpers for thread-safe chat history access
+ * --------------------------------------------------------------------------- */
+static void ui_update_context_stats(app_state_t *state)
+{
+    char hist_copy[WASTELAND_MAX_CHAT_HISTORY];
+    pthread_mutex_lock(&state->chat_mutex);
+    strncpy(hist_copy, state->chat_history, sizeof(hist_copy) - 1);
+    hist_copy[sizeof(hist_copy) - 1] = '\0';
+    pthread_mutex_unlock(&state->chat_mutex);
+
+    if (inference_get_context_stats(state->inference, hist_copy,
+                                    &state->context_tokens,
+                                    &state->context_max) != 0) {
+        state->context_tokens = 0;
+        state->context_max    = 0;
+    }
+}
+
+static void ui_set_chat_history(app_state_t *state)
+{
+    char hist_copy[WASTELAND_MAX_CHAT_HISTORY];
+    pthread_mutex_lock(&state->chat_mutex);
+    strncpy(hist_copy, state->chat_history, sizeof(hist_copy) - 1);
+    hist_copy[sizeof(hist_copy) - 1] = '\0';
+    pthread_mutex_unlock(&state->chat_mutex);
+
+    inference_set_chat_history(state->inference, hist_copy);
+}
+
+/* ---------------------------------------------------------------------------
  * ui_render
  * --------------------------------------------------------------------------- */
 void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
@@ -515,20 +545,13 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
     /* Auto-compact context when a generation finishes and usage > 80 % */
     static int was_generating = 0;
     if (was_generating && !state->is_generating) {
-        if (inference_get_context_stats(state->inference,
-                                        state->chat_history,
-                                        &state->context_tokens,
-                                        &state->context_max) == 0) {
-            if (state->context_max > 0 &&
-                state->context_tokens > (int)(state->context_max * 0.80f)) {
-                compact_chat_history(state, 1);
-                inference_get_context_stats(state->inference,
-                                            state->chat_history,
-                                            &state->context_tokens,
-                                            &state->context_max);
-                snprintf(state->status_msg, sizeof(state->status_msg),
-                         "Context auto-compacted.");
-            }
+        ui_update_context_stats(state);
+        if (state->context_max > 0 &&
+            state->context_tokens > (int)(state->context_max * 0.80f)) {
+            compact_chat_history(state, 1);
+            ui_update_context_stats(state);
+            snprintf(state->status_msg, sizeof(state->status_msg),
+                     "Context auto-compacted.");
         }
     }
     was_generating = state->is_generating;
@@ -571,13 +594,7 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
             state->selected_model = -1;
         }
         state->loading_model_index = -1;
-        if (inference_get_context_stats(state->inference,
-                                        state->chat_history,
-                                        &state->context_tokens,
-                                        &state->context_max) != 0) {
-            state->context_tokens = 0;
-            state->context_max = 0;
-        }
+        ui_update_context_stats(state);
     }
 
     if (nk_begin(nk, "Wasteland",
@@ -705,13 +722,7 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                                 save_chat_history(state->chats[state->selected_chat], state->chat_history);
                             }
                             load_chat_history(state->chats[i], state->chat_history, WASTELAND_MAX_CHAT_HISTORY);
-                            if (inference_get_context_stats(state->inference,
-                                                            state->chat_history,
-                                                            &state->context_tokens,
-                                                            &state->context_max) != 0) {
-                                state->context_tokens = 0;
-                                state->context_max = 0;
-                            }
+                            ui_update_context_stats(state);
                             state->selected_chat = i;
                             state->chat_last_len = 0;
                             state->chat_scroll_y = (nk_uint)0x7FFFFFFF;
@@ -1151,7 +1162,17 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
              * of chat_history: any stray typing is overwritten on the next
              * render. The amber theme already paints text/cursor, so the
              * box visually matches the rest of the terminal. */
+
+            /* Snapshot chat_history under lock so the inference thread can't
+             * mutate it mid-render (which used to garble think/normal state). */
+            static char local_hist[WASTELAND_MAX_CHAT_HISTORY];
+            pthread_mutex_lock(&state->chat_mutex);
             size_t chat_len = strlen(state->chat_history);
+            if (chat_len >= sizeof(local_hist)) chat_len = sizeof(local_hist) - 1;
+            memcpy(local_hist, state->chat_history, chat_len);
+            local_hist[chat_len] = '\0';
+            pthread_mutex_unlock(&state->chat_mutex);
+
             /* Auto-scroll to bottom whenever new tokens arrive. The outer
              * scrolled group (below) holds many sub-edit-boxes — none of
              * them know about the cursor — so we steer the OUTER scrollbar
@@ -1175,16 +1196,16 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
             {
                 /* Two-tier rendering for "thinking" highlighting:
                  *   - Outer scrolled group → one unified scrollbar.
-                 *   - Inside, walk chat_history splitting on `-- THINK --` /
+                 *   - Inside, walk local_hist splitting on `-- THINK --` /
                  *     `-- END THINK --` markers into sections.
+                 *   - A user prompt (`> `) auto-closes an open think block so
+                 *     the user text never gets dimmed by a leaked in_think.
                  *   - Each section gets its own nk_edit_string with the
                  *     style.edit.text_normal colour temporarily overridden
                  *     (full amber for assistant/user, amber_dim for thoughts).
                  * Each section sized to fit its wrapped content height so
                  * there's no per-section scrollbar — only the outer one
-                 * scrolls. Trade-off: mouse-drag selection works inside
-                 * one block but not across blocks; copying a single answer
-                 * is still trivial. */
+                 * scrolls. */
 
                 const struct nk_user_font *font = nk->style.font;
                 float font_h = font ? font->height : 14.0f;
@@ -1213,88 +1234,107 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                     int section_pos = 0;
                     int in_think    = 0;
 
-                    const char *p   = state->chat_history;
+                    const char *p   = local_hist;
                     const char *end = p + chat_len;
-                    int finished    = 0;
 
-                    while (!finished) {
-                        const char *eol = (p < end)
-                            ? memchr(p, '\n', (size_t)(end - p)) : NULL;
-                        size_t llen = (p < end)
-                            ? (eol ? (size_t)(eol - p) : (size_t)(end - p))
-                            : 0;
+                    /* Helper: flush whatever is in section_buf. */
+                    #define FLUSH_SECTION() do { \
+                        if (section_pos > 0) { \
+                            section_buf[section_pos] = '\0'; \
+                            wrap_text_into(wrapped, sizeof(wrapped), \
+                                           section_buf, font, panel_w); \
+                            int vlines = 1; \
+                            for (const char *q = wrapped; *q; q++) \
+                                if (*q == '\n') vlines++; \
+                            float sec_h = (float)vlines * (font_h + 2.0f) \
+                                          + 10.0f; \
+                            if (in_think) { \
+                                nk_layout_row_dynamic(nk, font_h + 2.0f, 1); \
+                                nk_label_colored(nk, "▒ thinking", \
+                                                 NK_TEXT_LEFT, amber_dim); \
+                            } \
+                            struct nk_color saved = nk->style.edit.text_normal; \
+                            nk->style.edit.text_normal = \
+                                in_think ? amber_dim : amber_normal; \
+                            int rlen = (int)strlen(wrapped); \
+                            nk_layout_row_dynamic(nk, sec_h, 1); \
+                            nk_edit_string(nk, \
+                                NK_EDIT_BOX | NK_EDIT_MULTILINE, \
+                                wrapped, &rlen, (int)sizeof(wrapped), \
+                                nk_filter_default); \
+                            nk->style.edit.text_normal = saved; \
+                            section_pos = 0; \
+                        } \
+                    } while (0)
 
-                        int is_th_start = (p < end && llen >= 11 &&
-                            strncmp(p, "-- THINK --",     11) == 0);
-                        int is_th_end   = (p < end && llen >= 15 &&
-                            strncmp(p, "-- END THINK --", 15) == 0);
-                        int at_eof      = (p >= end);
+                    /* Helper: append [src, src+n) to section_buf. */
+                    #define APPEND_SECTION(src, n) do { \
+                        size_t _n = (size_t)(n); \
+                        if ((size_t)section_pos + _n < sizeof(section_buf)) { \
+                            memcpy(section_buf + section_pos, (src), _n); \
+                            section_pos += (int)_n; \
+                        } \
+                    } while (0)
 
-                        /* Flush the buffered section whenever we hit a
-                         * boundary marker or EOF. */
-                        if ((is_th_start || is_th_end || at_eof) &&
-                            section_pos > 0)
-                        {
-                            section_buf[section_pos] = '\0';
+                    while (p < end) {
+                        /* Search for the next think boundary. */
+                        const char *ms = strstr(p, "-- THINK --");
+                        const char *me = strstr(p, "-- END THINK --");
 
-                            wrap_text_into(wrapped, sizeof(wrapped),
-                                           section_buf, font, panel_w);
-
-                            /* Count visual lines for height. */
-                            int vlines = 1;
-                            for (const char *q = wrapped; *q; q++)
-                                if (*q == '\n') vlines++;
-                            float sec_h = (float)vlines * (font_h + 2.0f)
-                                          + 10.0f; /* edit-box padding */
-
-                            /* Section header so the user sees where the
-                             * model's reasoning starts and ends. Only think
-                             * blocks get a label — normal output is
-                             * obvious. */
-                            if (in_think) {
-                                nk_layout_row_dynamic(nk, font_h + 2.0f, 1);
-                                nk_label_colored(nk, "▒ thinking",
-                                                 NK_TEXT_LEFT, amber_dim);
-                            }
-
-                            /* Override edit text colour for this section. */
-                            struct nk_color saved =
-                                nk->style.edit.text_normal;
-                            nk->style.edit.text_normal =
-                                in_think ? amber_dim : amber_normal;
-
-                            int rlen = (int)strlen(wrapped);
-                            nk_layout_row_dynamic(nk, sec_h, 1);
-                            nk_edit_string(nk,
-                                NK_EDIT_BOX | NK_EDIT_MULTILINE,
-                                wrapped, &rlen,
-                                (int)sizeof(wrapped),
-                                nk_filter_default);
-
-                            nk->style.edit.text_normal = saved;
-                            section_pos = 0;
+                        /* If we're inside a think block, look for the next
+                         * user prompt (`\n> `).  It MUST force-close the
+                         * block so user text is never dimmed. */
+                        const char *next_up = NULL;
+                        if (in_think) {
+                            next_up = strstr(p, "\n> ");
+                            if (next_up) next_up += 1; /* point at '>' */
                         }
 
-                        if (at_eof) { finished = 1; break; }
+                        /* Pick the nearest boundary. */
+                        const char *boundary = NULL;
+                        int boundary_is_start = 0;
+                        if (ms && (!me || ms <= me)) {
+                            boundary = ms;
+                            boundary_is_start = 1;
+                        } else if (me) {
+                            boundary = me;
+                            boundary_is_start = 0;
+                        }
 
-                        if (is_th_start) {
-                            in_think = 1;
-                        } else if (is_th_end) {
+                        /* If a user prompt comes before the next boundary,
+                         * close think early and render up to the prompt. */
+                        if (next_up && (!boundary || next_up < boundary)) {
+                            if (next_up > p) {
+                                APPEND_SECTION(p, (size_t)(next_up - p));
+                            }
+                            FLUSH_SECTION();
                             in_think = 0;
-                        } else {
-                            /* Append this line + newline to current
-                             * section buffer. */
-                            if ((size_t)section_pos + llen + 2
-                                < sizeof(section_buf))
-                            {
-                                memcpy(section_buf + section_pos, p, llen);
-                                section_pos += (int)llen;
-                                section_buf[section_pos++] = '\n';
-                            }
+                            p = next_up;
+                            continue;
                         }
 
-                        p = eol ? eol + 1 : end;
+                        if (!boundary) {
+                            /* No more boundaries — render rest. */
+                            if (p < end)
+                                APPEND_SECTION(p, (size_t)(end - p));
+                            break;
+                        }
+
+                        /* Render text before the boundary. */
+                        if (boundary > p) {
+                            APPEND_SECTION(p, (size_t)(boundary - p));
+                        }
+                        FLUSH_SECTION();
+
+                        /* Switch state and skip past the marker. */
+                        in_think = boundary_is_start;
+                        p = boundary + (boundary_is_start ? 11 : 15);
                     }
+
+                    FLUSH_SECTION();
+
+                    #undef FLUSH_SECTION
+                    #undef APPEND_SECTION
 
                     nk_group_scrolled_end(nk);
                 }
@@ -1324,13 +1364,7 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
             nk_layout_row_push(nk, 0.18f);
             if (nk_button_label(nk, "[ COMPACT ]")) {
                 compact_chat_history(state, 1);
-                if (inference_get_context_stats(state->inference,
-                                                state->chat_history,
-                                                &state->context_tokens,
-                                                &state->context_max) != 0) {
-                    state->context_tokens = 0;
-                    state->context_max = 0;
-                }
+                ui_update_context_stats(state);
             }
             nk_layout_row_end(nk);
 
@@ -1374,10 +1408,7 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                     if (state->context_max > 0 &&
                         state->context_tokens > (int)(state->context_max * 0.75f)) {
                         compact_chat_history(state, 1);
-                        inference_get_context_stats(state->inference,
-                                                    state->chat_history,
-                                                    &state->context_tokens,
-                                                    &state->context_max);
+                        ui_update_context_stats(state);
                     }
 
                     /* Auto-create chat if none active */
@@ -1408,8 +1439,7 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                     }
                     pthread_mutex_unlock(&state->chat_mutex);
 
-                    inference_set_chat_history(state->inference,
-                                               state->chat_history);
+                    ui_set_chat_history(state);
                     inference_submit_prompt(state->inference,
                                             state->system_prompt,
                                             state->input_buffer);
