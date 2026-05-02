@@ -182,7 +182,11 @@ int inference_load_model(inference_ctx_t *ictx, const char *path)
 
     struct llama_context_params cparams = llama_context_default_params();
     cparams.n_ctx    = 4096;
-    cparams.n_batch  = 512;
+    /* n_batch must be >= the largest prompt we ever feed in one llama_decode().
+     * Agent mode can build prompts of several thousand tokens (system + tool
+     * instructions + multi-turn history), so we match n_batch to n_ctx and
+     * keep n_ubatch small to bound peak memory. */
+    cparams.n_batch  = 4096;
     cparams.n_ubatch = 512;
 
     ictx->ctx = llama_init_from_model(ictx->model, cparams);
@@ -566,10 +570,24 @@ static int run_one_turn(inference_ctx_t *ictx,
                                      llama_sampler_chain_default_params());
     llama_sampler_chain_add(smpl, llama_sampler_init_greedy());
 
-    if (llama_decode(ctx, llama_batch_get_one(prompt_tokens, n_tokens)) != 0) {
-        fprintf(stderr, "[inference] Prompt decode failed\n");
-        llama_sampler_free(smpl);
-        return -1;
+    /* Chunk the prompt by n_batch so we never trip the
+     * GGML_ASSERT(n_tokens_all <= cparams.n_batch) inside llama-context.
+     * llama_batch_get_one() auto-tracks position, so consecutive calls
+     * continue the same logical sequence. */
+    {
+        const int chunk = 4096;  /* matches cparams.n_batch */
+        for (int off = 0; off < n_tokens; off += chunk) {
+            int n = (n_tokens - off < chunk) ? (n_tokens - off) : chunk;
+            if (llama_decode(ctx,
+                             llama_batch_get_one(prompt_tokens + off, n)) != 0)
+            {
+                fprintf(stderr,
+                        "[inference] Prompt decode failed at offset %d/%d\n",
+                        off, n_tokens);
+                llama_sampler_free(smpl);
+                return -1;
+            }
+        }
     }
 
     int rc = 0;

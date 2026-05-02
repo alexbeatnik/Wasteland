@@ -61,7 +61,8 @@ typedef struct {
     int  is_generating;
     int  left_panel_collapsed; /* 1 = left panel hidden, 0 = visible */
 
-    /* Chat scroll state (auto-scroll-to-bottom on new content) */
+    /* Chat scroll state — kept for compatibility with old chat-rendering
+     * code paths; nk_edit_string manages its own scrollbar internally now. */
     nk_uint chat_scroll_x;
     nk_uint chat_scroll_y;
     size_t  chat_last_len;

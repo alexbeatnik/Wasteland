@@ -156,8 +156,134 @@ static int platform_thread_join_timeout(pthread_t thread, int timeout_ms)
 /* ---------------------------------------------------------------------------
  * Filesystem helpers
  * --------------------------------------------------------------------------- */
+
+/* Pick (and chdir to) a writable per-user data directory. When the app is
+ * launched from /Applications/Wasteland.app on macOS or from a system path
+ * on Linux the working directory is `/`, where mkdir/fopen always fail —
+ * so all model downloads silently die. We resolve a per-user location and
+ * make it the new CWD so the rest of the code (which uses relative paths
+ * like "models/foo.gguf" and "chats/...txt") just works.
+ *
+ * Order of preference:
+ *   1. $WASTELAND_HOME (escape hatch — dev / user override)
+ *   2. CWD already writable (dev runs from build/ — keep current behaviour)
+ *   3. macOS: ~/Library/Application Support/Wasteland
+ *      Linux: $XDG_DATA_HOME/wasteland or ~/.local/share/wasteland
+ *      Windows: %APPDATA%\Wasteland
+ */
+static int dir_writable(const char *p)
+{
+    if (!p || !*p) return 0;
+    struct stat st;
+    if (stat(p, &st) != 0) return 0;
+    if (!S_ISDIR(st.st_mode)) return 0;
+#ifdef _WIN32
+    return 1; /* good enough — actual write test on first download */
+#else
+    return access(p, W_OK) == 0;
+#endif
+}
+
+static int ensure_dir(const char *p)
+{
+    struct stat st;
+    if (stat(p, &st) == 0 && S_ISDIR(st.st_mode)) return 0;
+    return platform_mkdir(p);
+}
+
+static void platform_pick_data_dir(char *out, size_t out_size)
+{
+    out[0] = '\0';
+
+    const char *override = getenv("WASTELAND_HOME");
+    if (override && *override) {
+        snprintf(out, out_size, "%s", override);
+        ensure_dir(out);
+        return;
+    }
+
+    /* Dev path: if "models" already exists right here OR the cwd is
+     * writable AND not the filesystem root, stay put. */
+    char cwd[1024] = "";
+#ifdef _WIN32
+    if (_getcwd(cwd, sizeof(cwd))) {
+        if (cwd[0] && strcmp(cwd, "C:\\") != 0 && dir_writable(cwd)) {
+            snprintf(out, out_size, "%s", cwd);
+            return;
+        }
+    }
+#else
+    if (getcwd(cwd, sizeof(cwd))) {
+        if (cwd[0] && strcmp(cwd, "/") != 0 && dir_writable(cwd)) {
+            snprintf(out, out_size, "%s", cwd);
+            return;
+        }
+    }
+#endif
+
+#ifdef _WIN32
+    const char *appdata = getenv("APPDATA");
+    if (appdata && *appdata) {
+        snprintf(out, out_size, "%s\\Wasteland", appdata);
+        ensure_dir(out);
+        return;
+    }
+#elif defined(__APPLE__)
+    const char *home = getenv("HOME");
+    if (home && *home) {
+        char libdir[1024];
+        snprintf(libdir, sizeof(libdir),
+                 "%s/Library/Application Support", home);
+        ensure_dir(libdir);
+        snprintf(out, out_size, "%s/Wasteland", libdir);
+        ensure_dir(out);
+        return;
+    }
+#else
+    const char *xdg = getenv("XDG_DATA_HOME");
+    if (xdg && *xdg) {
+        snprintf(out, out_size, "%s/wasteland", xdg);
+        ensure_dir(out);
+        return;
+    }
+    const char *home = getenv("HOME");
+    if (home && *home) {
+        /* base[] sized smaller than out so the suffix can't truncate. */
+        char base[512];
+        snprintf(base, sizeof(base), "%s/.local/share", home);
+        ensure_dir(base);
+        snprintf(out, out_size, "%s/wasteland", base);
+        ensure_dir(out);
+        return;
+    }
+#endif
+    /* Last resort: tmp. Better than aborting. */
+    snprintf(out, out_size, "/tmp/wasteland");
+    ensure_dir(out);
+}
+
 static void ensure_models_dir(void)
 {
+    /* Pick (and chdir to) a writable per-user data dir before anything
+     * touches the disk. After this returns, all relative paths in the
+     * rest of the codebase ("models/...", "chats/...", "system_prompt.txt")
+     * resolve under that directory. */
+    char data_dir[1024];
+    platform_pick_data_dir(data_dir, sizeof(data_dir));
+    if (data_dir[0]) {
+#ifdef _WIN32
+        if (_chdir(data_dir) != 0)
+#else
+        if (chdir(data_dir) != 0)
+#endif
+        {
+            fprintf(stderr, "[main] chdir(%s) failed: %s\n",
+                    data_dir, strerror(errno));
+        } else {
+            fprintf(stderr, "[main] data dir: %s\n", data_dir);
+        }
+    }
+
     struct stat st = {0};
     if (stat("models", &st) == -1) {
         if (platform_mkdir("models") != 0) {
@@ -341,6 +467,11 @@ int main(int argc, char **argv)
         }
         if (startup_frames > 0) startup_frames--;
         nk_input_end(nk);
+
+        /* Push current agent settings to the inference module each frame so
+         * the worker sees them at the moment the next prompt is dequeued. */
+        inference_set_agent(state.inference, state.agent_mode,
+                            state.agent_workspace);
 
         /* --- Drain inference output into chat history --- */
         char chunk[1024];
