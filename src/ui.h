@@ -29,6 +29,10 @@
 #define WASTELAND_MAX_CHATS        64
 #define WASTELAND_CHAT_NAME_LEN    256
 
+/* Agent-mode UI buffer sizes (mirrored from agent.h to avoid the include
+ * chain dragging agent internals into every UI compilation unit). */
+#define AGENT_MAX_PATH_LEN_UI      1024
+
 /**
  * @brief Global application state shared between UI and worker threads.
  *
@@ -78,6 +82,26 @@ typedef struct {
     unsigned int status_timer;
 
     inference_ctx_t *inference;
+
+    /* ---- Agent mode -----------------------------------------------------
+     * When `agent_mode` is set, the worker injects a tools system prompt and
+     * starts a multi-turn ReAct loop bounded to ~10 iterations. All file I/O
+     * is sandboxed under `agent_workspace` (see agent.c → agent_resolve_path).
+     *
+     * Approval flow for mutating tools (write_file, apply_edit):
+     *   1. Worker fills agent_pending_* and sets agent_pending = N.
+     *   2. UI renders the proposed action with [APPLY]/[REJECT] buttons.
+     *   3. User clicks → UI sets agent_approval = +1 (apply) or -1 (reject).
+     *   4. Worker observes, executes (or skips), clears pending, continues. */
+    int  agent_mode;                       /* 0=off, 1=on */
+    char agent_workspace[1024];            /* user-set sandbox root */
+
+    volatile int   agent_pending;          /* 0=none, 1=write_file, 2=apply_edit */
+    char           agent_pending_path[AGENT_MAX_PATH_LEN_UI];
+    char          *agent_pending_content;  /* heap, write_file body */
+    char          *agent_pending_search;   /* heap, apply_edit search */
+    char          *agent_pending_replace;  /* heap, apply_edit replace */
+    volatile int   agent_approval;         /* 0=waiting, +1=apply, -1=reject */
 
     volatile int running;
 } app_state_t;

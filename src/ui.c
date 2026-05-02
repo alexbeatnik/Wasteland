@@ -929,6 +929,51 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
             nk_layout_row_dynamic(nk, 10, 1);
             nk_spacing(nk, 1);
 
+            /* ===== AGENT MODE ===== */
+            nk_layout_row_dynamic(nk, 20, 1);
+            nk_label_colored(nk, "AGENT MODE", NK_TEXT_LEFT, amber);
+            nk_layout_row_dynamic(nk, 2, 1);
+            nk_button_color(nk, amber);
+
+            nk_layout_row_dynamic(nk, 24, 1);
+            nk_checkbox_label(nk, state->agent_mode
+                                  ? "AGENT MODE: ON  (model can read/edit files)"
+                                  : "AGENT MODE: OFF (chat only)",
+                              &state->agent_mode);
+
+            if (state->agent_mode) {
+                nk_layout_row_dynamic(nk, 18, 1);
+                nk_label_colored(nk, "Workspace (sandbox root):",
+                                 NK_TEXT_LEFT, amber);
+                nk_layout_row_dynamic(nk, 26, 1);
+                int wlen = (int)strlen(state->agent_workspace);
+                nk_edit_string(nk, NK_EDIT_FIELD,
+                               state->agent_workspace, &wlen,
+                               sizeof(state->agent_workspace),
+                               nk_filter_default);
+                state->agent_workspace[wlen] = '\0';
+
+                /* Quick visual feedback: does the path exist as a directory? */
+                struct stat wst;
+                int valid = (state->agent_workspace[0] != '\0' &&
+                             stat(state->agent_workspace, &wst) == 0 &&
+                             S_ISDIR(wst.st_mode));
+                nk_layout_row_dynamic(nk, 18, 1);
+                if (state->agent_workspace[0] == '\0') {
+                    nk_label_colored(nk, "(no workspace set)",
+                                     NK_TEXT_LEFT, col_dark_grey());
+                } else if (!valid) {
+                    nk_label_colored(nk, "INVALID: not a directory",
+                                     NK_TEXT_LEFT, nk_rgb(0xCC, 0x44, 0x00));
+                } else {
+                    nk_label_colored(nk, "OK", NK_TEXT_LEFT, amber);
+                }
+            }
+
+            /* Spacer */
+            nk_layout_row_dynamic(nk, 10, 1);
+            nk_spacing(nk, 1);
+
             /* ===== SYSTEM PROMPT ===== */
             nk_layout_row_dynamic(nk, 20, 1);
             nk_label_colored(nk, "SYSTEM PROMPT", NK_TEXT_LEFT, amber);

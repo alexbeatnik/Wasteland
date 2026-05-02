@@ -43,6 +43,35 @@ void   inference_cancel_generation(inference_ctx_t *ctx);
  * either already exiting or about to. */
 void   inference_request_stop(inference_ctx_t *ctx);
 
+/* Agent mode -------------------------------------------------------------- */
+
+/**
+ * Configure agent mode for the next prompt. Set `mode` to 1 to enable the
+ * tool-using ReAct loop with sandboxing under `workspace`; set to 0 to
+ * fall back to plain single-shot chat. Safe to call between prompts.
+ */
+void   inference_set_agent(inference_ctx_t *ctx, int mode, const char *workspace);
+
+/**
+ * Probe whether the worker is currently waiting for the user to approve a
+ * mutating tool call. If yes, returns the pending tool kind (1=write_file,
+ * 2=apply_edit) and fills the *_out args (pointers stay valid until the
+ * next call to inference_set_pending_approval). Returns 0 if nothing pending.
+ *
+ * The strings remain owned by the inference module — do NOT free them.
+ */
+int    inference_get_pending(inference_ctx_t *ctx,
+                             const char **path_out,
+                             const char **content_out,   /* may be NULL */
+                             const char **search_out,    /* may be NULL */
+                             const char **replace_out);  /* may be NULL */
+
+/**
+ * Resolve a pending approval. `decision` = +1 to APPLY, -1 to REJECT.
+ * Wakes the worker out of its approval-wait poll. No-op if no pending action.
+ */
+void   inference_set_pending_approval(inference_ctx_t *ctx, int decision);
+
 /* Worker thread entry point ----------------------------------------------- */
 void* inference_worker_thread(void *arg);
 
