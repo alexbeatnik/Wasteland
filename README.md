@@ -1,5 +1,7 @@
 # Wasteland Terminal v0.2
 
+![Wasteland Terminal](assets/icon-512.png)
+
 A highly secure, offline-first LLM chat application with a retro-futuristic TUI-like graphical interface.
 
 ## Overview
