@@ -85,6 +85,14 @@ else()
         /O2
         /W4
     )
+    # nuklear.h is a single-header library compiled inside nuklear_impl.c.
+    # MSVC C4701 ("potentially uninitialized variable") fires inside nuklear.h's
+    # own code at /W4 level and is a known false-positive in that codebase.
+    # Suppress it only for that translation unit to keep our own code clean.
+    set_source_files_properties(
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/nuklear_impl.c"
+        PROPERTIES COMPILE_OPTIONS "/wd4701"
+    )
 endif()
 
 # ---------------------------------------------------------------------------
@@ -232,24 +240,38 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Wasteland Maintainers <noreply@example.com>")
     set(CPACK_DEBIAN_PACKAGE_SECTION    "utils")
     set(CPACK_DEBIAN_PACKAGE_PRIORITY   "optional")
-    set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "amd64")
+
+    # Map CMake's CMAKE_SYSTEM_PROCESSOR to the Debian architecture name so
+    # the same CMakeLists.txt produces the correct .deb on both amd64 and arm64
+    # CI runners without any manual override.
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+        set(_deb_arch "amd64")
+    elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
+        set(_deb_arch "arm64")
+    elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(armv7l|armhf)$")
+        set(_deb_arch "armhf")
+    else()
+        set(_deb_arch "${CMAKE_SYSTEM_PROCESSOR}")
+    endif()
+    set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "${_deb_arch}")
+
     # Let dpkg-shlibdeps figure out concrete versioned deps from the linked
     # SOs (libSDL2, libcurl, libseccomp, libgomp, libstdc++, libgcc_s, libc).
     # That avoids hard-coding distro-specific versions like libsdl2-2.0-0.
     set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS  ON)
     set(CPACK_PACKAGE_FILE_NAME
-        "wasteland_${CPACK_PACKAGE_VERSION}_${CPACK_DEBIAN_PACKAGE_ARCHITECTURE}")
+        "wasteland_${CPACK_PACKAGE_VERSION}_${_deb_arch}")
 
     # Only ship our Runtime component; llama.cpp's unconditional install rules
     # land in the default 'Unspecified' component which CPack drops in
     # component-install mode. Override the per-component file naming so we
-    # still emit a single `wasteland_<version>_amd64.deb` instead of the
+    # still emit a single `wasteland_<version>_<arch>.deb` instead of the
     # default `<base>-Runtime.deb`.
     set(CPACK_COMPONENTS_ALL Runtime)
     set(CPACK_DEB_COMPONENT_INSTALL ON)
     set(CPACK_DEBIAN_RUNTIME_PACKAGE_NAME "wasteland")
     set(CPACK_DEBIAN_RUNTIME_FILE_NAME
-        "wasteland_${CPACK_PACKAGE_VERSION}_${CPACK_DEBIAN_PACKAGE_ARCHITECTURE}.deb")
+        "wasteland_${CPACK_PACKAGE_VERSION}_${_deb_arch}.deb")
     set(CPACK_DEBIAN_RUNTIME_PACKAGE_SHLIBDEPS ON)
 
     include(CPack)
