@@ -32,7 +32,8 @@
 
 /* Agent loop knobs. Bounded so a runaway model can't lock the worker. */
 #define AGENT_MAX_TURNS         10
-#define AGENT_MAX_MSGS          (1 + AGENT_MAX_TURNS * 2 + 2)  /* sys + per-turn assistant+tool + initial user */
+#define AGENT_HISTORY_SLOTS     8   /* max history messages (4 turns) carried into agent mode */
+#define AGENT_MAX_MSGS          (1 + AGENT_HISTORY_SLOTS + 1 + AGENT_MAX_TURNS * 2)  /* sys + hist + user + tool loop */
 #define AGENT_ACCUM_BUFFER      8192
 #define AGENT_TOOL_RESULT_BUF   AGENT_MAX_TOOL_RESULT
 
@@ -60,6 +61,9 @@ struct inference_ctx {
      * stream while keeping the reasoning text itself. */
     char   tag_carry[TAG_CARRY_MAX];
     size_t tag_carry_len;
+    /* Last char emitted this turn; '\n' at turn start so an initial <think>
+     * is accepted. Updated by output_append_locked to detect line-start. */
+    char   tag_prev_char;
 
     /* Prompt queue (producer: main, consumer: worker) */
     pthread_mutex_t prompt_mutex;
@@ -672,6 +676,7 @@ static void output_append_locked(inference_ctx_t *ictx,
     memcpy(ictx->output_buffer + ictx->output_write_pos, src, n);
     ictx->output_write_pos += n;
     ictx->output_buffer[ictx->output_write_pos] = '\0';
+    ictx->tag_prev_char = src[n - 1];
 }
 
 static void emit_filtered_piece(inference_ctx_t *ictx,
@@ -722,10 +727,20 @@ static void emit_filtered_piece(inference_ctx_t *ictx,
         }
 
         if (m) {
-            /* Emit safe content before the tag, then emit a line marker instead of stripping. */
             size_t safe = (size_t)(m - buf);
+            /* Only treat as a think tag if it's at the start of a line.
+             * This prevents `<think>` used as literal prose from triggering
+             * a false think block (e.g. "`<think>`" in markdown). */
+            char char_before = (m > buf) ? *(m - 1) : ictx->tag_prev_char;
+            if (char_before != '\0' && char_before != '\n') {
+                /* Not at line-start — emit content up to and including '<'
+                 * as plain text, then keep scanning for real tags. */
+                output_append_locked(ictx, buf + pos, safe - pos + 1);
+                pos = safe + 1;
+                continue;
+            }
+
             if (safe > pos) output_append_locked(ictx, buf + pos, safe - pos);
-            
             if (m == m_open) {
                 const char *marker = "\n-- THINK --\n";
                 output_append_locked(ictx, marker, strlen(marker));
@@ -786,7 +801,8 @@ static int run_one_turn(inference_ctx_t *ictx,
 {
     /* Per-turn state reset (do NOT clobber output_buffer — it's the running
      * chat history visible to the user). */
-    ictx->tag_carry_len = 0;
+    ictx->tag_carry_len  = 0;
+    ictx->tag_prev_char  = '\n'; /* treat start of turn as "after newline" */
 
     pthread_mutex_lock(&ictx->output_mutex);
     size_t turn_start = ictx->output_write_pos;
@@ -959,16 +975,10 @@ static void process_tool_call(inference_ctx_t *ictx,
 
     if (call->kind == AGENT_TOOL_READ_FILE) {
         agent_exec_read_file(workspace, call->path, result_out, result_size);
-        emit_raw_str(ictx, "  ");
-        emit_raw_str(ictx, result_out);
-        emit_raw_str(ictx, "\n");
         return;
     }
     if (call->kind == AGENT_TOOL_LIST_DIR) {
         agent_exec_list_dir(workspace, call->path, result_out, result_size);
-        emit_raw_str(ictx, "  ");
-        emit_raw_str(ictx, result_out);
-        emit_raw_str(ictx, "\n");
         return;
     }
 
@@ -1085,7 +1095,8 @@ void* inference_worker_thread(void *arg)
 
         /* ---- Reset for the new user prompt ---- */
         ictx->cancel_generation = 0;
-        ictx->tag_carry_len = 0;
+        ictx->tag_carry_len  = 0;
+        ictx->tag_prev_char  = '\n';
         pthread_mutex_lock(&ictx->output_mutex);
         ictx->output_write_pos = 0;
         ictx->output_read_pos  = 0;
@@ -1149,6 +1160,20 @@ void* inference_worker_thread(void *arg)
             msgs[n_msgs].role    = "system";
             msgs[n_msgs].content = combined_sys;
             n_msgs++;
+
+            /* Include conversation history so the model remembers previous
+             * exchanges (same as non-agent mode), capped at AGENT_HISTORY_SLOTS
+             * to leave room for tool-call turns inside the ReAct loop. */
+            char local_history[WASTELAND_MAX_CHAT_HISTORY];
+            pthread_mutex_lock(&ictx->history_mutex);
+            strncpy(local_history, ictx->chat_history, sizeof(local_history) - 1);
+            local_history[sizeof(local_history) - 1] = '\0';
+            pthread_mutex_unlock(&ictx->history_mutex);
+
+            int n_hist = parse_chat_history(local_history,
+                                            msgs + n_msgs, owned + n_msgs,
+                                            AGENT_HISTORY_SLOTS);
+            n_msgs += n_hist;
 
             msgs[n_msgs].role    = "user";
             msgs[n_msgs].content = prompt;
