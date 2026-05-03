@@ -383,7 +383,20 @@ int main(int argc, char **argv)
     SDL_ShowWindow(win);
 
     /* ---- Nuklear + SDL2 + OpenGL2 backend ---- */
-    struct nk_context *nk = nk_sdl_init(win);
+    /* Scale the base 15 px font by the drawable/logical pixel ratio so text
+     * appears the same logical size on standard, Retina, and Windows HiDPI
+     * displays.  SDL_GL_GetDrawableSize returns physical pixels;
+     * SDL_GetWindowSize returns logical pixels. */
+    float dpi_scale;
+    {
+        int lw = 0, dw = 0;
+        SDL_GetWindowSize(win, &lw, NULL);
+        SDL_GL_GetDrawableSize(win, &dw, NULL);
+        dpi_scale = (lw > 0 && dw > 0) ? (float)dw / (float)lw : 1.0f;
+        if (dpi_scale < 1.0f) dpi_scale = 1.0f;
+        if (dpi_scale > 4.0f) dpi_scale = 4.0f;
+    }
+    struct nk_context *nk = nk_sdl_init(win, 15.0f * dpi_scale);
     if (!nk) {
         fprintf(stderr, "[main] nk_sdl_init failed\n");
         SDL_GL_DeleteContext(gl_ctx);

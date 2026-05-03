@@ -1,4 +1,4 @@
-# SKILLS.md — Wasteland v0.2
+# SKILLS.md — Wasteland v0.3
 
 ## Available Skills
 
@@ -32,6 +32,8 @@ This project does not use a formal skill system. The following domains are relev
 - **Per-turn box rendering:** the chat rendering loop splits on `\n> ` boundaries unconditionally (not only inside think blocks). This ensures each user/assistant exchange occupies its own `nk_edit_string` box and new user prompts never render inside previous assistant reply blocks.
 - **Empty-section suppression:** before calling `nk_edit_string`, scan the section buffer for at least one visible character (codepoint > `' '`). Sections with only `\n`/spaces (stray whitespace between `-- THINK --` markers) are dropped entirely — no box, no "▒ thinking" label.
 - Word wrap with measured row heights using the active font's `width()` callback (`wrap_text_into()`).
+- **Embedded font pattern:** `xxd -i font.ttf | sed 's/.../static const unsigned char name[]/' > src/font.h` bakes a TTF into a C byte array. Use `nk_font_atlas_add_from_memory(atlas, data, len, size, cfg)` to load it — no file path required, works identically on Linux/macOS/Windows.
+- **DPI-aware font scaling:** after window creation, compute `dpi_scale = SDL_GL_GetDrawableSize(w) / SDL_GetWindowSize(w)`. Multiply base font size (15 px) by this ratio and pass to the font-baking call. On macOS Retina (2×) and Windows HiDPI (1.25–2×) this prevents text from appearing physically tiny.
 - Custom rendering of TTF fonts (`DejaVuSansMono`) mapped with specific Unicode ranges (e.g. Cyrillic `0x0400-0x04FF`).
 - SDL2 windowing and event handling.
 - OpenGL 2.1 fixed-function pipeline.
@@ -96,4 +98,4 @@ This project does not use a formal skill system. The following domains are relev
 
 ## Version
 
-Current version: **0.2**
+Current version: **0.3**

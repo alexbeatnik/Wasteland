@@ -29,11 +29,11 @@ jobs:
           # download, so we deliberately omit the file extension here to avoid
           # ugly `Wasteland-windows.exe.zip` double-extensions.
           - os: ubuntu-22.04
-            file_name: wasteland_0.2.0_amd64.deb
+            file_name: wasteland_0.3.0_amd64.deb
             artifact_name: wasteland-linux-amd64-deb
             target_os: linux
           - os: ubuntu-22.04-arm
-            file_name: wasteland_0.2.0_arm64.deb
+            file_name: wasteland_0.3.0_arm64.deb
             artifact_name: wasteland-linux-arm64-deb
             target_os: linux
           - os: macos-14

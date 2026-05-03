@@ -1,4 +1,4 @@
-# AGENTS.md — Wasteland v0.2
+# AGENTS.md — Wasteland v0.3
 
 ## Agent Instructions
 
@@ -125,7 +125,17 @@ Before declaring a task complete:
 9. CTX bar shows a non-zero percentage after one exchange.
 10. `[ COMPACT ]` visibly shrinks the chat and shows a status message; clicking it again when only one turn remains shows "Nothing to compact".
 11. Cross-platform changes must not break the Linux build.
+12. Cyrillic text (Ukrainian) must render correctly — the font covers U+0400–U+04FF via the embedded DejaVu Sans Mono array in `src/font_dejavu.h`.
+13. ▶ and ■ buttons must render (not show `?`) — these are in Geometric Shapes U+25A0–U+25FF, also covered by the embedded font.
+14. On a HiDPI display (or Windows at 125%/150% scaling) text must not be tiny — the font is scaled by `SDL_GL_GetDrawableSize / SDL_GetWindowSize`.
+
+## Font & DPI Rules
+
+- **Never remove `src/font_dejavu.h`** from the repo — it is the only reliable cross-platform source of Cyrillic + symbol glyphs. If you need to regenerate it: `xxd -i DejaVuSansMono.ttf | sed ...` (see CLAUDE.md Build Notes).
+- **`nk_sdl_init` signature is `(SDL_Window *win, float font_size)`** — always pass the DPI-scaled size computed in `main.c`. Passing 0 falls back to 15 px.
+- **`memmem` on MSVC:** provide a `static` implementation inside `#ifdef _WIN32` at the top of the TU, before any call site. A separate forward declaration triggers C2040 because MSVC already has an implicit `int ()` entry.
+- **Windows POSIX macros:** `S_ISDIR` is not defined by MSVC. Add `#define S_ISDIR(mode) (((mode) & _S_IFMT) == _S_IFDIR)` inside the `#ifdef _WIN32` include block of any TU that uses it.
 
 ## Version
 
-Current version: **0.2**
+Current version: **0.3**

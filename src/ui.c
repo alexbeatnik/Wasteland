@@ -685,7 +685,7 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
     {
         /* ========================= HEADER ========================= */
         nk_layout_row_dynamic(nk, 30, 1);
-        nk_label_colored(nk, "WASTELAND TERMINAL v0.2",
+        nk_label_colored(nk, "WASTELAND TERMINAL v0.3",
                          NK_TEXT_CENTERED, amber);
 
         /* Status row: [toggle] | SYS | status | NET
