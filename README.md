@@ -23,8 +23,9 @@ Wasteland is a local LLM inference client built in pure C with a vintage PC-insp
 - **Configurable inference settings** — N\_CTX (512–262 144) and Temperature (0.10–2.00) are adjustable from the left panel and persist across sessions; N\_CTX takes effect on the next model load, Temperature applies from the next prompt
 - **Repetition-penalty sampler** — Replaces the old greedy sampler with a stacked penalties → top\_k → top\_p → temperature → distribution chain that prevents small models from looping into repeated paragraphs
 - **Multiple Chats** — Create, load, and switch between named chat sessions; auto-named from the first user message; persisted to `chats/*.txt` with simple RC4 obfuscation
-- **System Prompt** — Configure and persist a system prompt to guide model behaviour (`system_prompt.txt`)
-- **Smart Reasoning** — `<think>` reasoning blocks are displayed dimmed in the UI (with a "▒ thinking" label) and automatically excluded from the `◈` copy-to-clipboard text; each turn is rendered in its own box so user prompts never appear inside assistant reply blocks
+- **Built-in behaviour rules** — A base system prompt is always active: instructs the model to output plain text (no markdown), be concise, match the user's language, and understand it is running offline. The user-configurable system prompt is appended on top
+- **System Prompt** — Configure and persist an additional system prompt to further guide model behaviour (`system_prompt.txt`)
+- **Smart Reasoning** — `<think>` reasoning blocks are displayed dimmed in the UI (with a "▒ thinking" label) and automatically excluded from the `◈` copy-to-clipboard text; each turn is rendered in its own box so user prompts never appear inside assistant reply blocks; false-positive detection (e.g. `` `<think>` `` in prose) is suppressed via line-start guard
 - **Auto-scroll + word wrap** — Chat pins to the bottom and wraps long lines to the panel width
 - **Download Progress** — Real-time progress bar with filename, percent, and **cancel** support
 - **Fast close** — Clicking X hides the window instantly, signals the worker via `inference_request_stop()`, joins with a 1.5 s timeout, and falls back to `_Exit` if the worker is still mid-decode
@@ -117,7 +118,8 @@ GitHub Actions automatically builds and releases for all platforms on every tag:
 
 | Platform | Artifact |
 |----------|----------|
-| Linux (Ubuntu/Debian) | `wasteland_0.2.0_amd64.deb` — install with `sudo apt install ./wasteland_0.2.0_amd64.deb` |
+| Linux x86\_64 (Ubuntu/Debian) | `wasteland_0.2.0_amd64.deb` — install with `sudo apt install ./wasteland_0.2.0_amd64.deb` |
+| Linux ARM64 (Raspberry Pi 5, Ampere, etc.) | `wasteland_0.2.0_arm64.deb` — install with `sudo apt install ./wasteland_0.2.0_arm64.deb` |
 | macOS (universal) | `Wasteland-macos.dmg` — one .app that runs natively on both Apple Silicon and Intel (deployment target 11.0+) |
 | Windows | `Wasteland-windows.exe` — single self-contained binary (SDL2/curl statically linked) |
 

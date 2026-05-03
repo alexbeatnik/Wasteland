@@ -59,6 +59,7 @@ This project does not use a formal skill system. The following domains are relev
 ### Stream Processing & Data Persistence
 
 - Token-by-token streaming with carry buffers for partial-match safety.
+- **Line-start `<think>` detection:** `emit_filtered_piece()` only converts a `<think>` / `</think>` tag to a think-block marker when the character immediately preceding it in the output stream is `'\n'` or `'\0'` (start of turn). The `tag_prev_char` field (reset to `'\n'` at turn start, updated by every `output_append_locked` call) tracks this. Without the guard, `` `<think>` `` in model prose triggers a false think block that leaks into all subsequent output.
 - Intercepting reasoning markers (`<think>` / `</think>`) and rendering them differently (dimmed text, "▒ thinking" label).
 - Custom UI string parsers to selectively skip reasoning blocks when copying chat text to the clipboard.
 - Generating human-readable filenames (stripping filesystem-unsafe characters) from dynamic prompts.
@@ -77,6 +78,12 @@ This project does not use a formal skill system. The following domains are relev
 - Why pointer-deref filtering (sockaddr family on `connect`/`bind`) is impossible in seccomp and what to do instead (gate at `socket()`).
 - Cross-platform security model: features degrade gracefully on macOS / Windows.
 
+### Prompt Engineering / System Prompts
+
+- **Built-in base system prompt pattern:** define a `static const char BASE_SYSTEM_PROMPT[]` in the inference module and always prepend it to the user-configurable system prompt via a `build_system_prompt()` helper. This guarantees consistent model behaviour (plain-text output, language matching, context awareness) regardless of whether the user has set a custom prompt.
+- Key rules for a terminal LLM client: suppress markdown (the UI renders text verbatim), enforce conciseness, and communicate the offline/sandboxed nature of the runtime so the model doesn't hallucinate internet access.
+- Agent mode system prompt = base + user sys + tool instructions, concatenated in that order. Buffer size must accommodate all three (~16 KB in Wasteland).
+
 ### Build Engineering
 
 - CMake target configuration.
@@ -84,6 +91,8 @@ This project does not use a formal skill system. The following domains are relev
 - Git submodule management for vendored llama.cpp.
 - Platform-specific linking (SDL2, OpenGL, curl, seccomp on Linux; ws2_32, winmm on Windows).
 - MinGW cross-compilation from Linux toolchain files.
+- **Per-file MSVC warning suppression:** use `set_source_files_properties(file.c PROPERTIES COMPILE_OPTIONS "/wd<N>")` to suppress a warning from a third-party header included only in that translation unit. Avoids masking the same warning in application code.
+- **Dynamic `.deb` architecture:** map `CMAKE_SYSTEM_PROCESSOR` to Debian arch names (`x86_64`→`amd64`, `aarch64`→`arm64`) at configure time so the same `CMakeLists.txt` produces correctly-named packages on both amd64 and ARM64 CI runners without manual overrides.
 
 ## Version
 

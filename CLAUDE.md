@@ -103,11 +103,23 @@ The worker appends a trailing `\n` to the output buffer before clearing `generat
 - Nuklear uses feature macros before every include:
   - `NK_INCLUDE_FIXED_TYPES`, `NK_INCLUDE_DEFAULT_ALLOCATOR`, `NK_INCLUDE_VERTEX_BUFFER_OUTPUT`, `NK_INCLUDE_FONT_BAKING`, `NK_INCLUDE_DEFAULT_FONT`, `NK_INCLUDE_STANDARD_IO`, `NK_INCLUDE_STANDARD_VARARGS`
 
+## Base System Prompt
+
+`BASE_SYSTEM_PROMPT` is a `static const char[]` defined at the top of `inference.c`. It is **always** included as the first part of the system message — the user-configurable system prompt (if any) is appended after it via `build_system_prompt(user_sys, out, out_size)`.
+
+Contents: plain-text output requirement (no markdown), conciseness, language matching, offline context awareness.
+
+- In normal mode: `combined_sys_plain[MAX_PROMPT_LEN + 2048]` holds the combined string; it is a `static` local in the worker loop (not on the per-call stack).
+- In agent mode: `combined_sys[16384]` holds base + user sys + `agent_system_prompt()` concatenated.
+- `build_system_prompt()` always emits a non-empty string — there is no path where the system message is absent.
+
 ## `<think>` Tag Stripping & Rendering
 
 `emit_filtered_piece()` in `inference.c` transforms `<think>` / `</think>` byte sequences into `\n-- THINK --\n` / `\n-- END THINK --\n` markers.
 
 - `tag_carry` (7 bytes, `TAG_CARRY_MAX`) is the longest possible partial-tag suffix kept between calls.
+- `tag_prev_char` (new field in `inference_ctx_t`) records the last character emitted via `output_append_locked`. Reset to `'\n'` at the start of each turn to simulate "after a newline".
+- **Line-start guard:** a `<think>` / `</think>` match is only accepted as a real tag if the character immediately before it in the stream is `'\n'` or `'\0'` (start of turn). If not, the `<` is emitted as plain text and scanning continues. This prevents `` `<think>` `` in model prose from triggering a false think block.
 - Carry is reset (`tag_carry_len = 0`) at the start of each prompt and flushed verbatim at end of generation via `emit_filtered_flush()`.
 - The UI rendering loop in `ui.c` splits chat history on these markers and on `\n> ` boundaries (user prompts), creating a separate `nk_edit_string` box per section.
 - Sections with only whitespace characters are suppressed — no box and no "▒ thinking" label. This avoids empty boxes from stray `\n` between adjacent markers.
@@ -169,6 +181,11 @@ The Linux lockdown is **deliberately narrow**: only `socket(AF_INET, …)`, `soc
 2. Gating `socket()` is sufficient: no new IP fd can be opened.
 3. Already-open file descriptors keep working unchanged.
 
+## Agent Mode — History & Tool Output
+
+- **Multi-turn history in agent mode:** the worker now calls `parse_chat_history` in the agent branch too, capped at `AGENT_HISTORY_SLOTS = 8` messages (4 turns) to leave room for tool-call turns. `AGENT_MAX_MSGS = 30` (was 23).
+- **Tool output in chat UI:** `read_file` and `list_dir` results are no longer echoed to the output buffer. The `[ TOOL: read_file | path ]` header is still emitted so the user can see what the model is doing. The file contents go only to `result_out` (the model's next-turn context).
+
 ## Build Notes
 
 - `nuklear_impl.c` is the **single compilation unit** for Nuklear implementation.
@@ -177,6 +194,8 @@ The Linux lockdown is **deliberately narrow**: only `socket(AF_INET, …)`, `soc
 - `seccomp` is optional (Linux only); CMake skips it gracefully on other platforms.
 - The application does **not** auto-load any model on boot.
 - Package version: **0.2.0** (`CPACK_PACKAGE_VERSION` in `CMakeLists.txt`).
+- MSVC: `nuklear_impl.c` is compiled with `/wd4701` (suppresses C4701 "potentially uninitialized variable" false-positives in nuklear.h). All other translation units remain under full `/W4`.
+- Linux `.deb` architecture is detected at CMake configure time from `CMAKE_SYSTEM_PROCESSOR` (`x86_64` → `amd64`, `aarch64` → `arm64`). CI builds both via `ubuntu-22.04` and `ubuntu-22.04-arm` runners.
 
 ## Style
 

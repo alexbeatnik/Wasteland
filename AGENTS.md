@@ -9,7 +9,9 @@ This file contains conventions and preferences for AI agents working on Wastelan
 - **CMake** is the only supported build system.
 - Run `./build.sh` to build on Linux; it auto-detects local venv `cmake`.
 - Build artifacts live in `build/` — never edit them and never commit them.
-- Cross-platform: Linux, macOS, Windows (MinGW / MSVC).
+- Cross-platform: Linux (amd64 + arm64), macOS (universal arm64+x86_64), Windows (MinGW / MSVC).
+- Linux `.deb` architecture is auto-detected at configure time (`CMAKE_SYSTEM_PROCESSOR` → `amd64` / `arm64`). CI uses `ubuntu-22.04` and `ubuntu-22.04-arm` runners.
+- MSVC: `nuklear_impl.c` is compiled with `/wd4701` to suppress C4701 false-positives from `nuklear.h`. Do not add `/wd4701` to the global target flags — keep it scoped to that translation unit via `set_source_files_properties`.
 
 ## Code Conventions
 
@@ -58,6 +60,8 @@ Anything that can take >100 ms must not run on the UI thread. The UI thread is t
 
 - `state->chat_history` (main thread) and `ictx->chat_history` (inference mirror, protected by `history_mutex`) are two separate buffers. Call `ui_set_chat_history(state)` to sync them before submitting a prompt or after compacting.
 - `parse_chat_history()` in `inference.c` produces user/assistant pairs. A trailing user message with no assistant reply (i.e. the current prompt in mid-submission) is **discarded** — the worker appends the current prompt separately. This prevents duplicating the user turn in the message list.
+- **Agent mode includes history:** the agent ReAct branch calls `parse_chat_history` with a cap of `AGENT_HISTORY_SLOTS = 8` messages before appending the current user prompt. This gives the model multi-turn memory in agent mode at the cost of fewer available tool-call slots (still 10 turns, governed by `AGENT_MAX_MSGS = 30`).
+- **Agent tool output:** `read_file` and `list_dir` results are NOT printed to the chat UI — only the `[ TOOL: name | path ]` header is shown. File contents are still passed to the model via `result_out`. Do not re-add the `emit_raw_str(ictx, result_out)` call — it floods the chat with raw file contents.
 - `ui_compact_chat_history(state, n)` is the **only** correct way to call compact from UI code. It locks `chat_mutex`, runs `compact_chat_history()`, pushes the result to inference via `ui_set_chat_history()`, saves the active chat to disk, updates the CTX bar, and writes a status message. Never call `compact_chat_history()` directly from button handlers.
 - `inference_get_context_stats()` calls `llama_tokenize()` with `tokens=NULL` / `n_tokens_max=0` to count without allocating. The API returns **negative** count in this case (buffer-too-small convention) — negate it to get the real count. Do not treat negative as failure.
 
@@ -73,11 +77,23 @@ penalties(last_n=64, repeat=1.1) → top_k(40) → top_p(0.95) → temp(ictx->te
 - Temperature is read from `ictx->temperature` (under `settings_mutex`) at sampler-build time so it can be tweaked between turns without reloading the model.
 - N\_CTX is read from `ictx->pending_n_ctx` (under `settings_mutex`) at model-load time. Changing it requires an unload + reload cycle.
 
+## Base System Prompt
+
+`BASE_SYSTEM_PROMPT` in `inference.c` is always prepended to the system message (before any user-configured system prompt). It enforces:
+
+- **Plain-text output** — no markdown (`**bold**`, `# headings`, `* bullets`, ` ``` ` fences) unless the user explicitly requests formatted output. The terminal renders text as-is; markdown appears as raw characters.
+- **Conciseness** — no padding or unnecessary preambles.
+- **Language matching** — reply in whatever language the user writes in.
+- **Offline awareness** — model knows it has no internet access unless Agent Mode is active.
+
+`build_system_prompt(user_sys, out, out_size)` handles the concatenation. Never skip the base prompt to "give the model more freedom" — it directly fixes the most common output quality problem (markdown flooding the terminal).
+
 ## Stream Filtering
 
-- `<think>` and `</think>` literals are intercepted by `emit_filtered_piece()` in `inference.c` and replaced with `\n-- THINK --\n` and `\n-- END THINK --\n` markers.
+- `<think>` and `</think>` are intercepted by `emit_filtered_piece()` and replaced with `\n-- THINK --\n` / `\n-- END THINK --\n` markers.
 - The filter uses a 7-byte carry buffer (`TAG_CARRY_MAX`) to handle tags split across two token pieces.
-- Reset `tag_carry_len = 0` at the start of every new prompt; flush via `emit_filtered_flush()` at end of generation.
+- **Line-start guard:** a tag is only treated as a real think marker if the character immediately before it in the stream is `'\n'` or `'\0'` (start of turn). This prevents `` `<think>` `` in model prose from creating a spurious think block. The `tag_prev_char` field in `inference_ctx_t` (reset to `'\n'` at turn start, updated by `output_append_locked`) tracks this.
+- Reset `tag_carry_len = 0` and `tag_prev_char = '\n'` at the start of every new prompt; flush carry via `emit_filtered_flush()` at end of generation.
 
 ## Settings Persistence
 
