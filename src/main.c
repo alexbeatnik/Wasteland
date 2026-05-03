@@ -34,6 +34,9 @@
 #  include <windows.h>
 #  include <direct.h>
 #  include <shellscalingapi.h>  /* SetProcessDpiAwareness fallback */
+#  ifndef S_ISDIR
+#    define S_ISDIR(mode) (((mode) & _S_IFMT) == _S_IFDIR)
+#  endif
 #else
 #  include <unistd.h>
 #  include <dirent.h>
