@@ -41,6 +41,25 @@
 
 #define OUTPUT_BUFFER_SIZE 65536
 #define MAX_PROMPT_LEN     4096
+
+/* Built-in base system prompt — always prepended to (or used instead of)
+ * the user-configurable system prompt. Defines default output style and
+ * context so every model behaves consistently out of the box. */
+static const char BASE_SYSTEM_PROMPT[] =
+    "You are a helpful AI assistant running inside Wasteland Terminal, "
+    "an offline privacy-first LLM chat application.\n"
+    "\n"
+    "Output rules:\n"
+    "- Write in plain text. Do not use markdown — no **bold**, no # headings, "
+    "no * or - bullet points, no ``` fences — unless the user explicitly asks "
+    "for code or formatted output. The terminal renders text as-is; markdown "
+    "symbols appear as raw characters on screen.\n"
+    "- Be concise and direct. Skip unnecessary preambles, padding phrases, "
+    "and self-congratulatory remarks.\n"
+    "- Reply in the same language the user writes in.\n"
+    "- You run entirely offline. You have no internet access unless the user "
+    "enables Agent Mode, which provides sandboxed read/write access to a "
+    "local workspace directory.";
 #define MAX_NEW_TOKENS     2048
 
 /* Longest literal we strip ("</think>" = 8 bytes). The carry buffer must
@@ -232,6 +251,17 @@ static int parse_chat_history(const char *history,
     }
 
     return n;
+}
+
+/* Combine BASE_SYSTEM_PROMPT with an optional user system prompt into `out`.
+ * Always produces a non-empty string — the base prompt is unconditional. */
+static void build_system_prompt(const char *user_sys, char *out, size_t out_size)
+{
+    if (user_sys && user_sys[0]) {
+        snprintf(out, out_size, "%s\n\n%s", BASE_SYSTEM_PROMPT, user_sys);
+    } else {
+        snprintf(out, out_size, "%s", BASE_SYSTEM_PROMPT);
+    }
 }
 
 static void free_parsed_msgs(char **owned, int n)
@@ -1116,11 +1146,13 @@ void* inference_worker_thread(void *arg)
             char *owned[MAX_HISTORY_MSGS] = {0};
             int n_msgs = 0;
 
-            if (sys_prompt[0]) {
-                msgs[n_msgs].role = "system";
-                msgs[n_msgs].content = sys_prompt;
-                n_msgs++;
-            }
+            /* Always include the base system prompt; append user prompt if set. */
+            static char combined_sys_plain[MAX_PROMPT_LEN + 2048];
+            build_system_prompt(sys_prompt, combined_sys_plain,
+                                sizeof(combined_sys_plain));
+            msgs[n_msgs].role    = "system";
+            msgs[n_msgs].content = combined_sys_plain;
+            n_msgs++;
 
             int sys_offset = n_msgs;
             int n_hist = parse_chat_history(local_history,
@@ -1148,14 +1180,14 @@ void* inference_worker_thread(void *arg)
             char *owned[AGENT_MAX_MSGS] = {0};
             int n_msgs = 0;
 
-            /* Combine user system prompt with the agent tool instructions. */
-            char combined_sys[8192];
-            if (sys_prompt[0]) {
+            /* Combine base system prompt + optional user prompt + agent tools. */
+            char combined_sys[16384];
+            {
+                char base_and_user[MAX_PROMPT_LEN + 2048];
+                build_system_prompt(sys_prompt, base_and_user,
+                                    sizeof(base_and_user));
                 snprintf(combined_sys, sizeof(combined_sys), "%s\n\n%s",
-                         sys_prompt, agent_system_prompt());
-            } else {
-                snprintf(combined_sys, sizeof(combined_sys), "%s",
-                         agent_system_prompt());
+                         base_and_user, agent_system_prompt());
             }
             msgs[n_msgs].role    = "system";
             msgs[n_msgs].content = combined_sys;
