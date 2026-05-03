@@ -417,6 +417,8 @@ int main(int argc, char **argv)
     state.inference = inference;
     state.context_tokens = 0;
     state.context_max = 0;
+    state.settings_n_ctx       = 4096;
+    state.settings_temperature = 0.8f;
     strncpy(state.status_msg, status_msg, sizeof(state.status_msg) - 1);
 
     /* Load system prompt */
@@ -453,6 +455,12 @@ int main(int argc, char **argv)
                 strncpy(state.agent_workspace, val,
                         sizeof(state.agent_workspace) - 1);
                 state.agent_workspace[sizeof(state.agent_workspace) - 1] = '\0';
+            } else if (strcmp(key, "n_ctx") == 0) {
+                int v = atoi(val);
+                if (v >= 512 && v <= 262144) state.settings_n_ctx = v;
+            } else if (strcmp(key, "temperature") == 0) {
+                float v = (float)atof(val);
+                if (v >= 0.01f && v <= 5.0f) state.settings_temperature = v;
             }
         }
         fclose(cfg_fp);
@@ -460,6 +468,13 @@ int main(int argc, char **argv)
     int  last_agent_mode = state.agent_mode;
     char last_agent_ws[1024];
     snprintf(last_agent_ws, sizeof(last_agent_ws), "%s", state.agent_workspace);
+    int   last_n_ctx       = state.settings_n_ctx;
+    float last_temperature = state.settings_temperature;
+
+    /* Push initial settings into the inference module so the very first
+     * model load (triggered by the user clicking [LOAD]) sees them. */
+    inference_set_n_ctx(state.inference,       state.settings_n_ctx);
+    inference_set_temperature(state.inference, state.settings_temperature);
 
     /* Do not auto-load model on boot — loading llama.cpp model breaks
        NVIDIA GL context. Model must be loaded manually via UI after
@@ -505,6 +520,8 @@ int main(int argc, char **argv)
          * the worker sees them at the moment the next prompt is dequeued. */
         inference_set_agent(state.inference, state.agent_mode,
                             state.agent_workspace);
+        inference_set_n_ctx(state.inference,       state.settings_n_ctx);
+        inference_set_temperature(state.inference, state.settings_temperature);
 
         /* --- Drain inference output into chat history --- */
         char chunk[1024];
@@ -548,18 +565,24 @@ int main(int argc, char **argv)
             }
         }
 
-        /* Persist agent toggle + workspace whenever they change. Tiny file
-         * so rewriting on every change is fine. */
+        /* Persist agent toggle + workspace + tunables whenever they change.
+         * Tiny file so rewriting on every change is fine. */
         if (state.agent_mode != last_agent_mode ||
-            strcmp(state.agent_workspace, last_agent_ws) != 0)
+            strcmp(state.agent_workspace, last_agent_ws) != 0 ||
+            state.settings_n_ctx       != last_n_ctx ||
+            state.settings_temperature != last_temperature)
         {
-            last_agent_mode = state.agent_mode;
+            last_agent_mode    = state.agent_mode;
+            last_n_ctx         = state.settings_n_ctx;
+            last_temperature   = state.settings_temperature;
             snprintf(last_agent_ws, sizeof(last_agent_ws),
                      "%s", state.agent_workspace);
             FILE *f = fopen("wasteland.cfg", "w");
             if (f) {
                 fprintf(f, "agent_mode=%d\n",      state.agent_mode);
                 fprintf(f, "agent_workspace=%s\n", state.agent_workspace);
+                fprintf(f, "n_ctx=%d\n",           state.settings_n_ctx);
+                fprintf(f, "temperature=%.3f\n",   state.settings_temperature);
                 fclose(f);
             }
         }

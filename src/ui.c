@@ -358,6 +358,43 @@ void ui_apply_amber_theme(struct nk_context *nk)
     s->selectable.text_normal   = amber;
     s->selectable.text_hover    = amber;
     s->selectable.text_pressed  = amber;
+
+    /* Property (nk_property_int / nk_property_float — used by the
+     * INFERENCE settings controls). Defaults are gradient-grey and clash
+     * with the amber/black terminal aesthetic. */
+    s->property.normal          = nk_style_item_color(black);
+    s->property.hover           = nk_style_item_color(black);
+    s->property.active          = nk_style_item_color(black);
+    s->property.border_color    = amber;
+    s->property.label_normal    = amber;
+    s->property.label_hover     = amber;
+    s->property.label_active    = amber;
+    s->property.sym_left        = NK_SYMBOL_TRIANGLE_LEFT;
+    s->property.sym_right       = NK_SYMBOL_TRIANGLE_RIGHT;
+    /* Inline editor inside the property widget — match the regular edit box. */
+    s->property.edit.normal     = nk_style_item_color(black);
+    s->property.edit.hover      = nk_style_item_color(black);
+    s->property.edit.active     = nk_style_item_color(black);
+    s->property.edit.border_color    = amber;
+    s->property.edit.text_normal     = amber;
+    s->property.edit.text_hover      = amber;
+    s->property.edit.text_active     = amber;
+    s->property.edit.cursor_normal   = amber;
+    s->property.edit.cursor_hover    = amber;
+    s->property.edit.selected_normal = amber;
+    s->property.edit.selected_hover  = amber;
+    s->property.edit.selected_text_normal = black;
+    s->property.edit.selected_text_hover  = black;
+    /* +/- arrow buttons — match the regular button. */
+    s->property.inc_button.normal       = nk_style_item_color(dark_grey);
+    s->property.inc_button.hover        = nk_style_item_color(mid_grey);
+    s->property.inc_button.active       = nk_style_item_color(black);
+    s->property.inc_button.border_color = amber;
+    s->property.inc_button.text_background = dark_grey;
+    s->property.inc_button.text_normal  = amber;
+    s->property.inc_button.text_hover   = amber;
+    s->property.inc_button.text_active  = amber;
+    s->property.dec_button = s->property.inc_button;
 }
 
 /* ---------------------------------------------------------------------------
@@ -477,9 +514,12 @@ static void wrap_text_into(char *out, size_t out_size,
  * compact_chat_history
  *
  * Remove the oldest N user/assistant pairs from the flat history string.
+ * Returns the number of pairs actually removed (may be < requested if the
+ * history has fewer turns). Caller must already hold state->chat_mutex.
  * --------------------------------------------------------------------------- */
-static void compact_chat_history(app_state_t *state, int pairs)
+static int compact_chat_history(app_state_t *state, int pairs)
 {
+    int removed = 0;
     for (int i = 0; i < pairs; i++) {
         char *next = strstr(state->chat_history, "\n> ");
         if (!next) {
@@ -488,8 +528,10 @@ static void compact_chat_history(app_state_t *state, int pairs)
         }
         size_t len = strlen(next + 1);
         memmove(state->chat_history, next + 1, len + 1);
+        removed++;
     }
     state->chat_last_len = strlen(state->chat_history);
+    return removed;
 }
 
 /* ---------------------------------------------------------------------------
@@ -522,6 +564,46 @@ static void ui_set_chat_history(app_state_t *state)
     inference_set_chat_history(state->inference, hist_copy);
 }
 
+/* Full compact pipeline: refuse mid-generation, drop the oldest `pairs` turns
+ * under the chat lock, mirror the new history into the inference module so
+ * the next prompt sees it, persist the active chat to disk so a chat-switch
+ * doesn't restore the old version, and write a status message so the user
+ * gets feedback even when nothing was removed. */
+static void ui_compact_chat_history(app_state_t *state, int pairs)
+{
+    if (state->is_generating) {
+        snprintf(state->status_msg, sizeof(state->status_msg),
+                 "Cannot compact while generating.");
+        return;
+    }
+
+    pthread_mutex_lock(&state->chat_mutex);
+    int removed = compact_chat_history(state, pairs);
+    pthread_mutex_unlock(&state->chat_mutex);
+
+    if (removed == 0) {
+        snprintf(state->status_msg, sizeof(state->status_msg),
+                 "Nothing to compact (need >=2 turns).");
+        return;
+    }
+
+    ui_set_chat_history(state);
+    ui_update_context_stats(state);
+
+    if (state->selected_chat >= 0 &&
+        state->selected_chat < state->chat_count) {
+        char hist_copy[WASTELAND_MAX_CHAT_HISTORY];
+        pthread_mutex_lock(&state->chat_mutex);
+        strncpy(hist_copy, state->chat_history, sizeof(hist_copy) - 1);
+        hist_copy[sizeof(hist_copy) - 1] = '\0';
+        pthread_mutex_unlock(&state->chat_mutex);
+        save_chat_history(state->chats[state->selected_chat], hist_copy);
+    }
+
+    snprintf(state->status_msg, sizeof(state->status_msg),
+             "Compacted %d turn(s).", removed);
+}
+
 /* ---------------------------------------------------------------------------
  * ui_render
  * --------------------------------------------------------------------------- */
@@ -548,10 +630,7 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
         ui_update_context_stats(state);
         if (state->context_max > 0 &&
             state->context_tokens > (int)(state->context_max * 0.80f)) {
-            compact_chat_history(state, 1);
-            ui_update_context_stats(state);
-            snprintf(state->status_msg, sizeof(state->status_msg),
-                     "Context auto-compacted.");
+            ui_compact_chat_history(state, 1);
         }
     }
     was_generating = state->is_generating;
@@ -1054,6 +1133,29 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
             nk_layout_row_dynamic(nk, 10, 1);
             nk_spacing(nk, 1);
 
+            /* ===== INFERENCE SETTINGS ===== */
+            nk_layout_row_dynamic(nk, 20, 1);
+            nk_label_colored(nk, "INFERENCE", NK_TEXT_LEFT, amber);
+            nk_layout_row_dynamic(nk, 2, 1);
+            nk_button_color(nk, amber);
+
+            nk_layout_row_dynamic(nk, 24, 1);
+            nk_property_int(nk, "N_CTX:",
+                            512, &state->settings_n_ctx, 262144, 1024, 256);
+            nk_layout_row_dynamic(nk, 14, 1);
+            nk_label_colored(nk,
+                "(applies on next model load)",
+                NK_TEXT_LEFT, col_dark_grey());
+
+            nk_layout_row_dynamic(nk, 24, 1);
+            nk_property_float(nk, "TEMP:",
+                              0.10f, &state->settings_temperature, 2.00f,
+                              0.05f, 0.01f);
+
+            /* Spacer */
+            nk_layout_row_dynamic(nk, 10, 1);
+            nk_spacing(nk, 1);
+
             /* ===== SYSTEM PROMPT ===== */
             nk_layout_row_dynamic(nk, 20, 1);
             nk_label_colored(nk, "SYSTEM PROMPT", NK_TEXT_LEFT, amber);
@@ -1237,9 +1339,17 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                     const char *p   = local_hist;
                     const char *end = p + chat_len;
 
-                    /* Helper: flush whatever is in section_buf. */
+                    /* Helper: flush whatever is in section_buf. Skip the
+                     * entire box (and the "▒ thinking" label) if the buffer
+                     * has no visible characters — e.g. a stray "\n" left
+                     * after a marker would otherwise render as an empty box. */
                     #define FLUSH_SECTION() do { \
-                        if (section_pos > 0) { \
+                        int _has_visible = 0; \
+                        for (int _i = 0; _i < section_pos; _i++) { \
+                            unsigned char _c = (unsigned char)section_buf[_i]; \
+                            if (_c > ' ') { _has_visible = 1; break; } \
+                        } \
+                        if (_has_visible) { \
                             section_buf[section_pos] = '\0'; \
                             wrap_text_into(wrapped, sizeof(wrapped), \
                                            section_buf, font, panel_w); \
@@ -1263,8 +1373,8 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                                 wrapped, &rlen, (int)sizeof(wrapped), \
                                 nk_filter_default); \
                             nk->style.edit.text_normal = saved; \
-                            section_pos = 0; \
                         } \
+                        section_pos = 0; \
                     } while (0)
 
                     /* Helper: append [src, src+n) to section_buf. */
@@ -1281,14 +1391,12 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                         const char *ms = strstr(p, "-- THINK --");
                         const char *me = strstr(p, "-- END THINK --");
 
-                        /* If we're inside a think block, look for the next
-                         * user prompt (`\n> `).  It MUST force-close the
-                         * block so user text is never dimmed. */
-                        const char *next_up = NULL;
-                        if (in_think) {
-                            next_up = strstr(p, "\n> ");
-                            if (next_up) next_up += 1; /* point at '>' */
-                        }
+                        /* Always look for the next user prompt (`\n> `) so
+                         * each turn becomes its own visual block. Inside a
+                         * think block this also force-closes it so user text
+                         * is never dimmed. */
+                        const char *next_up = strstr(p, "\n> ");
+                        if (next_up) next_up += 1; /* point at '>' */
 
                         /* Pick the nearest boundary. */
                         const char *boundary = NULL;
@@ -1301,8 +1409,10 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                             boundary_is_start = 0;
                         }
 
-                        /* If a user prompt comes before the next boundary,
-                         * close think early and render up to the prompt. */
+                        /* If a user prompt comes before the next think
+                         * boundary, flush current section, drop think state,
+                         * and continue from the prompt — that way each turn
+                         * (user line + assistant reply) gets its own block. */
                         if (next_up && (!boundary || next_up < boundary)) {
                             if (next_up > p) {
                                 APPEND_SECTION(p, (size_t)(next_up - p));
@@ -1363,8 +1473,7 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
 
             nk_layout_row_push(nk, 0.18f);
             if (nk_button_label(nk, "[ COMPACT ]")) {
-                compact_chat_history(state, 1);
-                ui_update_context_stats(state);
+                ui_compact_chat_history(state, 1);
             }
             nk_layout_row_end(nk);
 
@@ -1404,10 +1513,15 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                 if (send && state->input_buffer[0] &&
                     inference_is_model_loaded(state->inference))
                 {
-                    /* Pre-send compact if context is near full */
+                    /* Pre-send compact if context is near full. The user's
+                     * new prompt is appended below and ui_set_chat_history()
+                     * mirrors the result into inference, so we only need the
+                     * lock + stats refresh here — no separate push/save. */
                     if (state->context_max > 0 &&
                         state->context_tokens > (int)(state->context_max * 0.75f)) {
+                        pthread_mutex_lock(&state->chat_mutex);
                         compact_chat_history(state, 1);
+                        pthread_mutex_unlock(&state->chat_mutex);
                         ui_update_context_stats(state);
                     }
 

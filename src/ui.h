@@ -107,6 +107,12 @@ typedef struct {
     int context_tokens;
     int context_max;
 
+    /* User-tunable runtime settings (mirrored into inference_ctx_t each frame
+     * via inference_set_n_ctx / inference_set_temperature). n_ctx only takes
+     * effect on the next model load. */
+    int   settings_n_ctx;
+    float settings_temperature;
+
     volatile int running;
 } app_state_t;
 

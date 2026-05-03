@@ -47,6 +47,15 @@ int    inference_get_context_stats(inference_ctx_t *ctx,
                                    int *tokens_out,
                                    int *max_out);
 
+/* Tunables. Defaults: n_ctx=4096, temperature=0.8. n_ctx takes effect on the
+ * NEXT model load (changing it for an already-loaded model would require
+ * re-allocating the KV cache). temperature is read at the start of every
+ * generation so it can be tweaked between turns. */
+void   inference_set_n_ctx(inference_ctx_t *ctx, int n_ctx);
+void   inference_set_temperature(inference_ctx_t *ctx, float temperature);
+int    inference_get_n_ctx(inference_ctx_t *ctx);
+float  inference_get_temperature(inference_ctx_t *ctx);
+
 /* Request the worker to stop emitting tokens for the current prompt.
  * Has no effect if no generation is in flight. */
 void   inference_cancel_generation(inference_ctx_t *ctx);

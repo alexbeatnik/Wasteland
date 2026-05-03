@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <pthread.h>
 
 /* usleep lives in <unistd.h> on POSIX; Windows MSVC has no <unistd.h>, so we
@@ -101,8 +102,19 @@ struct inference_ctx {
     pthread_mutex_t history_mutex;
     char chat_history[WASTELAND_MAX_CHAT_HISTORY];
 
+    /* Tunables. n_ctx is consumed at model-load time; temperature is read at
+     * sampler-build time on every prompt. Both protected by settings_mutex. */
+    pthread_mutex_t settings_mutex;
+    int   pending_n_ctx;
+    float temperature;
+
     volatile int running;
 };
+
+#define WST_DEFAULT_N_CTX        4096
+#define WST_MIN_N_CTX             512
+#define WST_MAX_N_CTX          262144   /* 256k — large enough for 35B+ models */
+#define WST_DEFAULT_TEMPERATURE  0.8f
 
 #define MAX_HISTORY_MSGS 1024
 
@@ -150,7 +162,15 @@ static int parse_chat_history(const char *history,
         n++;
 
         p = line_end + 1;
-        if (p >= end) break;
+        if (p >= end) {
+            /* User line at the very end of history with no assistant reply
+             * — this is the current prompt about to be submitted. Drop it
+             * so the worker doesn't double-add the same user turn. */
+            n--;
+            free(owned[n]);
+            owned[n] = NULL;
+            break;
+        }
 
         const char *assist_start = p;
         const char *next_user = NULL;
@@ -233,6 +253,10 @@ inference_ctx_t* inference_init(void)
     pthread_mutex_init(&ictx->agent_mutex, NULL);
     pthread_mutex_init(&ictx->pending_mutex, NULL);
     pthread_mutex_init(&ictx->history_mutex, NULL);
+    pthread_mutex_init(&ictx->settings_mutex, NULL);
+
+    ictx->pending_n_ctx = WST_DEFAULT_N_CTX;
+    ictx->temperature   = WST_DEFAULT_TEMPERATURE;
 
     ictx->running = 1;
     return ictx;
@@ -263,6 +287,7 @@ void inference_shutdown(inference_ctx_t *ictx)
     pthread_mutex_destroy(&ictx->agent_mutex);
     pthread_mutex_destroy(&ictx->pending_mutex);
     pthread_mutex_destroy(&ictx->history_mutex);
+    pthread_mutex_destroy(&ictx->settings_mutex);
 
     free(ictx->pending_content);
     free(ictx->pending_search);
@@ -301,13 +326,19 @@ int inference_load_model(inference_ctx_t *ictx, const char *path)
         return -1;
     }
 
+    pthread_mutex_lock(&ictx->settings_mutex);
+    int wanted_ctx = ictx->pending_n_ctx;
+    pthread_mutex_unlock(&ictx->settings_mutex);
+    if (wanted_ctx < WST_MIN_N_CTX) wanted_ctx = WST_MIN_N_CTX;
+    if (wanted_ctx > WST_MAX_N_CTX) wanted_ctx = WST_MAX_N_CTX;
+
     struct llama_context_params cparams = llama_context_default_params();
-    cparams.n_ctx    = 4096;
+    cparams.n_ctx    = (uint32_t)wanted_ctx;
     /* n_batch must be >= the largest prompt we ever feed in one llama_decode().
      * Agent mode can build prompts of several thousand tokens (system + tool
      * instructions + multi-turn history), so we match n_batch to n_ctx and
      * keep n_ubatch small to bound peak memory. */
-    cparams.n_batch  = 4096;
+    cparams.n_batch  = (uint32_t)wanted_ctx;
     cparams.n_ubatch = 512;
 
     ictx->ctx = llama_init_from_model(ictx->model, cparams);
@@ -522,13 +553,57 @@ int inference_get_context_stats(inference_ctx_t *ictx,
     fmtd[fl] = '\0';
 
     const struct llama_vocab *vocab = llama_model_get_vocab(model);
+    /* Probe-tokenise: with tokens=NULL/n_tokens_max=0 llama_tokenize returns
+     * the negated count it would have written. INT32_MIN signals overflow. */
     int n_tokens = llama_tokenize(vocab, fmtd, fl, NULL, 0, true, true);
     free_parsed_msgs(owned, n_msgs);
 
-    if (n_tokens < 0) return -1;
+    if (n_tokens == INT32_MIN) return -1;
+    if (n_tokens < 0) n_tokens = -n_tokens;
     *tokens_out = n_tokens;
     *max_out    = llama_n_ctx(ctx);
     return 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * Tunables
+ * --------------------------------------------------------------------------- */
+void inference_set_n_ctx(inference_ctx_t *ictx, int n_ctx)
+{
+    if (!ictx) return;
+    if (n_ctx < WST_MIN_N_CTX) n_ctx = WST_MIN_N_CTX;
+    if (n_ctx > WST_MAX_N_CTX) n_ctx = WST_MAX_N_CTX;
+    pthread_mutex_lock(&ictx->settings_mutex);
+    ictx->pending_n_ctx = n_ctx;
+    pthread_mutex_unlock(&ictx->settings_mutex);
+}
+
+void inference_set_temperature(inference_ctx_t *ictx, float temperature)
+{
+    if (!ictx) return;
+    if (temperature < 0.01f) temperature = 0.01f;
+    if (temperature > 5.0f)  temperature = 5.0f;
+    pthread_mutex_lock(&ictx->settings_mutex);
+    ictx->temperature = temperature;
+    pthread_mutex_unlock(&ictx->settings_mutex);
+}
+
+int inference_get_n_ctx(inference_ctx_t *ictx)
+{
+    if (!ictx) return WST_DEFAULT_N_CTX;
+    pthread_mutex_lock(&ictx->settings_mutex);
+    int v = ictx->pending_n_ctx;
+    pthread_mutex_unlock(&ictx->settings_mutex);
+    return v;
+}
+
+float inference_get_temperature(inference_ctx_t *ictx)
+{
+    if (!ictx) return WST_DEFAULT_TEMPERATURE;
+    pthread_mutex_lock(&ictx->settings_mutex);
+    float v = ictx->temperature;
+    pthread_mutex_unlock(&ictx->settings_mutex);
+    return v;
 }
 
 /* ---------------------------------------------------------------------------
@@ -747,16 +822,36 @@ static int run_one_turn(inference_ctx_t *ictx,
         return -1;
     }
 
+    /* Sampler stack: penalties stop the model from looping on small (~1B)
+     * models, then standard top_k/top_p/temp/dist for varied output. Pure
+     * greedy on these models reliably degenerates into paragraph repeats. */
+    pthread_mutex_lock(&ictx->settings_mutex);
+    float temp_now = ictx->temperature;
+    pthread_mutex_unlock(&ictx->settings_mutex);
+    if (temp_now < 0.01f) temp_now = 0.01f;
+    if (temp_now > 5.0f)  temp_now = 5.0f;
+
     struct llama_sampler *smpl = llama_sampler_chain_init(
                                      llama_sampler_chain_default_params());
-    llama_sampler_chain_add(smpl, llama_sampler_init_greedy());
+    llama_sampler_chain_add(smpl, llama_sampler_init_penalties(
+                                      64,    /* last_n */
+                                      1.1f,  /* repeat */
+                                      0.0f,  /* freq */
+                                      0.0f));/* present */
+    llama_sampler_chain_add(smpl, llama_sampler_init_top_k(40));
+    llama_sampler_chain_add(smpl, llama_sampler_init_top_p(0.95f, 1));
+    llama_sampler_chain_add(smpl, llama_sampler_init_temp(temp_now));
+    llama_sampler_chain_add(smpl, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
 
     /* Chunk the prompt by n_batch so we never trip the
      * GGML_ASSERT(n_tokens_all <= cparams.n_batch) inside llama-context.
      * llama_batch_get_one() auto-tracks position, so consecutive calls
      * continue the same logical sequence. */
     {
-        const int chunk = 4096;  /* matches cparams.n_batch */
+        /* Chunk to match the configured n_batch — cparams.n_batch is set to
+         * n_ctx at load time, so just read it back. */
+        int chunk = (int)llama_n_batch(ctx);
+        if (chunk <= 0) chunk = 4096;
         for (int off = 0; off < n_tokens; off += chunk) {
             int n = (n_tokens - off < chunk) ? (n_tokens - off) : chunk;
             if (llama_decode(ctx,
@@ -1016,6 +1111,7 @@ void* inference_worker_thread(void *arg)
                 n_msgs++;
             }
 
+            int sys_offset = n_msgs;
             int n_hist = parse_chat_history(local_history,
                                             msgs + n_msgs,
                                             owned + n_msgs,
@@ -1026,8 +1122,15 @@ void* inference_worker_thread(void *arg)
             msgs[n_msgs].content = prompt;
             n_msgs++;
 
+            fprintf(stderr, "[worker] n_msgs=%d n_hist=%d hist_len=%zu\n",
+                    n_msgs, n_hist, strlen(local_history));
+            for (int i = 0; i < n_msgs; i++) {
+                fprintf(stderr, "  msg[%d] %s: %.40s...\n",
+                        i, msgs[i].role,
+                        msgs[i].content ? msgs[i].content : "(null)");
+            }
             run_one_turn(ictx, model, ctx, msgs, n_msgs, NULL, 0);
-            free_parsed_msgs(owned + n_msgs, n_hist);
+            free_parsed_msgs(owned + sys_offset, n_hist);
         } else {
             /* ---- Agent ReAct loop ---- */
             struct llama_chat_message msgs[AGENT_MAX_MSGS];

@@ -1,4 +1,4 @@
-# Wasteland Terminal v0.1
+# Wasteland Terminal v0.2
 
 A highly secure, offline-first LLM chat application with a retro-futuristic TUI-like graphical interface.
 
@@ -10,15 +10,19 @@ Wasteland is a local LLM inference client built in pure C with a vintage PC-insp
 
 - **Offline-first** — All inference happens locally via llama.cpp
 - **Hard network lockdown** — Linux seccomp kills the process if it ever opens a new `AF_INET` / `AF_INET6` / `AF_PACKET` socket once a model is loaded (no-op on macOS/Windows)
-- **Retro UI** — Amber (`#FFB000`) monochrome CRT terminal aesthetic via Nuklear
+- **Retro UI** — Amber (`#FFB000`) monochrome CRT terminal aesthetic via Nuklear; property widgets, scrollbars, and all controls share the same palette
 - **Threaded** — Non-blocking UI at 60 FPS with background inference, async model loading, and a detached download thread
 - **Async model load** — UI stays responsive during multi-second GGUF load
 - **Model Management** — Download from HuggingFace, load / **unload** / delete local `.gguf` files; the local vault is sorted lexicographically for stable ordering
 - **Stop generation** — `■` button cancels an in-flight response within one token
 - **Chat template** — Uses each model's built-in template (`llama_chat_apply_template`) so instruction-tuned models behave correctly
+- **Multi-turn memory** — Full conversation history is fed to the model on every turn so it remembers previous exchanges; context is managed automatically
+- **Context management** — CTX bar shows live token usage. `[ COMPACT ]` drops the oldest turn, saves the compacted history to disk, and mirrors the result into the inference thread immediately. Auto-compact triggers when usage exceeds 80 % after a generation
+- **Configurable inference settings** — N\_CTX (512–262 144) and Temperature (0.10–2.00) are adjustable from the left panel and persist across sessions; N\_CTX takes effect on the next model load, Temperature applies from the next prompt
+- **Repetition-penalty sampler** — Replaces the old greedy sampler with a stacked penalties → top\_k → top\_p → temperature → distribution chain that prevents small models from looping into repeated paragraphs
 - **Multiple Chats** — Create, load, and switch between named chat sessions; auto-named from the first user message; persisted to `chats/*.txt` with simple RC4 obfuscation
 - **System Prompt** — Configure and persist a system prompt to guide model behaviour (`system_prompt.txt`)
-- **Smart Reasoning** — `<think>` reasoning blocks are displayed dimmed in the UI but automatically excluded from the `◈` copy-to-clipboard text
+- **Smart Reasoning** — `<think>` reasoning blocks are displayed dimmed in the UI (with a "▒ thinking" label) and automatically excluded from the `◈` copy-to-clipboard text; each turn is rendered in its own box so user prompts never appear inside assistant reply blocks
 - **Auto-scroll + word wrap** — Chat pins to the bottom and wraps long lines to the panel width
 - **Download Progress** — Real-time progress bar with filename, percent, and **cancel** support
 - **Fast close** — Clicking X hides the window instantly, signals the worker via `inference_request_stop()`, joins with a 1.5 s timeout, and falls back to `_Exit` if the worker is still mid-decode
@@ -111,15 +115,15 @@ GitHub Actions automatically builds and releases for all platforms on every tag:
 
 | Platform | Artifact |
 |----------|----------|
-| Linux (Ubuntu/Debian) | `wasteland_0.1.0_amd64.deb` — install with `sudo apt install ./wasteland_0.1.0_amd64.deb` |
+| Linux (Ubuntu/Debian) | `wasteland_0.2.0_amd64.deb` — install with `sudo apt install ./wasteland_0.2.0_amd64.deb` |
 | macOS (universal) | `Wasteland-macos.dmg` — one .app that runs natively on both Apple Silicon and Intel (deployment target 11.0+) |
 | Windows | `Wasteland-windows.exe` — single self-contained binary (SDL2/curl statically linked) |
 
 Push a tag to trigger a release:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
 ## Running
@@ -150,10 +154,11 @@ Wasteland/
 │   └── workflows/
 │       └── build.yml       # CI/CD: builds Linux/macOS/Windows + releases
 ├── src/
-│   ├── main.c              # Entry point, SDL loop, thread spawn, fast-shutdown
-│   ├── ui.c / ui.h         # Nuklear layout, amber theme, scrollable chat with wrap
-│   ├── inference.c / .h    # llama.cpp wrapper, async load, worker thread, <think> filter
+│   ├── main.c              # Entry point, SDL loop, thread spawn, fast-shutdown, settings persistence
+│   ├── ui.c / ui.h         # Nuklear layout, full amber theme, per-turn chat boxes, compact pipeline
+│   ├── inference.c / .h    # llama.cpp wrapper, async load, worker thread, <think> filter, sampler stack, tunables
 │   ├── network.c / .h      # libcurl downloader & seccomp lockdown
+│   ├── agent.c / agent.h   # Tool-using ReAct agent loop (read_file, list_dir, write_file, apply_edit)
 │   ├── nuklear_impl.c      # Nuklear + SDL/GL2 backend impl
 │   └── nuklear_sdl_gl2.h   # Nuklear SDL2/OpenGL2 backend
 ├── include/                # nuklear.h
@@ -178,7 +183,11 @@ Wasteland/
   - `[ UNLOAD: name | size ]` — currently loaded model; click to free it
   - `[ DELETE ]` — remove the file from disk (disabled while a load is in flight or generation is running)
   - `[ REFRESH ]` — re-scan `models/`
+- **Inference Settings** — Controls visible at all times; values persist in `wasteland.cfg`:
+  - **N\_CTX** (512–262 144, step 1024) — context window size; change takes effect on the next model load
+  - **TEMP** (0.10–2.00, step 0.05) — sampling temperature; change takes effect immediately on the next prompt
 - **System Prompt** — Multi-line input for system instructions, saved between sessions
+- **Agent Mode** — Toggle tool-using ReAct loop; set a workspace directory for sandboxed file access
 - **Chats** — Manage multiple persistent chat sessions:
   - `[ NEW CHAT ]` — Start a new session. It will be automatically named based on your first message.
   - `[ LOAD ]` / `[ ACTIVE ]` — Switch between chat sessions
@@ -187,13 +196,16 @@ Wasteland/
 
 ### Right Panel (Collapsible)
 
-- **Chat history** — Scrollable, word-wrapped, auto-pins to the bottom on new tokens. 
-  - Code blocks and reasoning blocks (`<think>`) are highlighted/dimmed.
-  - Click the **◈** icon to copy code blocks or the final assistant response. Reasoning blocks are automatically excluded from the copied text.
+- **Chat history** — Scrollable, word-wrapped, auto-pins to the bottom on new tokens.
+  - Each user/assistant exchange is rendered in its own edit box — user prompts never bleed into the previous assistant reply.
+  - Reasoning blocks (`<think>`) are rendered in a separate dimmed box with a "▒ thinking" label.
+  - Empty think boxes (e.g. from `<think></think>` or a cancelled mid-think generation) are suppressed.
+- **CTX bar** — `CTX: used / max (pct%)` with a progress bar. Turns orange above 75 %, red above 90 %.
+- **`[ COMPACT ]`** — Drop the oldest turn, persist the result to disk, mirror into inference. Disabled during generation. Shows feedback in the status line.
 - **Input** — `>` prompt with text field
 - **`▶` (Play)** — submit the prompt (Enter also works)
 - **`■` (Stop)** — replaces Play while the model is generating; cancels the current response
-- **Status message** — temporary non-intrusive notifications (like "Response copied") appear beneath the input box
+- **Status message** — temporary non-intrusive notifications appear beneath the input box
 
 ## Security Model
 
