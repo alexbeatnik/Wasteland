@@ -45,6 +45,21 @@
 #  include <windows.h>
 #  include <direct.h>
 #  define PATH_SEP '\\'
+/* memmem is POSIX — MSVC doesn't expose it. Provide a static fallback before
+ * any call site so there's no conflict with an implicit int () declaration. */
+static void *memmem(const void *haystack, size_t hlen,
+                    const void *needle,   size_t nlen)
+{
+    if (nlen == 0) return (void *)haystack;
+    if (hlen < nlen) return NULL;
+    const unsigned char *h = (const unsigned char *)haystack;
+    const unsigned char *n = (const unsigned char *)needle;
+    for (size_t i = 0; i + nlen <= hlen; i++) {
+        if (h[i] == n[0] && memcmp(h + i, n, nlen) == 0)
+            return (void *)(h + i);
+    }
+    return NULL;
+}
 #else
 #  include <unistd.h>
 #  include <dirent.h>
@@ -628,24 +643,3 @@ const char* agent_system_prompt(void)
 "- When the task is done, reply in plain prose without any tool fence.\n";
 }
 
-/* ---------------------------------------------------------------------------
- * memmem fallback for platforms that don't expose it (MSVC).
- * --------------------------------------------------------------------------- */
-#if defined(_WIN32) && !defined(__MINGW32__)
-void *memmem(const void *haystack, size_t hlen,
-             const void *needle,   size_t nlen);
-
-void *memmem(const void *haystack, size_t hlen,
-             const void *needle,   size_t nlen)
-{
-    if (nlen == 0) return (void *)haystack;
-    if (hlen < nlen) return NULL;
-    const unsigned char *h = (const unsigned char *)haystack;
-    const unsigned char *n = (const unsigned char *)needle;
-    for (size_t i = 0; i + nlen <= hlen; i++) {
-        if (h[i] == n[0] && memcmp(h + i, n, nlen) == 0)
-            return (void *)(h + i);
-    }
-    return NULL;
-}
-#endif
