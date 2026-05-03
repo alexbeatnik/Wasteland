@@ -899,6 +899,10 @@ static int run_one_turn(inference_ctx_t *ictx,
         int chunk = (int)llama_n_batch(ctx);
         if (chunk <= 0) chunk = 4096;
         for (int off = 0; off < n_tokens; off += chunk) {
+            if (ictx->cancel_generation) {
+                llama_sampler_free(smpl);
+                return -2;
+            }
             int n = (n_tokens - off < chunk) ? (n_tokens - off) : chunk;
             if (llama_decode(ctx,
                              llama_batch_get_one(prompt_tokens + off, n)) != 0)
@@ -925,6 +929,9 @@ static int run_one_turn(inference_ctx_t *ictx,
                                      0, true);
         if (n > 0) emit_filtered_piece(ictx, piece, (size_t)n);
 
+        /* Skip the per-token KV-cache update if we're about to cancel —
+         * it's only needed to condition the next sample, which won't happen. */
+        if (ictx->cancel_generation) { rc = -2; break; }
         if (llama_decode(ctx, llama_batch_get_one(&new_token, 1)) != 0) break;
         wst_usleep(5000); /* 5 ms typing cadence */
     }
