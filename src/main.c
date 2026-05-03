@@ -34,6 +34,9 @@
 #  include <windows.h>
 #  include <direct.h>
 #  include <shellscalingapi.h>  /* SetProcessDpiAwareness fallback */
+#  ifndef S_ISDIR
+#    define S_ISDIR(mode) (((mode) & _S_IFMT) == _S_IFDIR)
+#  endif
 #else
 #  include <unistd.h>
 #  include <dirent.h>
@@ -156,8 +159,134 @@ static int platform_thread_join_timeout(pthread_t thread, int timeout_ms)
 /* ---------------------------------------------------------------------------
  * Filesystem helpers
  * --------------------------------------------------------------------------- */
+
+/* Pick (and chdir to) a writable per-user data directory. When the app is
+ * launched from /Applications/Wasteland.app on macOS or from a system path
+ * on Linux the working directory is `/`, where mkdir/fopen always fail —
+ * so all model downloads silently die. We resolve a per-user location and
+ * make it the new CWD so the rest of the code (which uses relative paths
+ * like "models/foo.gguf" and "chats/...txt") just works.
+ *
+ * Order of preference:
+ *   1. $WASTELAND_HOME (escape hatch — dev / user override)
+ *   2. CWD already writable (dev runs from build/ — keep current behaviour)
+ *   3. macOS: ~/Library/Application Support/Wasteland
+ *      Linux: $XDG_DATA_HOME/wasteland or ~/.local/share/wasteland
+ *      Windows: %APPDATA%\Wasteland
+ */
+static int dir_writable(const char *p)
+{
+    if (!p || !*p) return 0;
+    struct stat st;
+    if (stat(p, &st) != 0) return 0;
+    if (!S_ISDIR(st.st_mode)) return 0;
+#ifdef _WIN32
+    return 1; /* good enough — actual write test on first download */
+#else
+    return access(p, W_OK) == 0;
+#endif
+}
+
+static int ensure_dir(const char *p)
+{
+    struct stat st;
+    if (stat(p, &st) == 0 && S_ISDIR(st.st_mode)) return 0;
+    return platform_mkdir(p);
+}
+
+static void platform_pick_data_dir(char *out, size_t out_size)
+{
+    out[0] = '\0';
+
+    const char *override = getenv("WASTELAND_HOME");
+    if (override && *override) {
+        snprintf(out, out_size, "%s", override);
+        ensure_dir(out);
+        return;
+    }
+
+    /* Dev path: if "models" already exists right here OR the cwd is
+     * writable AND not the filesystem root, stay put. */
+    char cwd[1024] = "";
+#ifdef _WIN32
+    if (_getcwd(cwd, sizeof(cwd))) {
+        if (cwd[0] && strcmp(cwd, "C:\\") != 0 && dir_writable(cwd)) {
+            snprintf(out, out_size, "%s", cwd);
+            return;
+        }
+    }
+#else
+    if (getcwd(cwd, sizeof(cwd))) {
+        if (cwd[0] && strcmp(cwd, "/") != 0 && dir_writable(cwd)) {
+            snprintf(out, out_size, "%s", cwd);
+            return;
+        }
+    }
+#endif
+
+#ifdef _WIN32
+    const char *appdata = getenv("APPDATA");
+    if (appdata && *appdata) {
+        snprintf(out, out_size, "%s\\Wasteland", appdata);
+        ensure_dir(out);
+        return;
+    }
+#elif defined(__APPLE__)
+    const char *home = getenv("HOME");
+    if (home && *home) {
+        char libdir[1024];
+        snprintf(libdir, sizeof(libdir),
+                 "%s/Library/Application Support", home);
+        ensure_dir(libdir);
+        snprintf(out, out_size, "%s/Wasteland", libdir);
+        ensure_dir(out);
+        return;
+    }
+#else
+    const char *xdg = getenv("XDG_DATA_HOME");
+    if (xdg && *xdg) {
+        snprintf(out, out_size, "%s/wasteland", xdg);
+        ensure_dir(out);
+        return;
+    }
+    const char *home = getenv("HOME");
+    if (home && *home) {
+        /* base[] sized smaller than out so the suffix can't truncate. */
+        char base[512];
+        snprintf(base, sizeof(base), "%s/.local/share", home);
+        ensure_dir(base);
+        snprintf(out, out_size, "%s/wasteland", base);
+        ensure_dir(out);
+        return;
+    }
+#endif
+    /* Last resort: tmp. Better than aborting. */
+    snprintf(out, out_size, "/tmp/wasteland");
+    ensure_dir(out);
+}
+
 static void ensure_models_dir(void)
 {
+    /* Pick (and chdir to) a writable per-user data dir before anything
+     * touches the disk. After this returns, all relative paths in the
+     * rest of the codebase ("models/...", "chats/...", "system_prompt.txt")
+     * resolve under that directory. */
+    char data_dir[1024];
+    platform_pick_data_dir(data_dir, sizeof(data_dir));
+    if (data_dir[0]) {
+#ifdef _WIN32
+        if (_chdir(data_dir) != 0)
+#else
+        if (chdir(data_dir) != 0)
+#endif
+        {
+            fprintf(stderr, "[main] chdir(%s) failed: %s\n",
+                    data_dir, strerror(errno));
+        } else {
+            fprintf(stderr, "[main] data dir: %s\n", data_dir);
+        }
+    }
+
     struct stat st = {0};
     if (stat("models", &st) == -1) {
         if (platform_mkdir("models") != 0) {
@@ -289,6 +418,10 @@ int main(int argc, char **argv)
     state.custom_hf_id[0] = '\0';
     state.download_cancel = 0;
     state.inference = inference;
+    state.context_tokens = 0;
+    state.context_max = 0;
+    state.settings_n_ctx       = 4096;
+    state.settings_temperature = 0.8f;
     strncpy(state.status_msg, status_msg, sizeof(state.status_msg) - 1);
 
     /* Load system prompt */
@@ -301,6 +434,50 @@ int main(int argc, char **argv)
     }
     char last_system_prompt[1024];
     strcpy(last_system_prompt, state.system_prompt);
+
+    /* Load persistent agent settings (mode toggle + workspace path).
+     * Stored as a tiny key=value file alongside system_prompt.txt. */
+    state.agent_mode = 0;
+    state.agent_workspace[0] = '\0';
+    FILE *cfg_fp = fopen("wasteland.cfg", "r");
+    if (cfg_fp) {
+        char line[1280];
+        while (fgets(line, sizeof(line), cfg_fp)) {
+            /* Trim trailing newline / CR */
+            size_t L = strlen(line);
+            while (L > 0 && (line[L-1] == '\n' || line[L-1] == '\r'))
+                line[--L] = '\0';
+            char *eq = strchr(line, '=');
+            if (!eq) continue;
+            *eq = '\0';
+            const char *key = line;
+            const char *val = eq + 1;
+            if (strcmp(key, "agent_mode") == 0) {
+                state.agent_mode = (val[0] == '1') ? 1 : 0;
+            } else if (strcmp(key, "agent_workspace") == 0) {
+                strncpy(state.agent_workspace, val,
+                        sizeof(state.agent_workspace) - 1);
+                state.agent_workspace[sizeof(state.agent_workspace) - 1] = '\0';
+            } else if (strcmp(key, "n_ctx") == 0) {
+                int v = atoi(val);
+                if (v >= 512 && v <= 262144) state.settings_n_ctx = v;
+            } else if (strcmp(key, "temperature") == 0) {
+                float v = (float)atof(val);
+                if (v >= 0.01f && v <= 5.0f) state.settings_temperature = v;
+            }
+        }
+        fclose(cfg_fp);
+    }
+    int  last_agent_mode = state.agent_mode;
+    char last_agent_ws[1024];
+    snprintf(last_agent_ws, sizeof(last_agent_ws), "%s", state.agent_workspace);
+    int   last_n_ctx       = state.settings_n_ctx;
+    float last_temperature = state.settings_temperature;
+
+    /* Push initial settings into the inference module so the very first
+     * model load (triggered by the user clicking [LOAD]) sees them. */
+    inference_set_n_ctx(state.inference,       state.settings_n_ctx);
+    inference_set_temperature(state.inference, state.settings_temperature);
 
     /* Do not auto-load model on boot — loading llama.cpp model breaks
        NVIDIA GL context. Model must be loaded manually via UI after
@@ -342,6 +519,13 @@ int main(int argc, char **argv)
         if (startup_frames > 0) startup_frames--;
         nk_input_end(nk);
 
+        /* Push current agent settings to the inference module each frame so
+         * the worker sees them at the moment the next prompt is dequeued. */
+        inference_set_agent(state.inference, state.agent_mode,
+                            state.agent_workspace);
+        inference_set_n_ctx(state.inference,       state.settings_n_ctx);
+        inference_set_temperature(state.inference, state.settings_temperature);
+
         /* --- Drain inference output into chat history --- */
         char chunk[1024];
         size_t n = inference_read_output(state.inference, chunk, sizeof(chunk));
@@ -380,6 +564,28 @@ int main(int argc, char **argv)
             FILE *f = fopen("system_prompt.txt", "w");
             if (f) {
                 fputs(state.system_prompt, f);
+                fclose(f);
+            }
+        }
+
+        /* Persist agent toggle + workspace + tunables whenever they change.
+         * Tiny file so rewriting on every change is fine. */
+        if (state.agent_mode != last_agent_mode ||
+            strcmp(state.agent_workspace, last_agent_ws) != 0 ||
+            state.settings_n_ctx       != last_n_ctx ||
+            state.settings_temperature != last_temperature)
+        {
+            last_agent_mode    = state.agent_mode;
+            last_n_ctx         = state.settings_n_ctx;
+            last_temperature   = state.settings_temperature;
+            snprintf(last_agent_ws, sizeof(last_agent_ws),
+                     "%s", state.agent_workspace);
+            FILE *f = fopen("wasteland.cfg", "w");
+            if (f) {
+                fprintf(f, "agent_mode=%d\n",      state.agent_mode);
+                fprintf(f, "agent_workspace=%s\n", state.agent_workspace);
+                fprintf(f, "n_ctx=%d\n",           state.settings_n_ctx);
+                fprintf(f, "temperature=%.3f\n",   state.settings_temperature);
                 fclose(f);
             }
         }

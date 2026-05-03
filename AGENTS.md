@@ -1,4 +1,4 @@
-# AGENTS.md — Wasteland v0.1
+# AGENTS.md — Wasteland v0.2
 
 ## Agent Instructions
 
@@ -9,24 +9,26 @@ This file contains conventions and preferences for AI agents working on Wastelan
 - **CMake** is the only supported build system.
 - Run `./build.sh` to build on Linux; it auto-detects local venv `cmake`.
 - Build artifacts live in `build/` — never edit them and never commit them.
-- Cross-platform: Linux, macOS, Windows (MinGW / MSVC).
+- Cross-platform: Linux (amd64 + arm64), macOS (universal arm64+x86_64), Windows (MinGW / MSVC).
+- Linux `.deb` architecture is auto-detected at configure time (`CMAKE_SYSTEM_PROCESSOR` → `amd64` / `arm64`). CI uses `ubuntu-22.04` and `ubuntu-22.04-arm` runners.
+- MSVC: `nuklear_impl.c` is compiled with `/wd4701` to suppress C4701 false-positives from `nuklear.h`. Do not add `/wd4701` to the global target flags — keep it scoped to that translation unit via `set_source_files_properties`.
 
 ## Code Conventions
 
 1. **Language:** Pure C (C11). No C++ in `src/*.c` files.
 2. **Includes:** Order matters — SDL2 / OpenGL headers before Nuklear macros before `nuklear.h`.
-3. **Thread Safety:** Every mutable shared field has either an explicit mutex or is a `volatile int` flag used as a one-way signal. Prefer fine-grained locks over coarse ones. Always release mutexes before any blocking call (`llama_decode`, `llama_token_to_piece`, etc.). Any pointer-to-int passed across thread boundaries (e.g. `network_download_model(volatile int *progress, …)`) must be `volatile int *` in the signature too — silently dropping the qualifier hides races.
-4. **String Buffers:** Always size via `sizeof(buf) - 1` for `strncpy`. Prefer `snprintf` for formatted output. Capacity macros (`WASTELAND_MAX_CHATS`, `WASTELAND_CHAT_NAME_LEN`, `WASTELAND_MAX_MODELS`, `WASTELAND_MAX_HUB_MODELS`) live in `ui.h` — use them instead of literal `64` / `256` / `4`.
+3. **Thread Safety:** Every mutable shared field has either an explicit mutex or is a `volatile int` flag used as a one-way signal. Prefer fine-grained locks over coarse ones. Always release mutexes before any blocking call (`llama_decode`, `llama_token_to_piece`, etc.). Any pointer-to-int passed across thread boundaries must be `volatile int *` in the signature too — silently dropping the qualifier hides races.
+4. **String Buffers:** Always size via `sizeof(buf) - 1` for `strncpy`. Prefer `snprintf` for formatted output. Capacity macros (`WASTELAND_MAX_CHATS`, `WASTELAND_CHAT_NAME_LEN`, `WASTELAND_MAX_MODELS`, `WASTELAND_MAX_HUB_MODELS`) live in `ui.h` — use them instead of literal integers.
 5. **Error Handling:** Print to `stderr` with a `[module]` prefix, then return an error code. Never silently ignore failures. UI status text goes through `state->status_msg`.
 6. **Cross-Platform:** Wrap platform-specific code in `#ifdef _WIN32`, `#ifdef __linux__`, `#ifdef __APPLE__`. Provide a working stub for non-Linux platforms when a feature is Linux-only (e.g. seccomp).
-7. **Backwards-compat shims:** Don't add them. We're at v0.1 — break the API and update callers.
+7. **Backwards-compat shims:** Don't add them. We're at v0.2 — break the API and update callers.
 8. **Race-free flag claims:** When dispatching a background pthread that owns a state flag (e.g. `download_active`), the **dispatcher** sets the flag to 1 *before* `pthread_create`. Setting it inside the worker leaves a window where a second click sees the flag still 0 and spawns a duplicate.
 
 ## Long-Running Operations
 
 Anything that can take >100 ms must not run on the UI thread. The UI thread is the SDL event loop and must keep pumping at 60 FPS or the OS marks the window "Not Responding".
 
-- **Model load:** use `inference_load_model_async()` and poll `inference_is_loading()` from `ui_render`. The synchronous `inference_load_model()` is only safe before the SDL window exists (and we no longer call it that way).
+- **Model load:** use `inference_load_model_async()` and poll `inference_is_loading()` from `ui_render`. The synchronous `inference_load_model()` is only safe before the SDL window exists.
 - **Token generation:** the worker thread already runs in the background. The per-token loop polls `ictx->cancel_generation` so a `STOP` click breaks out within one token.
 - **Download:** existing detached pthread pattern; communicate progress via `volatile int state->download_*`. The UI claims `download_active = 1` before `pthread_create` to avoid the double-click race.
 - **Shutdown:** `inference_request_stop()` (defined in `inference.c`) is the canonical way to wake the worker for exit. Do **not** abuse `inference_submit_prompt(ictx, "", "")` for this — with a model loaded the chat template still emits non-empty tokens and the worker burns a generation cycle on the way out.
@@ -34,30 +36,79 @@ Anything that can take >100 ms must not run on the UI thread. The UI thread is t
 ## Security Rules
 
 - The seccomp filter (Linux only) uses `SCMP_ACT_KILL_PROCESS` and is **deliberately narrow**: only `socket(AF_INET, …)`, `socket(AF_INET6, …)`, and `socket(AF_PACKET, …)` are killed. **Do not** add kill rules for `connect`, `sendmsg`, `recvmsg`, `setsockopt`, etc. — those run on the existing X11 / Wayland Unix-domain socket every frame and a blanket kill SIGSYSes the GUI. Gating `socket()` is sufficient because no new IP fd can be opened.
-- `lockdown_network()` is called **only** from the LOAD button handler in `ui.c`, after a successful async load. It is **not** called from `main.c` at startup. seccomp cannot be undone for the lifetime of the process — applying it pre-UI is a one-way trap that blocks all subsequent downloads.
+- `lockdown_network()` is called **only** from the LOAD button handler in `ui.c`, after a successful async load. It is **not** called from `main.c` at startup.
 - Download code lives only in `network.c`. Do not duplicate libcurl logic elsewhere.
 - On non-Linux platforms, `lockdown_network()` is a no-op — do not add fake implementations.
-- The UI hides the entire HUB MODELS section while `state->network_lockdown` is true so the user cannot accidentally trigger a doomed `connect()`.
-- The `hub_models[]` array must contain real, public, reachable HF GGUF repos — fictional IDs fail at HF API resolution time with HTTP 404 and waste the user's click. When adding a new entry, click DOWNLOAD on it once before merging.
-- The `/blob/main/` → `/resolve/main/` URL rewrite in `network_download_model` must `memmove` the tail right by 3 bytes **before** the `memcpy` overwrite — the strings differ in length, so the obvious memcpy-then-memmove order corrupts the first 3 bytes of the filename.
+- The UI hides the entire HUB MODELS section while `state->network_lockdown` is true.
+- The `hub_models[]` array must contain real, public, reachable HF GGUF repos — fictional IDs fail at HF API resolution time with HTTP 404. When adding a new entry, click DOWNLOAD on it once before merging.
+- The `/blob/main/` → `/resolve/main/` URL rewrite in `network_download_model` must `memmove` the tail right by 3 bytes **before** the `memcpy` overwrite — the obvious order corrupts the first 3 bytes of the filename.
 
 ## UI Rules
 
-- Amber monochrome palette only: `#FFB000` on dark charcoal / black. `amber_dim` used for reasoning text.
+- Amber monochrome palette only: `#FFB000` on dark charcoal / black. `amber_dim` used for reasoning text. Every Nuklear widget type (button, edit, checkbox, progress, scrollbar, property) must be themed in `ui_apply_amber_theme()` — do not leave any control with default grey gradients.
 - Buttons use square brackets and verbs: `[ DOWNLOAD ]`, `[ NEW CHAT ]`, `[ ACTIVE ]`, `[ LOAD ]`, `[ DEL ]`.
 - The right-panel send control has two states: `▶` (Play) when idle, `■` (Stop) while `state->is_generating` is true. Enter is gated through the same path so it never fires during generation.
 - CRT terminal aesthetic — no rounded corners, no gradients.
-- Long chat lines must wrap to the chat-panel width. Use `count_wrap_lines()` + `nk_label_colored_wrap` with a row height of `font_h * wraps + 2`. Hardcoded character counts will mis-wrap on resize and on non-monospace fonts.
-- New chat content auto-scrolls to the bottom by setting `state->chat_scroll_y` to a large sentinel before `nk_group_scrolled_offset_begin`.
+- Long chat lines must wrap to the chat-panel width via `wrap_text_into()`. Hardcoded character counts will mis-wrap on resize and on non-monospace fonts.
+- New chat content auto-scrolls to the bottom by setting `state->chat_scroll_y` to a large sentinel; Nuklear clamps it to real max.
 - Left panel is collapsible (`«` / `»` toggle in the header). When collapsed, chat takes the full width.
-- Status messages (e.g. "Response copied") are shown below the input buffer and auto-cleared using `SDL_GetTicks()`.
-- The `◈` icon copies assistant responses. It explicitly skips content inside `-- THINK --` blocks.
+- Status messages are shown below the input buffer and auto-cleared using `SDL_GetTicks()`.
+- The `◈` icon copies assistant responses and explicitly skips content inside `-- THINK --` blocks.
+- Each user/assistant turn is rendered in its own `nk_edit_string` box. The rendering loop splits on `\n> ` boundaries unconditionally (not only inside think blocks) so a new user prompt always starts a fresh box. Empty or whitespace-only sections (stray `\n` between markers) are suppressed and produce no box.
+
+## Chat History & Context
+
+- `state->chat_history` (main thread) and `ictx->chat_history` (inference mirror, protected by `history_mutex`) are two separate buffers. Call `ui_set_chat_history(state)` to sync them before submitting a prompt or after compacting.
+- `parse_chat_history()` in `inference.c` produces user/assistant pairs. A trailing user message with no assistant reply (i.e. the current prompt in mid-submission) is **discarded** — the worker appends the current prompt separately. This prevents duplicating the user turn in the message list.
+- **Agent mode includes history:** the agent ReAct branch calls `parse_chat_history` with a cap of `AGENT_HISTORY_SLOTS = 8` messages before appending the current user prompt. This gives the model multi-turn memory in agent mode at the cost of fewer available tool-call slots (still 10 turns, governed by `AGENT_MAX_MSGS = 30`).
+- **Agent tool output:** `read_file` and `list_dir` results are NOT printed to the chat UI — only the `[ TOOL: name | path ]` header is shown. File contents are still passed to the model via `result_out`. Do not re-add the `emit_raw_str(ictx, result_out)` call — it floods the chat with raw file contents.
+- `ui_compact_chat_history(state, n)` is the **only** correct way to call compact from UI code. It locks `chat_mutex`, runs `compact_chat_history()`, pushes the result to inference via `ui_set_chat_history()`, saves the active chat to disk, updates the CTX bar, and writes a status message. Never call `compact_chat_history()` directly from button handlers.
+- `inference_get_context_stats()` calls `llama_tokenize()` with `tokens=NULL` / `n_tokens_max=0` to count without allocating. The API returns **negative** count in this case (buffer-too-small convention) — negate it to get the real count. Do not treat negative as failure.
+
+## Sampler Stack
+
+The worker builds a sampler chain in `run_one_turn()` on every prompt:
+
+```
+penalties(last_n=64, repeat=1.1) → top_k(40) → top_p(0.95) → temp(ictx->temperature) → dist(seed)
+```
+
+- Pure greedy (`llama_sampler_init_greedy`) is **not used** — small models (≤2B) degenerate into looping repetition without a repetition penalty.
+- Temperature is read from `ictx->temperature` (under `settings_mutex`) at sampler-build time so it can be tweaked between turns without reloading the model.
+- N\_CTX is read from `ictx->pending_n_ctx` (under `settings_mutex`) at model-load time. Changing it requires an unload + reload cycle.
+
+## Base System Prompt
+
+`BASE_SYSTEM_PROMPT` in `inference.c` is always prepended to the system message (before any user-configured system prompt). It enforces:
+
+- **Plain-text output** — no markdown (`**bold**`, `# headings`, `* bullets`, ` ``` ` fences) unless the user explicitly requests formatted output. The terminal renders text as-is; markdown appears as raw characters.
+- **Conciseness** — no padding or unnecessary preambles.
+- **Language matching** — reply in whatever language the user writes in.
+- **Offline awareness** — model knows it has no internet access unless Agent Mode is active.
+
+`build_system_prompt(user_sys, out, out_size)` handles the concatenation. Never skip the base prompt to "give the model more freedom" — it directly fixes the most common output quality problem (markdown flooding the terminal).
 
 ## Stream Filtering
 
-- `<think>` and `</think>` literals are intercepted by `emit_filtered_piece()` in `inference.c` and replaced with `-- THINK --` and `-- END THINK --` markers.
-- The filter uses a 7-byte carry buffer (`TAG_CARRY_MAX`) to handle tags that get split across two token pieces.
-- Reset `tag_carry_len = 0` at the start of every new prompt and flush via `emit_filtered_flush()` at end of generation.
+- `<think>` and `</think>` are intercepted by `emit_filtered_piece()` and replaced with `\n-- THINK --\n` / `\n-- END THINK --\n` markers.
+- The filter uses a 7-byte carry buffer (`TAG_CARRY_MAX`) to handle tags split across two token pieces.
+- **Line-start guard:** a tag is only treated as a real think marker if the character immediately before it in the stream is `'\n'` or `'\0'` (start of turn). This prevents `` `<think>` `` in model prose from creating a spurious think block. The `tag_prev_char` field in `inference_ctx_t` (reset to `'\n'` at turn start, updated by `output_append_locked`) tracks this.
+- Reset `tag_carry_len = 0` and `tag_prev_char = '\n'` at the start of every new prompt; flush carry via `emit_filtered_flush()` at end of generation.
+
+## Settings Persistence
+
+Runtime tunables (N\_CTX, Temperature) are stored in `wasteland.cfg` alongside agent settings:
+
+```
+agent_mode=0
+agent_workspace=/path/to/ws
+n_ctx=8192
+temperature=0.800
+```
+
+- Load on startup in `main.c`; push to `inference_set_n_ctx` / `inference_set_temperature` immediately.
+- Persist on every change (compare to `last_*` shadow variables in the main loop).
+- Valid ranges: `n_ctx` 512–262 144, `temperature` 0.01–5.0.
 
 ## Testing Protocol
 
@@ -70,9 +121,11 @@ Before declaring a task complete:
 5. UI stays responsive while a model is loading (no frozen amber rectangle).
 6. `STOP` interrupts an in-flight response within ~1 token.
 7. Sending "hello" to an instruction-tuned model produces a coherent greeting (not raw-text continuation) — confirms the chat template path.
-8. Two consecutive prompts in the same chat must show on separate lines — verifies the post-generation `\n` is being appended.
-9. Cross-platform changes must not break the Linux build.
+8. A second prompt in the same session must reference the first exchange — confirms multi-turn history is working.
+9. CTX bar shows a non-zero percentage after one exchange.
+10. `[ COMPACT ]` visibly shrinks the chat and shows a status message; clicking it again when only one turn remains shows "Nothing to compact".
+11. Cross-platform changes must not break the Linux build.
 
 ## Version
 
-Current version: **0.1**
+Current version: **0.2**

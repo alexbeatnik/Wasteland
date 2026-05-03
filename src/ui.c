@@ -12,6 +12,9 @@
 
 #ifdef _WIN32
 #  include <windows.h>
+#  ifndef S_ISDIR
+#    define S_ISDIR(mode) (((mode) & _S_IFMT) == _S_IFDIR)
+#  endif
 #else
 #  include <dirent.h>
 #endif
@@ -358,6 +361,43 @@ void ui_apply_amber_theme(struct nk_context *nk)
     s->selectable.text_normal   = amber;
     s->selectable.text_hover    = amber;
     s->selectable.text_pressed  = amber;
+
+    /* Property (nk_property_int / nk_property_float — used by the
+     * INFERENCE settings controls). Defaults are gradient-grey and clash
+     * with the amber/black terminal aesthetic. */
+    s->property.normal          = nk_style_item_color(black);
+    s->property.hover           = nk_style_item_color(black);
+    s->property.active          = nk_style_item_color(black);
+    s->property.border_color    = amber;
+    s->property.label_normal    = amber;
+    s->property.label_hover     = amber;
+    s->property.label_active    = amber;
+    s->property.sym_left        = NK_SYMBOL_TRIANGLE_LEFT;
+    s->property.sym_right       = NK_SYMBOL_TRIANGLE_RIGHT;
+    /* Inline editor inside the property widget — match the regular edit box. */
+    s->property.edit.normal     = nk_style_item_color(black);
+    s->property.edit.hover      = nk_style_item_color(black);
+    s->property.edit.active     = nk_style_item_color(black);
+    s->property.edit.border_color    = amber;
+    s->property.edit.text_normal     = amber;
+    s->property.edit.text_hover      = amber;
+    s->property.edit.text_active     = amber;
+    s->property.edit.cursor_normal   = amber;
+    s->property.edit.cursor_hover    = amber;
+    s->property.edit.selected_normal = amber;
+    s->property.edit.selected_hover  = amber;
+    s->property.edit.selected_text_normal = black;
+    s->property.edit.selected_text_hover  = black;
+    /* +/- arrow buttons — match the regular button. */
+    s->property.inc_button.normal       = nk_style_item_color(dark_grey);
+    s->property.inc_button.hover        = nk_style_item_color(mid_grey);
+    s->property.inc_button.active       = nk_style_item_color(black);
+    s->property.inc_button.border_color = amber;
+    s->property.inc_button.text_background = dark_grey;
+    s->property.inc_button.text_normal  = amber;
+    s->property.inc_button.text_hover   = amber;
+    s->property.inc_button.text_active  = amber;
+    s->property.dec_button = s->property.inc_button;
 }
 
 /* ---------------------------------------------------------------------------
@@ -385,104 +425,186 @@ static void* download_thread_fn(void *arg)
 }
 
 /* ---------------------------------------------------------------------------
- * chat_copy_icon
+ * wrap_text_into
  *
- * Renders a tiny right-aligned copy icon (◈ U+25C8) inside the current
- * Nuklear layout. The button is visually dim (amber_dim border + text) so it
- * stays out of the way; hovering lights it up to full amber.
- * Returns non-zero when clicked.
+ * `nk_edit_string` (multi-line) doesn't word-wrap — long lines just keep
+ * extending and the widget grows a horizontal scrollbar. To make the chat
+ * read naturally we walk the input line by line, measure prefixes against
+ * the actual font's width(), and inject soft `\n` breaks where a line would
+ * overflow. UTF-8-aware: never cuts mid-codepoint. Prefers breaking at the
+ * last space in the fitted prefix, falls back to a hard cut if there's no
+ * space (e.g., a long URL).
+ *
+ * The result lives in the per-frame chat_view_buf, so original chat_history
+ * is never modified — copying selected text from the widget yields the
+ * wrapped form (with extra newlines), which is the usual TUI trade-off.
  * --------------------------------------------------------------------------- */
-static int chat_copy_icon(struct nk_context *nk,
-                          struct nk_color dim, struct nk_color bright)
+static void wrap_text_into(char *out, size_t out_size,
+                           const char *in,
+                           const struct nk_user_font *font, float panel_w)
 {
-    const struct nk_user_font *fnt = nk->style.font;
-    float fh = (fnt && fnt->height > 0) ? fnt->height : 14.0f;
+    if (!out || out_size == 0) return;
+    out[0] = '\0';
+    if (!in) return;
 
-    /* Row: invisible left spacer + small button on the right */
-    nk_layout_row_begin(nk, NK_DYNAMIC, fh, 2);
-    nk_layout_row_push(nk, 0.80f);
-    nk_spacing(nk, 1);
-    nk_layout_row_push(nk, 0.20f);
+    if (!font || !font->width || panel_w <= 8.0f) {
+        /* No way to measure — copy verbatim. */
+        size_t inlen = strlen(in);
+        if (inlen >= out_size) inlen = out_size - 1;
+        memcpy(out, in, inlen);
+        out[inlen] = '\0';
+        return;
+    }
 
-    /* Temporarily dim the button style */
-    struct nk_color    save_tn = nk->style.button.text_normal;
-    struct nk_color    save_th = nk->style.button.text_hover;
-    struct nk_color    save_ta = nk->style.button.text_active;
-    struct nk_color    save_bc = nk->style.button.border_color;
-    struct nk_style_item save_n = nk->style.button.normal;
-    struct nk_style_item save_h = nk->style.button.hover;
-    struct nk_style_item save_a = nk->style.button.active;
+    size_t out_pos = 0;
+    const char *p = in;
+    while (*p && out_pos + 2 < out_size) {
+        const char *eol = strchr(p, '\n');
+        size_t      line_len = eol ? (size_t)(eol - p) : strlen(p);
 
-    nk->style.button.text_normal  = dim;
-    nk->style.button.text_hover   = bright;
-    nk->style.button.text_active  = bright;
-    nk->style.button.border_color = dim;
-    nk->style.button.normal = nk_style_item_color(nk_rgb(0x1A, 0x1A, 0x1A));
-    nk->style.button.hover  = nk_style_item_color(nk_rgb(0x28, 0x28, 0x28));
-    nk->style.button.active = nk_style_item_color(nk_rgb(0x0A, 0x0A, 0x0A));
+        /* Wrap this single logical line into one-or-more visual lines. */
+        const char *seg = p;
+        size_t      rem = line_len;
+        while (rem > 0 && out_pos + 2 < out_size) {
+            /* Binary-search the largest byte prefix that fits in panel_w. */
+            int lo = 1, hi = (int)rem, fit = 1;
+            while (lo <= hi) {
+                int mid = (lo + hi) / 2;
+                float w = font->width(font->userdata, font->height, seg, mid);
+                if (w <= panel_w) { fit = mid; lo = mid + 1; }
+                else              { hi = mid - 1; }
+            }
+            /* Don't cut a multi-byte UTF-8 sequence (continuation = 10xxxxxx) */
+            while (fit > 0 && fit < (int)rem &&
+                   ((unsigned char)seg[fit] & 0xC0) == 0x80) fit--;
+            if (fit < 1) fit = 1;
 
-    /* ◈  U+25C8 — WHITE DIAMOND CONTAINING BLACK SMALL DIAMOND
-     * UTF-8: E2 97 88 — already in the baked 0x25A0-0x25FF glyph range */
-    int clicked = nk_button_label(nk, "\xe2\x97\x88");
+            /* Prefer breaking at the last space inside the fitted prefix —
+             * but only if it leaves at least half of the prefix on this line
+             * (otherwise we'd produce ugly tiny stubs on long words). */
+            if ((size_t)fit < rem) {
+                int i = fit;
+                while (i > fit / 2 && seg[i - 1] != ' ') i--;
+                if (i > fit / 2) fit = i;
+            }
 
-    /* Restore button style */
-    nk->style.button.text_normal  = save_tn;
-    nk->style.button.text_hover   = save_th;
-    nk->style.button.text_active  = save_ta;
-    nk->style.button.border_color = save_bc;
-    nk->style.button.normal       = save_n;
-    nk->style.button.hover        = save_h;
-    nk->style.button.active       = save_a;
+            size_t copy = (size_t)fit;
+            if (out_pos + copy + 1 >= out_size) copy = out_size - out_pos - 2;
+            memcpy(out + out_pos, seg, copy);
+            out_pos += copy;
+            seg += copy;
+            rem -= copy;
 
-    nk_layout_row_end(nk);
-    return clicked;
+            if (rem > 0 && out_pos + 1 < out_size) {
+                out[out_pos++] = '\n';
+                /* Skip a single space at the start of the next visual line so
+                 * the wrapped text doesn't begin with leading whitespace. */
+                while (rem > 0 && *seg == ' ') { seg++; rem--; }
+            }
+        }
+
+        if (eol) {
+            if (out_pos + 1 < out_size) out[out_pos++] = '\n';
+            p = eol + 1;
+        } else {
+            break;
+        }
+    }
+    out[out_pos] = '\0';
 }
 
 /* ---------------------------------------------------------------------------
- * count_wrap_lines
+ * compact_chat_history
  *
- * Estimate how many wrapped lines `nk_label_*_wrap` will produce for `text`
- * given an available pixel width. Uses the active font's own width measure
- * so it stays accurate for non-monospace fonts. Greedy: fits as many chars
- * per line as possible, then prefers to break at the last whitespace.
+ * Remove the oldest N user/assistant pairs from the flat history string.
+ * Returns the number of pairs actually removed (may be < requested if the
+ * history has fewer turns). Caller must already hold state->chat_mutex.
  * --------------------------------------------------------------------------- */
-/* utf8_safe_fit: trim `fit` bytes so we don't cut a multi-byte UTF-8
- * sequence in the middle.  UTF-8 continuation bytes are 0x80..0xBF. */
-static int utf8_safe_fit(const char *text, int fit)
+static int compact_chat_history(app_state_t *state, int pairs)
 {
-    while (fit > 0 && (text[fit] & 0xC0) == 0x80) fit--;
-    return fit > 0 ? fit : 1;
+    int removed = 0;
+    for (int i = 0; i < pairs; i++) {
+        char *next = strstr(state->chat_history, "\n> ");
+        if (!next) {
+            /* Only one message left — can't compact further. */
+            break;
+        }
+        size_t len = strlen(next + 1);
+        memmove(state->chat_history, next + 1, len + 1);
+        removed++;
+    }
+    state->chat_last_len = strlen(state->chat_history);
+    return removed;
 }
 
-static int count_wrap_lines(const struct nk_user_font *font,
-                            const char *text, int len, float panel_w)
+/* ---------------------------------------------------------------------------
+ * Helpers for thread-safe chat history access
+ * --------------------------------------------------------------------------- */
+static void ui_update_context_stats(app_state_t *state)
 {
-    if (len <= 0 || !font || !font->width || panel_w <= 1.0f) return 1;
-    int lines = 0;
-    int off = 0;
-    while (off < len) {
-        int lo = 1, hi = len - off, fit = 1;
-        while (lo <= hi) {
-            int mid = (lo + hi) / 2;
-            float w = font->width(font->userdata, font->height,
-                                  text + off, mid);
-            if (w <= panel_w) { fit = mid; lo = mid + 1; }
-            else              { hi = mid - 1; }
-        }
-        /* Ensure we don't cut mid-UTF-8-sequence */
-        fit = utf8_safe_fit(text + off, fit);
-        if (off + fit < len) {
-            /* Prefer to break at a space (ASCII 0x20) */
-            int i = fit;
-            while (i > fit / 2 && text[off + i - 1] != ' ') i--;
-            if (i > fit / 2) fit = i;
-        }
-        off += fit;
-        while (off < len && text[off] == ' ') off++;
-        lines++;
-        if (lines > 200) break; /* sanity */
+    char hist_copy[WASTELAND_MAX_CHAT_HISTORY];
+    pthread_mutex_lock(&state->chat_mutex);
+    strncpy(hist_copy, state->chat_history, sizeof(hist_copy) - 1);
+    hist_copy[sizeof(hist_copy) - 1] = '\0';
+    pthread_mutex_unlock(&state->chat_mutex);
+
+    if (inference_get_context_stats(state->inference, hist_copy,
+                                    &state->context_tokens,
+                                    &state->context_max) != 0) {
+        state->context_tokens = 0;
+        state->context_max    = 0;
     }
-    return lines > 0 ? lines : 1;
+}
+
+static void ui_set_chat_history(app_state_t *state)
+{
+    char hist_copy[WASTELAND_MAX_CHAT_HISTORY];
+    pthread_mutex_lock(&state->chat_mutex);
+    strncpy(hist_copy, state->chat_history, sizeof(hist_copy) - 1);
+    hist_copy[sizeof(hist_copy) - 1] = '\0';
+    pthread_mutex_unlock(&state->chat_mutex);
+
+    inference_set_chat_history(state->inference, hist_copy);
+}
+
+/* Full compact pipeline: refuse mid-generation, drop the oldest `pairs` turns
+ * under the chat lock, mirror the new history into the inference module so
+ * the next prompt sees it, persist the active chat to disk so a chat-switch
+ * doesn't restore the old version, and write a status message so the user
+ * gets feedback even when nothing was removed. */
+static void ui_compact_chat_history(app_state_t *state, int pairs)
+{
+    if (state->is_generating) {
+        snprintf(state->status_msg, sizeof(state->status_msg),
+                 "Cannot compact while generating.");
+        return;
+    }
+
+    pthread_mutex_lock(&state->chat_mutex);
+    int removed = compact_chat_history(state, pairs);
+    pthread_mutex_unlock(&state->chat_mutex);
+
+    if (removed == 0) {
+        snprintf(state->status_msg, sizeof(state->status_msg),
+                 "Nothing to compact (need >=2 turns).");
+        return;
+    }
+
+    ui_set_chat_history(state);
+    ui_update_context_stats(state);
+
+    if (state->selected_chat >= 0 &&
+        state->selected_chat < state->chat_count) {
+        char hist_copy[WASTELAND_MAX_CHAT_HISTORY];
+        pthread_mutex_lock(&state->chat_mutex);
+        strncpy(hist_copy, state->chat_history, sizeof(hist_copy) - 1);
+        hist_copy[sizeof(hist_copy) - 1] = '\0';
+        pthread_mutex_unlock(&state->chat_mutex);
+        save_chat_history(state->chats[state->selected_chat], hist_copy);
+    }
+
+    snprintf(state->status_msg, sizeof(state->status_msg),
+             "Compacted %d turn(s).", removed);
 }
 
 /* ---------------------------------------------------------------------------
@@ -504,6 +626,17 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
         state->status_msg[0] = '\0';
         state->last_status_msg[0] = '\0';
     }
+
+    /* Auto-compact context when a generation finishes and usage > 80 % */
+    static int was_generating = 0;
+    if (was_generating && !state->is_generating) {
+        ui_update_context_stats(state);
+        if (state->context_max > 0 &&
+            state->context_tokens > (int)(state->context_max * 0.80f)) {
+            ui_compact_chat_history(state, 1);
+        }
+    }
+    was_generating = state->is_generating;
 
     struct nk_color amber = col_amber();
 
@@ -543,15 +676,16 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
             state->selected_model = -1;
         }
         state->loading_model_index = -1;
+        ui_update_context_stats(state);
     }
 
     if (nk_begin(nk, "Wasteland",
-                 nk_rect(0, 0, width, height),
+                 nk_rect(0, 0, (float)width, (float)height),
                  NK_WINDOW_NO_SCROLLBAR | NK_WINDOW_BACKGROUND))
     {
         /* ========================= HEADER ========================= */
         nk_layout_row_dynamic(nk, 30, 1);
-        nk_label_colored(nk, "WASTELAND TERMINAL v0.1",
+        nk_label_colored(nk, "WASTELAND TERMINAL v0.2",
                          NK_TEXT_CENTERED, amber);
 
         /* Status row: [toggle] | SYS | status | NET
@@ -588,9 +722,9 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
 
         /* =================== MAIN SPLIT AREA =================== */
         if (state->left_panel_collapsed) {
-            nk_layout_row_dynamic(nk, height - 70, 1);
+            nk_layout_row_dynamic(nk, (float)(height - 70), 1);
         } else {
-            nk_layout_row_dynamic(nk, height - 70, 2);
+            nk_layout_row_dynamic(nk, (float)(height - 70), 2);
         }
 
         /* --------------------- LEFT PANEL --------------------- */
@@ -624,6 +758,8 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                 
                 state->chat_history[0] = '\0';
                 state->chat_last_len = 0;
+                state->context_tokens = 0;
+                state->context_max = 0;
                 
                 if (state->chat_count < WASTELAND_MAX_CHATS) {
                     snprintf(state->chats[state->chat_count],
@@ -668,6 +804,7 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                                 save_chat_history(state->chats[state->selected_chat], state->chat_history);
                             }
                             load_chat_history(state->chats[i], state->chat_history, WASTELAND_MAX_CHAT_HISTORY);
+                            ui_update_context_stats(state);
                             state->selected_chat = i;
                             state->chat_last_len = 0;
                             state->chat_scroll_y = (nk_uint)0x7FFFFFFF;
@@ -929,6 +1066,99 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
             nk_layout_row_dynamic(nk, 10, 1);
             nk_spacing(nk, 1);
 
+            /* ===== AGENT MODE ===== */
+            nk_layout_row_dynamic(nk, 20, 1);
+            nk_label_colored(nk, "AGENT MODE", NK_TEXT_LEFT, amber);
+            nk_layout_row_dynamic(nk, 2, 1);
+            nk_button_color(nk, amber);
+
+            nk_layout_row_dynamic(nk, 24, 1);
+            nk_checkbox_label(nk, state->agent_mode
+                                  ? "AGENT MODE: ON  (model can read/edit files)"
+                                  : "AGENT MODE: OFF (chat only)",
+                              &state->agent_mode);
+
+            if (state->agent_mode) {
+                nk_layout_row_dynamic(nk, 18, 1);
+                nk_label_colored(nk, "Workspace (sandbox root):",
+                                 NK_TEXT_LEFT, amber);
+                nk_layout_row_dynamic(nk, 26, 1);
+                int wlen = (int)strlen(state->agent_workspace);
+                nk_edit_string(nk, NK_EDIT_FIELD,
+                               state->agent_workspace, &wlen,
+                               sizeof(state->agent_workspace),
+                               nk_filter_default);
+                state->agent_workspace[wlen] = '\0';
+
+                /* Quick visual feedback: does the path exist as a directory? */
+                /* Expand ~/foo and $HOME/foo before stat'ing so the user
+                 * sees OK immediately after typing a portable path. The
+                 * agent module does the same expansion at execute time. */
+                char ws_check[1280];
+                ws_check[0] = '\0';
+                if (state->agent_workspace[0] != '\0') {
+                    const char *home = getenv("HOME");
+                    if (home && state->agent_workspace[0] == '~' &&
+                        (state->agent_workspace[1] == '/' ||
+                         state->agent_workspace[1] == '\0'))
+                    {
+                        snprintf(ws_check, sizeof(ws_check), "%s%s",
+                                 home, state->agent_workspace + 1);
+                    } else if (home &&
+                               strncmp(state->agent_workspace, "$HOME", 5) == 0 &&
+                               (state->agent_workspace[5] == '/' ||
+                                state->agent_workspace[5] == '\0'))
+                    {
+                        snprintf(ws_check, sizeof(ws_check), "%s%s",
+                                 home, state->agent_workspace + 5);
+                    } else {
+                        snprintf(ws_check, sizeof(ws_check), "%s",
+                                 state->agent_workspace);
+                    }
+                }
+                struct stat wst;
+                int valid = (ws_check[0] != '\0' &&
+                             stat(ws_check, &wst) == 0 &&
+                             S_ISDIR(wst.st_mode));
+                nk_layout_row_dynamic(nk, 18, 1);
+                if (state->agent_workspace[0] == '\0') {
+                    nk_label_colored(nk, "(no workspace set)",
+                                     NK_TEXT_LEFT, col_dark_grey());
+                } else if (!valid) {
+                    nk_label_colored(nk, "INVALID: not a directory",
+                                     NK_TEXT_LEFT, nk_rgb(0xCC, 0x44, 0x00));
+                } else {
+                    nk_label_colored(nk, "OK", NK_TEXT_LEFT, amber);
+                }
+            }
+
+            /* Spacer */
+            nk_layout_row_dynamic(nk, 10, 1);
+            nk_spacing(nk, 1);
+
+            /* ===== INFERENCE SETTINGS ===== */
+            nk_layout_row_dynamic(nk, 20, 1);
+            nk_label_colored(nk, "INFERENCE", NK_TEXT_LEFT, amber);
+            nk_layout_row_dynamic(nk, 2, 1);
+            nk_button_color(nk, amber);
+
+            nk_layout_row_dynamic(nk, 24, 1);
+            nk_property_int(nk, "N_CTX:",
+                            512, &state->settings_n_ctx, 262144, 1024, 256);
+            nk_layout_row_dynamic(nk, 14, 1);
+            nk_label_colored(nk,
+                "(applies on next model load)",
+                NK_TEXT_LEFT, col_dark_grey());
+
+            nk_layout_row_dynamic(nk, 24, 1);
+            nk_property_float(nk, "TEMP:",
+                              0.10f, &state->settings_temperature, 2.00f,
+                              0.05f, 0.01f);
+
+            /* Spacer */
+            nk_layout_row_dynamic(nk, 10, 1);
+            nk_spacing(nk, 1);
+
             /* ===== SYSTEM PROMPT ===== */
             nk_layout_row_dynamic(nk, 20, 1);
             nk_label_colored(nk, "SYSTEM PROMPT", NK_TEXT_LEFT, amber);
@@ -963,248 +1193,292 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
 
         /* --------------------- RIGHT PANEL --------------------- */
         if (nk_group_begin(nk, "RightPanel", NK_WINDOW_BORDER)) {
-            /* Chat history rendered into a scrollable group of labels.
-             * nk_edit_string provides no public scroll API, so we draw
-             * the lines ourselves and auto-pin scroll to the bottom
-             * whenever new tokens arrive. */
+            /* ---------- Agent pending-approval banner ----------
+             * If the worker is waiting for user APPLY/REJECT on a mutating
+             * tool call, render a compact diff/preview panel at the top of
+             * the right panel with two action buttons. */
+            const char *p_path = NULL, *p_content = NULL,
+                       *p_search = NULL, *p_replace = NULL;
+            int pending = (state->agent_mode && state->inference)
+                ? inference_get_pending(state->inference,
+                                        &p_path, &p_content,
+                                        &p_search, &p_replace)
+                : 0;
+            int pending_panel_h = pending ? 200 : 0;
+
+            if (pending) {
+                struct nk_color warn  = nk_rgb(0xFF, 0xB0, 0x00);
+                struct nk_color rej_c = nk_rgb(0xCC, 0x44, 0x00);
+                struct nk_color add_c = nk_rgb(0xAA, 0xCC, 0x00);
+
+                nk_layout_row_dynamic(nk, 18, 1);
+                nk_label_colored(nk, "▼ AGENT PROPOSAL — REVIEW",
+                                 NK_TEXT_LEFT, warn);
+
+                char title[640];
+                snprintf(title, sizeof(title), "%s → %s",
+                         pending == 1 ? "WRITE_FILE" : "APPLY_EDIT",
+                         p_path ? p_path : "");
+                nk_layout_row_dynamic(nk, 16, 1);
+                nk_label_colored(nk, title, NK_TEXT_LEFT, warn);
+
+                /* Preview area: ~110px scrollable group */
+                nk_layout_row_dynamic(nk, 110, 1);
+                if (nk_group_begin(nk, "PendingPreview", NK_WINDOW_BORDER)) {
+                    if (pending == 1) {
+                        /* write_file: show full new content (truncated). */
+                        const char *txt = p_content ? p_content : "(empty)";
+                        char buf[2048];
+                        size_t tl = strlen(txt);
+                        if (tl >= sizeof(buf)) {
+                            memcpy(buf, txt, sizeof(buf) - 5);
+                            memcpy(buf + sizeof(buf) - 5, "...\n", 5);
+                            txt = buf;
+                            tl  = sizeof(buf) - 1;
+                        }
+                        nk_layout_row_dynamic(nk, 14, 1);
+                        nk_label_colored_wrap(nk, txt, add_c);
+                    } else {
+                        /* apply_edit: show SEARCH then REPLACE blocks. */
+                        nk_layout_row_dynamic(nk, 14, 1);
+                        nk_label_colored(nk, "FIND:", NK_TEXT_LEFT, warn);
+                        nk_label_colored_wrap(nk,
+                            p_search ? p_search : "(empty)", rej_c);
+                        nk_label_colored(nk, "REPLACE WITH:", NK_TEXT_LEFT, warn);
+                        nk_label_colored_wrap(nk,
+                            p_replace ? p_replace : "(empty)", add_c);
+                    }
+                    nk_group_end(nk);
+                }
+
+                nk_layout_row_dynamic(nk, 28, 2);
+                if (nk_button_label(nk, "[ APPLY ]")) {
+                    inference_set_pending_approval(state->inference, +1);
+                }
+                if (nk_button_label(nk, "[ REJECT ]")) {
+                    inference_set_pending_approval(state->inference, -1);
+                }
+            }
+
+            /* Chat history — single read-only multi-line edit box. We need
+             * an edit (not labels) so the user can mouse-select and Ctrl+C
+             * the text. NK_EDIT_READ_ONLY would kill input → no selection,
+             * so we get the same effect by writing into a per-frame copy
+             * of chat_history: any stray typing is overwritten on the next
+             * render. The amber theme already paints text/cursor, so the
+             * box visually matches the rest of the terminal. */
+
+            /* Snapshot chat_history under lock so the inference thread can't
+             * mutate it mid-render (which used to garble think/normal state). */
+            static char local_hist[WASTELAND_MAX_CHAT_HISTORY];
+            pthread_mutex_lock(&state->chat_mutex);
             size_t chat_len = strlen(state->chat_history);
+            if (chat_len >= sizeof(local_hist)) chat_len = sizeof(local_hist) - 1;
+            memcpy(local_hist, state->chat_history, chat_len);
+            local_hist[chat_len] = '\0';
+            pthread_mutex_unlock(&state->chat_mutex);
+
+            /* Auto-scroll to bottom whenever new tokens arrive. The outer
+             * scrolled group (below) holds many sub-edit-boxes — none of
+             * them know about the cursor — so we steer the OUTER scrollbar
+             * by setting chat_scroll_y to a max sentinel; Nuklear clamps it
+             * down to the real max on next layout, which is exactly the
+             * "pinned to bottom" behaviour the user expects while the model
+             * streams its reply. We re-arm on every growth so even a slow
+             * trickle of bytes keeps the view stuck at the bottom. */
             if (chat_len > state->chat_last_len) {
-                /* New text appeared — clamp scroll to the bottom. */
                 state->chat_scroll_y = (nk_uint)0x7FFFFFFF;
             }
             state->chat_last_len = chat_len;
 
-            /* Chat area: total right-panel minus header/footer controls.
-             * Controls below consume: spacer(10)+label(25)+input(30)+btn(30)=95px
-             * plus Nuklear group padding (~20px) → reserve 200px total. */
-            nk_layout_row_dynamic(nk, height - 200, 1);
-            nk_uint sx = state->chat_scroll_x;
-            nk_uint sy = state->chat_scroll_y;
-            if (nk_group_scrolled_offset_begin(nk, &sx, &sy,
-                                               "ChatHistory",
-                                               NK_WINDOW_BORDER))
+            /* Chat area: right-panel minus header/footer controls.
+             * Spacer(6)+label(18)+input(34)+status(18) ≈ 80px below the chat,
+             * plus Nuklear group padding (~20px) → reserve 200px total.
+             * Subtract pending-approval banner if present. */
+            int chat_h = height - 200 - pending_panel_h;
+            if (chat_h < 60) chat_h = 60;
+
             {
-                /* Probe the available content width inside the group by
-                 * placing one tiny invisible row and reading its bounds.
-                 * Subsequent rows use the same width via row_dynamic. */
+                /* Two-tier rendering for "thinking" highlighting:
+                 *   - Outer scrolled group → one unified scrollbar.
+                 *   - Inside, walk local_hist splitting on `-- THINK --` /
+                 *     `-- END THINK --` markers into sections.
+                 *   - A user prompt (`> `) auto-closes an open think block so
+                 *     the user text never gets dimmed by a leaked in_think.
+                 *   - Each section gets its own nk_edit_string with the
+                 *     style.edit.text_normal colour temporarily overridden
+                 *     (full amber for assistant/user, amber_dim for thoughts).
+                 * Each section sized to fit its wrapped content height so
+                 * there's no per-section scrollbar — only the outer one
+                 * scrolls. */
+
                 const struct nk_user_font *font = nk->style.font;
                 float font_h = font ? font->height : 14.0f;
 
+                struct nk_color amber_normal = nk_rgb(0xFF, 0xB0, 0x00);
+                struct nk_color amber_dim    = nk_rgb(0xA0, 0x68, 0x00);
+
+                /* Probe the width an upcoming row will get so we can
+                 * soft-wrap. Reserve ~24px for edit padding + scrollbar. */
                 nk_layout_row_dynamic(nk, 1, 1);
                 struct nk_rect probe = nk_widget_bounds(nk);
                 nk_spacing(nk, 1);
-                /* Reserve a few px so the wrap measure is not flush with
-                 * the right edge — Nuklear's wrapper has its own padding. */
-                float panel_w = probe.w - 8.0f;
-                if (panel_w < 32.0f) panel_w = 32.0f;
+                float panel_w = probe.w - 36.0f;
+                if (panel_w < 64.0f) panel_w = 64.0f;
 
-                /* -------------------------------------------------------
-                 * Chat rendering state machine:
-                 *   - detects ```code blocks``` → [COPY CODE] button
-                 *   - detects assistant response blocks → [COPY] button
-                 * All copy buttons live inside the scroll group so the
-                 * input area below is never affected.
-                 * ------------------------------------------------------- */
+                nk_layout_row_dynamic(nk, (float)chat_h, 1);
+                nk_uint sx = state->chat_scroll_x;
+                nk_uint sy = state->chat_scroll_y;
+                if (nk_group_scrolled_offset_begin(nk, &sx, &sy,
+                                                   "ChatScroll",
+                                                   NK_WINDOW_BORDER))
+                {
+                    static char section_buf[WASTELAND_MAX_CHAT_HISTORY];
+                    static char wrapped   [WASTELAND_MAX_CHAT_HISTORY * 2];
 
-                /* Persistent per-frame accumulators (static = no stack pressure) */
-                static char s_code_buf[8192];
-                static char s_asst_buf[8192];
-                int s_code_len = 0;
-                int s_asst_len = 0;
-                s_code_buf[0] = '\0';
-                s_asst_buf[0] = '\0';
+                    int section_pos = 0;
+                    int in_think    = 0;
 
-                int in_code  = 0; /* currently inside a ```...``` block */
-                int in_think = 0; /* currently inside a -- THINK -- block */
+                    const char *p   = local_hist;
+                    const char *end = p + chat_len;
 
-                /* amber_dim: slightly dimmer colour for code-block chrome */
-                struct nk_color amber_dim = nk_rgb(0xCC, 0x8C, 0x00);
+                    /* Helper: flush whatever is in section_buf. Skip the
+                     * entire box (and the "▒ thinking" label) if the buffer
+                     * has no visible characters — e.g. a stray "\n" left
+                     * after a marker would otherwise render as an empty box. */
+                    #define FLUSH_SECTION() do { \
+                        int _has_visible = 0; \
+                        for (int _i = 0; _i < section_pos; _i++) { \
+                            unsigned char _c = (unsigned char)section_buf[_i]; \
+                            if (_c > ' ') { _has_visible = 1; break; } \
+                        } \
+                        if (_has_visible) { \
+                            section_buf[section_pos] = '\0'; \
+                            wrap_text_into(wrapped, sizeof(wrapped), \
+                                           section_buf, font, panel_w); \
+                            int vlines = 1; \
+                            for (const char *q = wrapped; *q; q++) \
+                                if (*q == '\n') vlines++; \
+                            float sec_h = (float)vlines * (font_h + 2.0f) \
+                                          + 10.0f; \
+                            if (in_think) { \
+                                nk_layout_row_dynamic(nk, font_h + 2.0f, 1); \
+                                nk_label_colored(nk, "▒ thinking", \
+                                                 NK_TEXT_LEFT, amber_dim); \
+                            } \
+                            struct nk_color saved = nk->style.edit.text_normal; \
+                            nk->style.edit.text_normal = \
+                                in_think ? amber_dim : amber_normal; \
+                            int rlen = (int)strlen(wrapped); \
+                            nk_layout_row_dynamic(nk, sec_h, 1); \
+                            nk_edit_string(nk, \
+                                NK_EDIT_BOX | NK_EDIT_MULTILINE, \
+                                wrapped, &rlen, (int)sizeof(wrapped), \
+                                nk_filter_default); \
+                            nk->style.edit.text_normal = saved; \
+                        } \
+                        section_pos = 0; \
+                    } while (0)
 
-                const char *p   = state->chat_history;
-                const char *end = p + chat_len;
-                while (p < end) {
-                    const char *eol = memchr(p, '\n', (size_t)(end - p));
-                    size_t llen = eol ? (size_t)(eol - p)
-                                      : (size_t)(end - p);
+                    /* Helper: append [src, src+n) to section_buf. */
+                    #define APPEND_SECTION(src, n) do { \
+                        size_t _n = (size_t)(n); \
+                        if ((size_t)section_pos + _n < sizeof(section_buf)) { \
+                            memcpy(section_buf + section_pos, (src), _n); \
+                            section_pos += (int)_n; \
+                        } \
+                    } while (0)
 
-                    char line[4096];
-                    if (llen >= sizeof(line)) llen = sizeof(line) - 1;
-                    memcpy(line, p, llen);
-                    line[llen] = '\0';
+                    while (p < end) {
+                        /* Search for the next think boundary. */
+                        const char *ms = strstr(p, "-- THINK --");
+                        const char *me = strstr(p, "-- END THINK --");
 
-                    /* Is this a ``` fence line? */
-                    int is_fence = (llen >= 3 &&
-                                    line[0] == '`' &&
-                                    line[1] == '`' &&
-                                    line[2] == '`');
+                        /* Always look for the next user prompt (`\n> `) so
+                         * each turn becomes its own visual block. Inside a
+                         * think block this also force-closes it so user text
+                         * is never dimmed. */
+                        const char *next_up = strstr(p, "\n> ");
+                        if (next_up) next_up += 1; /* point at '>' */
 
-                    /* Is this a user-prompt line?  ("> text") */
-                    int is_user = (!in_code && llen >= 2 &&
-                                   line[0] == '>' && line[1] == ' ');
-
-                    int is_think_start = (!in_code && llen >= 11 && strncmp(line, "-- THINK --", 11) == 0);
-                    int is_think_end   = (!in_code && llen >= 15 && strncmp(line, "-- END THINK --", 15) == 0);
-
-                    if (is_think_start) {
-                        in_think = 1;
-                        nk_layout_row_dynamic(nk, font_h, 1);
-                        nk_label_colored(nk, "◈ thinking...", NK_TEXT_LEFT, amber_dim);
-                    } else if (is_think_end) {
-                        in_think = 0;
-                        nk_layout_row_dynamic(nk, 6, 1);
-                        nk_spacing(nk, 1);
-                    } else if (is_fence) {
-                        if (!in_code) {
-                            /* ---- Opening fence ---- */
-                            /* Flush any pending assistant block first */
-                            if (s_asst_len > 0) {
-                                static char snap_asst[8192];
-                                strncpy(snap_asst, s_asst_buf,
-                                        sizeof(snap_asst) - 1);
-                                snap_asst[sizeof(snap_asst) - 1] = '\0';
-                                if (chat_copy_icon(nk, amber_dim, amber)) {
-                                    SDL_SetClipboardText(snap_asst);
-                                    snprintf(state->status_msg,
-                                             sizeof(state->status_msg),
-                                             "Response copied.");
-                                }
-                                s_asst_len = 0;
-                                s_asst_buf[0] = '\0';
-                            }
-                            in_code = 1;
-                            s_code_len = 0;
-                            s_code_buf[0] = '\0';
-                            /* Thin separator + language hint */
-                            nk_layout_row_dynamic(nk, 2, 1);
-                            nk_button_color(nk, amber_dim);
-                            char hdr[80];
-                            if (llen > 3) {
-                                char lang[48] = "";
-                                size_t hl = llen - 3;
-                                if (hl >= sizeof(lang)) hl = sizeof(lang) - 1;
-                                memcpy(lang, line + 3, hl);
-                                lang[hl] = '\0';
-                                snprintf(hdr, sizeof(hdr),
-                                         "-- CODE: %s --", lang);
-                            } else {
-                                snprintf(hdr, sizeof(hdr), "-- CODE --");
-                            }
-                            nk_layout_row_dynamic(nk, font_h + 2, 1);
-                            nk_label_colored(nk, hdr, NK_TEXT_LEFT, amber_dim);
-                        } else {
-                            /* ---- Closing fence ---- */
-                            in_code = 0;
-                            /* Small copy icon for this code block */
-                            static char snap_code[8192];
-                            strncpy(snap_code, s_code_buf,
-                                    sizeof(snap_code) - 1);
-                            snap_code[sizeof(snap_code) - 1] = '\0';
-                            if (chat_copy_icon(nk, amber_dim, amber)) {
-                                SDL_SetClipboardText(snap_code);
-                                snprintf(state->status_msg,
-                                         sizeof(state->status_msg),
-                                         "Code copied.");
-                            }
-                            nk_layout_row_dynamic(nk, 2, 1);
-                            nk_button_color(nk, amber_dim);
+                        /* Pick the nearest boundary. */
+                        const char *boundary = NULL;
+                        int boundary_is_start = 0;
+                        if (ms && (!me || ms <= me)) {
+                            boundary = ms;
+                            boundary_is_start = 1;
+                        } else if (me) {
+                            boundary = me;
+                            boundary_is_start = 0;
                         }
-                    } else if (in_code) {
-                        /* Accumulate code content */
-                        if (s_code_len + (int)llen + 1 < (int)sizeof(s_code_buf)) {
-                            memcpy(s_code_buf + s_code_len, line, llen);
-                            s_code_len += (int)llen;
-                            s_code_buf[s_code_len++] = '\n';
-                            s_code_buf[s_code_len]   = '\0';
-                        }
-                        /* Render code line with slight indent marker */
-                        char indented[4098];
-                        snprintf(indented, sizeof(indented), "  %s", line);
-                        int ilen = (int)strlen(indented);
-                        int wraps = count_wrap_lines(font, indented,
-                                                     ilen, panel_w);
-                        nk_layout_row_dynamic(nk,
-                                              font_h * (float)wraps + 2.0f,
-                                              1);
-                        nk_label_colored_wrap(nk, indented, amber_dim);
-                    } else if (is_user) {
-                        /* Flush any previous assistant block */
-                        if (s_asst_len > 0) {
-                            static char snap_asst[8192];
-                            strncpy(snap_asst, s_asst_buf,
-                                    sizeof(snap_asst) - 1);
-                            snap_asst[sizeof(snap_asst) - 1] = '\0';
-                            if (chat_copy_icon(nk, amber_dim, amber)) {
-                                SDL_SetClipboardText(snap_asst);
-                                snprintf(state->status_msg,
-                                         sizeof(state->status_msg),
-                                         "Response copied.");
+
+                        /* If a user prompt comes before the next think
+                         * boundary, flush current section, drop think state,
+                         * and continue from the prompt — that way each turn
+                         * (user line + assistant reply) gets its own block. */
+                        if (next_up && (!boundary || next_up < boundary)) {
+                            if (next_up > p) {
+                                APPEND_SECTION(p, (size_t)(next_up - p));
                             }
-                            s_asst_len = 0;
-                            s_asst_buf[0] = '\0';
+                            FLUSH_SECTION();
+                            in_think = 0;
+                            p = next_up;
+                            continue;
                         }
-                        /* Render user line */
-                        if (llen == 0) {
-                            nk_layout_row_dynamic(nk, font_h, 1);
-                            nk_label_colored(nk, "", NK_TEXT_LEFT, amber);
-                        } else {
-                            int wraps = count_wrap_lines(font, line,
-                                                         (int)llen, panel_w);
-                            nk_layout_row_dynamic(nk,
-                                                  font_h * (float)wraps + 2.0f,
-                                                  1);
-                            nk_label_colored_wrap(nk, line, amber);
+
+                        if (!boundary) {
+                            /* No more boundaries — render rest. */
+                            if (p < end)
+                                APPEND_SECTION(p, (size_t)(end - p));
+                            break;
                         }
-                    } else {
-                        /* Normal assistant line or thought line */
-                        if (in_think) {
-                            /* Render dim, do NOT append to s_asst_buf */
-                            if (llen == 0) {
-                                nk_layout_row_dynamic(nk, font_h, 1);
-                                nk_label_colored(nk, "", NK_TEXT_LEFT, amber_dim);
-                            } else {
-                                int wraps = count_wrap_lines(font, line, (int)llen, panel_w);
-                                nk_layout_row_dynamic(nk, font_h * (float)wraps + 2.0f, 1);
-                                nk_label_colored_wrap(nk, line, amber_dim);
-                            }
-                        } else {
-                            /* Normal assistant line — accumulate + render */
-                            if (llen > 0 &&
-                                s_asst_len + (int)llen + 1 < (int)sizeof(s_asst_buf)) {
-                                memcpy(s_asst_buf + s_asst_len, line, llen);
-                                s_asst_len += (int)llen;
-                                s_asst_buf[s_asst_len++] = '\n';
-                                s_asst_buf[s_asst_len]   = '\0';
-                            }
-                            if (llen == 0) {
-                                nk_layout_row_dynamic(nk, font_h, 1);
-                                nk_label_colored(nk, "", NK_TEXT_LEFT, amber);
-                            } else {
-                                int wraps = count_wrap_lines(font, line, (int)llen, panel_w);
-                                nk_layout_row_dynamic(nk, font_h * (float)wraps + 2.0f, 1);
-                                nk_label_colored_wrap(nk, line, amber);
-                            }
+
+                        /* Render text before the boundary. */
+                        if (boundary > p) {
+                            APPEND_SECTION(p, (size_t)(boundary - p));
                         }
+                        FLUSH_SECTION();
+
+                        /* Switch state and skip past the marker. */
+                        in_think = boundary_is_start;
+                        p = boundary + (boundary_is_start ? 11 : 15);
                     }
-                    p = eol ? eol + 1 : end;
-                }
 
-                /* Flush final assistant block if any */
-                if (s_asst_len > 0 && !in_code) {
-                    static char snap_asst[8192];
-                    strncpy(snap_asst, s_asst_buf, sizeof(snap_asst) - 1);
-                    snap_asst[sizeof(snap_asst) - 1] = '\0';
-                    if (chat_copy_icon(nk, amber_dim, amber)) {
-                        SDL_SetClipboardText(snap_asst);
-                        snprintf(state->status_msg,
-                                 sizeof(state->status_msg),
-                                 "Response copied.");
-                    }
-                }
+                    FLUSH_SECTION();
 
-                nk_group_scrolled_end(nk);
+                    #undef FLUSH_SECTION
+                    #undef APPEND_SECTION
+
+                    nk_group_scrolled_end(nk);
+                }
+                state->chat_scroll_x = sx;
+                state->chat_scroll_y = sy;
             }
-            state->chat_scroll_x = sx;
-            state->chat_scroll_y = sy;
+
+            /* Context bar */
+            int ctx_pct = (state->context_max > 0)
+                ? (state->context_tokens * 100 / state->context_max)
+                : 0;
+            char ctx_label[64];
+            snprintf(ctx_label, sizeof(ctx_label), "CTX: %d / %d (%d%%)",
+                     state->context_tokens, state->context_max, ctx_pct);
+
+            nk_layout_row_begin(nk, NK_DYNAMIC, 18, 3);
+            nk_layout_row_push(nk, 0.55f);
+            struct nk_color ctx_color = amber;
+            if (ctx_pct > 90) ctx_color = nk_rgb(0xCC, 0x44, 0x00);
+            else if (ctx_pct > 75) ctx_color = nk_rgb(0xFF, 0x80, 0x00);
+            nk_label_colored(nk, ctx_label, NK_TEXT_LEFT, ctx_color);
+
+            nk_layout_row_push(nk, 0.27f);
+            nk_size prog = (nk_size)ctx_pct;
+            nk_progress(nk, &prog, 100, NK_FIXED);
+
+            nk_layout_row_push(nk, 0.18f);
+            if (nk_button_label(nk, "[ COMPACT ]")) {
+                ui_compact_chat_history(state, 1);
+            }
+            nk_layout_row_end(nk);
 
             /* Spacer */
             nk_layout_row_dynamic(nk, 6, 1);
@@ -1242,6 +1516,18 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                 if (send && state->input_buffer[0] &&
                     inference_is_model_loaded(state->inference))
                 {
+                    /* Pre-send compact if context is near full. The user's
+                     * new prompt is appended below and ui_set_chat_history()
+                     * mirrors the result into inference, so we only need the
+                     * lock + stats refresh here — no separate push/save. */
+                    if (state->context_max > 0 &&
+                        state->context_tokens > (int)(state->context_max * 0.75f)) {
+                        pthread_mutex_lock(&state->chat_mutex);
+                        compact_chat_history(state, 1);
+                        pthread_mutex_unlock(&state->chat_mutex);
+                        ui_update_context_stats(state);
+                    }
+
                     /* Auto-create chat if none active */
                     if (state->selected_chat == -1 &&
                         state->chat_count < WASTELAND_MAX_CHATS) {
@@ -1270,6 +1556,7 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                     }
                     pthread_mutex_unlock(&state->chat_mutex);
 
+                    ui_set_chat_history(state);
                     inference_submit_prompt(state->inference,
                                             state->system_prompt,
                                             state->input_buffer);
