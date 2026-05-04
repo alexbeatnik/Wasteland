@@ -40,8 +40,11 @@
 #  endif
 #elif defined(__APPLE__)
 #  include <mach-o/dyld.h>
+#  include <unistd.h>
+#  include <sys/types.h>
 #else
 #  include <unistd.h>
+#  include <sys/types.h>
 #  include <dirent.h>
 #endif
 
