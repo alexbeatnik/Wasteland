@@ -221,6 +221,18 @@ User: Give this conversation a short 3-5 word title. Output ONLY the title text,
 - **Multi-turn history in agent mode:** the worker now calls `parse_chat_history` in the agent branch too, capped at `AGENT_HISTORY_SLOTS = 8` messages (4 turns) to leave room for tool-call turns. `AGENT_MAX_MSGS = 30` (was 23).
 - **Tool output in chat UI:** `read_file` and `list_dir` results are no longer echoed to the output buffer. The `[ TOOL: read_file | path ]` header is still emitted so the user can see what the model is doing. The file contents go only to `result_out` (the model's next-turn context).
 
+## Agent Pending-Approval Panel — Diff Palette
+
+When a `write_file` or `apply_edit` is awaiting user approval, `ui.c` renders a top-of-right-panel preview with a deliberate red/green diff palette mirroring [docs/index.html](docs/index.html)'s agent-proposal block:
+
+- **`rej_c = #FF6020`** — orange-red for SEARCH (delete side) and the `[ REJECT ]` button.
+- **`add_c = #AACC00`** — yellow-green for REPLACE (add side), `write_file` body, and the `[ APPLY ]` button.
+- **`warn = #FFB000`** — amber heading colour for `▼ AGENT PROPOSAL — REVIEW` and the `// SEARCH:` / `// REPLACE WITH:` labels.
+
+Each diff block is rendered inside its own `nk_group_begin` with a tinted border, achieved by temporarily swapping `nk->style.window.group_border_color` before each call and restoring it afterwards. The action buttons swap the entire `nk->style.button` struct (border / text / hover / active) per click target so only those two buttons carry the diff palette — the global amber theme stays untouched. Hover state inverts text → black, background → tint, so buttons feel "armed" before the click commits.
+
+`pending_panel_h` is `210` for `write_file` (one green block) and `270` for `apply_edit` (red SEARCH + green REPLACE blocks). Chat area height is reduced by this amount so the input field and CTX bar never get pushed offscreen.
+
 ## Font & DPI
 
 - **Embedded font:** `src/font_dejavu.h` is a generated C byte array of DejaVu Sans Mono (343 KB). It is always available — no file-system lookup required. Covers Basic Latin, Cyrillic (Ukrainian U+0400–U+04FF), and Geometric Shapes (▶ ■ U+25A0–U+25FF).

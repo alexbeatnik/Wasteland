@@ -1316,60 +1316,120 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                                         &p_path, &p_content,
                                         &p_search, &p_replace)
                 : 0;
-            int pending_panel_h = pending ? 200 : 0;
+            /* apply_edit needs more height than write_file because it has TWO
+             * diff sub-groups (SEARCH + REPLACE) instead of one. */
+            int pending_panel_h = pending ? (pending == 1 ? 210 : 270) : 0;
 
             if (pending) {
+                /* Diff palette mirrors docs/index.html agent-proposal block:
+                 *   warn  — amber heading colour (existing)
+                 *   rej_c — orange-red for SEARCH (delete side) and REJECT btn
+                 *   add_c — yellow-green for REPLACE (add side) and APPLY btn */
                 struct nk_color warn  = nk_rgb(0xFF, 0xB0, 0x00);
-                struct nk_color rej_c = nk_rgb(0xCC, 0x44, 0x00);
+                struct nk_color rej_c = nk_rgb(0xFF, 0x60, 0x20);
                 struct nk_color add_c = nk_rgb(0xAA, 0xCC, 0x00);
+                struct nk_color black = nk_rgb(0x00, 0x00, 0x00);
 
                 nk_layout_row_dynamic(nk, 18, 1);
-                nk_label_colored(nk, "▼ AGENT PROPOSAL — REVIEW",
+                nk_label_colored(nk, "\xe2\x96\xbc AGENT PROPOSAL \xe2\x80\x94 REVIEW",
                                  NK_TEXT_LEFT, warn);
 
                 char title[640];
-                snprintf(title, sizeof(title), "%s → %s",
+                snprintf(title, sizeof(title), "%s \xe2\x86\x92 %s",
                          pending == 1 ? "WRITE_FILE" : "APPLY_EDIT",
                          p_path ? p_path : "");
                 nk_layout_row_dynamic(nk, 16, 1);
                 nk_label_colored(nk, title, NK_TEXT_LEFT, warn);
 
-                /* Preview area: ~110px scrollable group */
-                nk_layout_row_dynamic(nk, 110, 1);
-                if (nk_group_begin(nk, "PendingPreview", NK_WINDOW_BORDER)) {
-                    if (pending == 1) {
-                        /* write_file: show full new content (truncated). */
-                        const char *txt = p_content ? p_content : "(empty)";
-                        char buf[2048];
-                        size_t tl = strlen(txt);
-                        if (tl >= sizeof(buf)) {
-                            memcpy(buf, txt, sizeof(buf) - 5);
-                            memcpy(buf + sizeof(buf) - 5, "...\n", 5);
-                            txt = buf;
-                            tl  = sizeof(buf) - 1;
-                        }
+                /* Preview area. Each diff block is its own bordered sub-group
+                 * with the border tinted to match the colour of its content
+                 * (red for SEARCH, green for REPLACE / write_file body) — same
+                 * cue as the docs page's <pre> blocks. We temporarily swap
+                 * style.window.group_border_color before each nk_group_begin
+                 * and restore it after. */
+                struct nk_color saved_border =
+                    nk->style.window.group_border_color;
+
+                if (pending == 1) {
+                    /* write_file: full new content in a single green-bordered group. */
+                    nk_layout_row_dynamic(nk, 14, 1);
+                    nk_label_colored(nk, "// REPLACE WITH:", NK_TEXT_LEFT, warn);
+
+                    const char *txt = p_content ? p_content : "(empty)";
+                    char buf[2048];
+                    if (strlen(txt) >= sizeof(buf)) {
+                        memcpy(buf, txt, sizeof(buf) - 5);
+                        memcpy(buf + sizeof(buf) - 5, "...\n", 5);
+                        txt = buf;
+                    }
+
+                    nk->style.window.group_border_color = add_c;
+                    nk_layout_row_dynamic(nk, 110, 1);
+                    if (nk_group_begin(nk, "PendingAdd", NK_WINDOW_BORDER)) {
                         nk_layout_row_dynamic(nk, 14, 1);
                         nk_label_colored_wrap(nk, txt, add_c);
-                    } else {
-                        /* apply_edit: show SEARCH then REPLACE blocks. */
+                        nk_group_end(nk);
+                    }
+                } else {
+                    /* apply_edit: SEARCH (red border) above REPLACE (green border). */
+                    nk_layout_row_dynamic(nk, 14, 1);
+                    nk_label_colored(nk, "// SEARCH:", NK_TEXT_LEFT, warn);
+
+                    nk->style.window.group_border_color = rej_c;
+                    nk_layout_row_dynamic(nk, 70, 1);
+                    if (nk_group_begin(nk, "PendingFind", NK_WINDOW_BORDER)) {
                         nk_layout_row_dynamic(nk, 14, 1);
-                        nk_label_colored(nk, "FIND:", NK_TEXT_LEFT, warn);
                         nk_label_colored_wrap(nk,
                             p_search ? p_search : "(empty)", rej_c);
-                        nk_label_colored(nk, "REPLACE WITH:", NK_TEXT_LEFT, warn);
+                        nk_group_end(nk);
+                    }
+
+                    nk_layout_row_dynamic(nk, 14, 1);
+                    nk_label_colored(nk, "// REPLACE WITH:", NK_TEXT_LEFT, warn);
+
+                    nk->style.window.group_border_color = add_c;
+                    nk_layout_row_dynamic(nk, 70, 1);
+                    if (nk_group_begin(nk, "PendingAdd", NK_WINDOW_BORDER)) {
+                        nk_layout_row_dynamic(nk, 14, 1);
                         nk_label_colored_wrap(nk,
                             p_replace ? p_replace : "(empty)", add_c);
+                        nk_group_end(nk);
                     }
-                    nk_group_end(nk);
                 }
+                nk->style.window.group_border_color = saved_border;
+
+                /* Action buttons: APPLY tinted green, REJECT tinted red. We
+                 * snapshot s->button, recolour, render, restore — that way the
+                 * global amber theme is unchanged and only these two buttons
+                 * carry the diff palette. Hover state inverts (text → black,
+                 * background → tint) so the buttons feel "armed" on hover. */
+                struct nk_style_button saved_btn = nk->style.button;
 
                 nk_layout_row_dynamic(nk, 28, 2);
+
+                /* APPLY — green */
+                nk->style.button.border_color = add_c;
+                nk->style.button.text_normal  = add_c;
+                nk->style.button.text_hover   = black;
+                nk->style.button.text_active  = black;
+                nk->style.button.hover        = nk_style_item_color(add_c);
+                nk->style.button.active       = nk_style_item_color(add_c);
                 if (nk_button_label(nk, "[ APPLY ]")) {
                     inference_set_pending_approval(state->inference, +1);
                 }
+
+                /* REJECT — red */
+                nk->style.button.border_color = rej_c;
+                nk->style.button.text_normal  = rej_c;
+                nk->style.button.text_hover   = black;
+                nk->style.button.text_active  = black;
+                nk->style.button.hover        = nk_style_item_color(rej_c);
+                nk->style.button.active       = nk_style_item_color(rej_c);
                 if (nk_button_label(nk, "[ REJECT ]")) {
                     inference_set_pending_approval(state->inference, -1);
                 }
+
+                nk->style.button = saved_btn;
             }
 
             /* Chat history — single read-only multi-line edit box. We need

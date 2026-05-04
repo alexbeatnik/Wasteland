@@ -56,6 +56,7 @@ Anything that can take >100 ms must not run on the UI thread. The UI thread is t
 - Status messages are shown below the input buffer and auto-cleared using `SDL_GetTicks()`.
 - The `◈` icon copies assistant responses and explicitly skips content inside `-- THINK --` blocks.
 - Each user/assistant turn is rendered in its own `nk_edit_string` box. The rendering loop splits on `\n> ` boundaries unconditionally (not only inside think blocks) so a new user prompt always starts a fresh box. Empty or whitespace-only sections (stray `\n` between markers) are suppressed and produce no box.
+- **Agent diff palette is canonical:** `[ APPLY ]` and the REPLACE block must be `#AACC00` (yellow-green); `[ REJECT ]` and the SEARCH block must be `#FF6020` (orange-red). These three exact RGB values match the `docs/index.html` `agent-proposal` mock — keep them in sync if either side changes. Use the snapshot-and-restore pattern (`saved_btn = nk->style.button; ...; nk->style.button = saved_btn;`) so per-button tinting never leaks into the global amber theme.
 
 ## Chat History & Context
 
