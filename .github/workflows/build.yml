@@ -1,5 +1,8 @@
 name: Build and Release
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 on:
   push:
     branches: [ "main" ]
@@ -9,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version tag to create and release (e.g. v0.4)'
+        description: 'Version tag to create and release (e.g. v0.5)'
         required: true
         type: string
 
@@ -95,11 +98,11 @@ jobs:
         os: [ubuntu-22.04, ubuntu-22.04-arm, macos-14, windows-latest]
         include:
           - os: ubuntu-22.04
-            file_name: wasteland_0.4_amd64.deb
+            file_name: wasteland_0.5_amd64.deb
             artifact_name: wasteland-linux-amd64-deb
             target_os: linux
           - os: ubuntu-22.04-arm
-            file_name: wasteland_0.4_arm64.deb
+            file_name: wasteland_0.5_arm64.deb
             artifact_name: wasteland-linux-arm64-deb
             target_os: linux
           - os: macos-14

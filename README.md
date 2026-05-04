@@ -1,4 +1,4 @@
-# Wasteland Terminal v0.4
+# Wasteland Terminal v0.5
 
 ![Wasteland Terminal](assets/icon-512.png)
 
@@ -120,16 +120,16 @@ GitHub Actions automatically builds and releases for all platforms on every tag:
 
 | Platform | Artifact |
 |----------|----------|
-| Linux x86\_64 (Ubuntu/Debian) | `wasteland_0.4_amd64.deb` — install with `sudo apt install ./wasteland_0.4_amd64.deb` |
-| Linux ARM64 (Raspberry Pi 5, Ampere, etc.) | `wasteland_0.4_arm64.deb` — install with `sudo apt install ./wasteland_0.4_arm64.deb` |
+| Linux x86\_64 (Ubuntu/Debian) | `wasteland_0.5_amd64.deb` — install with `sudo apt install ./wasteland_0.5_amd64.deb` |
+| Linux ARM64 (Raspberry Pi 5, Ampere, etc.) | `wasteland_0.5_arm64.deb` — install with `sudo apt install ./wasteland_0.5_arm64.deb` |
 | macOS (universal) | `Wasteland-macos.dmg` — one .app that runs natively on both Apple Silicon and Intel (deployment target 11.0+) |
 | Windows | `Wasteland-windows.exe` — single self-contained binary (SDL2/curl statically linked) |
 
 Push a tag to trigger a release:
 
 ```bash
-git tag v0.4
-git push origin v0.4
+git tag v0.5
+git push origin v0.5
 ```
 
 ## Running

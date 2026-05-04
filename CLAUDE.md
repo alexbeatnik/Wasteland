@@ -1,4 +1,4 @@
-# CLAUDE.md — Wasteland v0.4
+# CLAUDE.md — Wasteland v0.5
 
 ## Agent Context
 
@@ -228,7 +228,7 @@ User: Give this conversation a short 3-5 word title. Output ONLY the title text,
 - llama.cpp lives in `third_party/llama.cpp/` (with a `vendor/llama.cpp` symlink) and is added as a CMake subdirectory with `LLAMA_BUILD_EXAMPLES=OFF`.
 - `seccomp` is optional (Linux only); CMake skips it gracefully on other platforms.
 - The application does **not** auto-load any model on boot.
-- Package version: **0.4** (`CPACK_PACKAGE_VERSION` in `CMakeLists.txt`).
+- Package version: **0.5** (`CPACK_PACKAGE_VERSION` in `CMakeLists.txt`).
 - MSVC: `nuklear_impl.c` is compiled with `/wd4701`; `ui.c` with `/wd5287`; `_CRT_SECURE_NO_WARNINGS` applied globally for MSVC builds.
 - Linux `.deb` architecture is detected at CMake configure time from `CMAKE_SYSTEM_PROCESSOR` (`x86_64` → `amd64`, `aarch64` → `arm64`). CI builds both via `ubuntu-22.04` and `ubuntu-22.04-arm` runners.
 

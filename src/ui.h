@@ -28,7 +28,7 @@
 #define WASTELAND_MAX_CHATS        64
 #define WASTELAND_CHAT_NAME_LEN    256
 
-#define WASTELAND_VERSION          "0.4"
+#define WASTELAND_VERSION          "0.5"
 
 /* Agent-mode UI buffer sizes (mirrored from agent.h to avoid the include
  * chain dragging agent internals into every UI compilation unit). */

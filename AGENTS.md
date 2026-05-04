@@ -1,4 +1,4 @@
-# AGENTS.md — Wasteland v0.4
+# AGENTS.md — Wasteland v0.5
 
 ## Agent Instructions
 
@@ -145,4 +145,4 @@ Before declaring a task complete:
 
 ## Version
 
-Current version: **0.4**
+Current version: **0.5**

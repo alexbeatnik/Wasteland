@@ -1,4 +1,4 @@
-# SKILLS.md — Wasteland v0.4
+# SKILLS.md — Wasteland v0.5
 
 ## Available Skills
 
@@ -112,4 +112,4 @@ This project does not use a formal skill system. The following domains are relev
 
 ## Version
 
-Current version: **0.4**
+Current version: **0.5**
