@@ -29,11 +29,11 @@ jobs:
           # download, so we deliberately omit the file extension here to avoid
           # ugly `Wasteland-windows.exe.zip` double-extensions.
           - os: ubuntu-22.04
-            file_name: wasteland_0.3.0_amd64.deb
+            file_name: wasteland_0.3_amd64.deb
             artifact_name: wasteland-linux-amd64-deb
             target_os: linux
           - os: ubuntu-22.04-arm
-            file_name: wasteland_0.3.0_arm64.deb
+            file_name: wasteland_0.3_arm64.deb
             artifact_name: wasteland-linux-arm64-deb
             target_os: linux
           - os: macos-14
@@ -98,9 +98,13 @@ jobs:
         # POSIX threading API on MSVC, where pthread.h doesn't exist.
         vcpkg install sdl2:x64-windows-static curl:x64-windows-static pthreads:x64-windows-static
 
-    - name: Configure CMake (Linux)
-      if: matrix.target_os == 'linux'
-      run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+    - name: Configure CMake (Linux amd64)
+      if: matrix.os == 'ubuntu-22.04'
+      run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF
+
+    - name: Configure CMake (Linux arm64)
+      if: matrix.os == 'ubuntu-22.04-arm'
+      run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DGGML_CPU_ARM_ARCH=armv8-a
 
     - name: Configure CMake (macOS)
       if: matrix.target_os == 'macos'
@@ -169,15 +173,23 @@ jobs:
         path: |
           build/${{ matrix.file_name }}
 
-    - name: Create Release
-      uses: softprops/action-gh-release@v2
-      if: startsWith(github.ref, 'refs/tags/')
-      with:
-        # Releases attach files raw, no zip wrapping — users get the actual
-        # `Wasteland-windows.exe` / `Wasteland-macos-arm64.dmg` / `*.deb`.
-        files: |
-          build/${{ matrix.file_name }}
-        draft: false
-        prerelease: false
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  release:
+    name: Create Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v5
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

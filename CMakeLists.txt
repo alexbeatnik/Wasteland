@@ -77,7 +77,7 @@ if(NOT MSVC)
     # blows up universal macOS builds (each arch slice needs its own ISA flag)
     # and silently degrades portability of cross-distro binaries on Linux.
     # Only keep it for single-arch dev builds where the user is the consumer.
-    if(NOT WASTELAND_UNIVERSAL_BUILD)
+    if(NOT WASTELAND_UNIVERSAL_BUILD AND "$ENV{CI}" STREQUAL "")
         target_compile_options(Wasteland PRIVATE -march=native)
     endif()
 else()
@@ -242,7 +242,7 @@ endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(CPACK_PACKAGE_NAME            "wasteland")
-    set(CPACK_PACKAGE_VERSION         "0.3.0")
+    set(CPACK_PACKAGE_VERSION         "0.3")
     set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
         "Offline-first amber-CRT LLM chat client built on llama.cpp")
     set(CPACK_PACKAGE_CONTACT         "Wasteland Maintainers")

@@ -119,16 +119,16 @@ GitHub Actions automatically builds and releases for all platforms on every tag:
 
 | Platform | Artifact |
 |----------|----------|
-| Linux x86\_64 (Ubuntu/Debian) | `wasteland_0.3.0_amd64.deb` — install with `sudo apt install ./wasteland_0.3.0_amd64.deb` |
-| Linux ARM64 (Raspberry Pi 5, Ampere, etc.) | `wasteland_0.3.0_arm64.deb` — install with `sudo apt install ./wasteland_0.3.0_arm64.deb` |
+| Linux x86\_64 (Ubuntu/Debian) | `wasteland_0.3_amd64.deb` — install with `sudo apt install ./wasteland_0.3_amd64.deb` |
+| Linux ARM64 (Raspberry Pi 5, Ampere, etc.) | `wasteland_0.3_arm64.deb` — install with `sudo apt install ./wasteland_0.3_arm64.deb` |
 | macOS (universal) | `Wasteland-macos.dmg` — one .app that runs natively on both Apple Silicon and Intel (deployment target 11.0+) |
 | Windows | `Wasteland-windows.exe` — single self-contained binary (SDL2/curl statically linked) |
 
 Push a tag to trigger a release:
 
 ```bash
-git tag v0.3.0
-git push origin v0.3.0
+git tag v0.3
+git push origin v0.3
 ```
 
 ## Running

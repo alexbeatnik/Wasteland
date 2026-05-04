@@ -30,7 +30,7 @@
             display: block;
             position: fixed;
             top: 0; left: 0; bottom: 0; right: 0;
-            background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.1) 50%), 
+            background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.1) 50%),
                         linear-gradient(90deg, rgba(255, 0, 0, 0.03), rgba(0, 255, 0, 0.01), rgba(0, 0, 255, 0.03));
             z-index: 100;
             background-size: 100% 3px, 3px 100%;
@@ -38,7 +38,7 @@
         }
 
         .terminal-container {
-            max-width: 900px;
+            max-width: 960px;
             margin: 0 auto;
             border: 2px solid var(--amber);
             padding: 30px;
@@ -58,6 +58,8 @@
             font-size: 1rem;
             text-transform: uppercase;
             margin-bottom: 5px;
+            flex-wrap: wrap;
+            gap: 10px;
         }
 
         h1 {
@@ -113,10 +115,38 @@
             font-size: 1.1rem;
         }
 
+        .platform-tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 10px;
+            flex-wrap: wrap;
+        }
+
+        .platform-tab {
+            border: 1px solid var(--amber-dim);
+            padding: 5px 15px;
+            cursor: pointer;
+            background: transparent;
+            color: var(--amber);
+            font-family: 'VT323', monospace;
+            font-size: 1.1rem;
+            text-transform: uppercase;
+        }
+
+        .platform-tab.active {
+            background: var(--amber);
+            color: var(--bg-color);
+            text-shadow: none;
+        }
+
+        .platform-content { display: none; }
+        .platform-content.active { display: block; }
+
         .btn-group {
             display: flex;
             gap: 15px;
             margin-top: 20px;
+            flex-wrap: wrap;
         }
 
         .btn {
@@ -148,8 +178,27 @@
             50% { opacity: 0; }
         }
 
+        ul { padding-left: 20px; }
+        li { margin-bottom: 8px; }
+
+        .dl-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+        }
+        .dl-table th, .dl-table td {
+            border: 1px solid var(--amber-dim);
+            padding: 8px 12px;
+            text-align: left;
+        }
+        .dl-table th {
+            background: rgba(255, 176, 0, 0.1);
+            text-transform: uppercase;
+        }
+
         @media (max-width: 600px) {
             .feature-grid { grid-template-columns: 1fr; }
+            .sys-info { flex-direction: column; }
         }
     </style>
 </head>
@@ -166,19 +215,35 @@
     </header>
 
     <section>
-        <p>A highly secure, offline LLM inference client built in pure C with a vintage PC-inspired amber-on-black CRT terminal aesthetic. It runs entirely offline once a model is loaded, using Linux seccomp to physically prevent the process from opening any new sockets for the rest of its lifetime.</p>
+        <p>A highly secure, offline-first LLM chat application with a retro-futuristic TUI-like graphical interface. Built in pure C11 with a vintage PC-inspired amber-on-black CRT terminal aesthetic. All inference happens locally via llama.cpp. Once a model is loaded, Linux seccomp physically prevents the process from opening any new IP socket for the rest of its lifetime.</p>
     </section>
 
     <section>
         <h3>--- CORE PROTOCOLS ---</h3>
         <div class="feature-grid">
             <div class="feature-item">
+                <strong>Offline-first</strong>
+                All inference happens locally via llama.cpp. No cloud, no telemetry.
+            </div>
+            <div class="feature-item">
+                <strong>Hard Network Lockdown</strong>
+                Linux seccomp kills the process if it opens a new AF_INET / AF_INET6 / AF_PACKET socket after load.
+            </div>
+            <div class="feature-item">
+                <strong>Retro UI</strong>
+                Amber (#FFB000) monochrome CRT terminal aesthetic via Nuklear; threaded 60 FPS UI with background inference.
+            </div>
+            <div class="feature-item">
+                <strong>Async Model Load</strong>
+                UI stays responsive during multi-second GGUF load; cancel in-flight downloads.
+            </div>
+            <div class="feature-item">
                 <strong>Smart Reasoning</strong>
-                Automatic detection of &lt;think&gt; blocks. The model's thought process is rendered in a separate dimmed box, keeping the final output clean.
+                Automatic &lt;think&gt; block detection with dimmed rendering; excluded from copy-to-clipboard.
             </div>
             <div class="feature-item">
                 <strong>Context Compaction</strong>
-                Drop the oldest turns, save the compacted history to disk, and mirror the result into the inference thread without reloading the model.
+                Drop oldest turns, save compacted history to disk, and mirror into inference without reload.
             </div>
             <div class="feature-item">
                 <strong>Agent Mode (ReAct)</strong>
@@ -193,7 +258,7 @@
 
     <section>
         <div class="think-block">
-            ▒ thinking: Analyzing environment... Seccomp filters active. AF_INET blocked. Local vault mounted. Ready for inference.
+            ▒ thinking: Analyzing environment... Seccomp filters active. AF_INET blocked. Local vault mounted. DejaVu Sans Mono embedded (Cyrillic + Geometric Shapes). Ready for inference.
         </div>
     </section>
 
@@ -201,20 +266,99 @@
         <h3>--- SYSTEM SPECS ---</h3>
         <ul>
             <li><strong>Core Engine:</strong> Pure C11 via llama.h</li>
-            <li><strong>Interface:</strong> Nuklear Immediate-Mode GUI (SDL2/OpenGL 2.1)</li>
+            <li><strong>Interface:</strong> Nuklear Immediate-Mode GUI (SDL2 / OpenGL 2.1)</li>
             <li><strong>Security:</strong> Linux seccomp-bpf (SCMP_ACT_KILL_PROCESS on new sockets)</li>
-            <li><strong>Networking:</strong> libcurl (download path only; strictly isolated)</li>
+            <li><strong>Networking:</strong> libcurl (download path only; strictly isolated in network.c)</li>
+            <li><strong>Font:</strong> Embedded DejaVu Sans Mono — no external font files needed</li>
+            <li><strong>Unicode:</strong> Basic Latin, Cyrillic (Ukrainian), Geometric Shapes (▶ ■)</li>
+            <li><strong>HiDPI:</strong> Auto-scales on Retina and Windows scaled displays</li>
         </ul>
     </section>
 
     <section>
         <h3>--- INITIALIZATION SEQUENCE ---</h3>
-        <div class="code-area">
-$ sudo pacman -S cmake sdl2 curl libseccomp
-$ git clone https://github.com/alexbeatnik/wasteland.git
-$ cd wasteland && git submodule update --init --recursive
-$ ./build.sh
-$ ./Wasteland</div>
+        <div class="platform-tabs">
+            <button class="platform-tab active" onclick="showPlatform('linux')">Linux</button>
+            <button class="platform-tab" onclick="showPlatform('macos')">macOS</button>
+            <button class="platform-tab" onclick="showPlatform('win-mingw')">Windows (MSYS2)</button>
+            <button class="platform-tab" onclick="showPlatform('win-msvc')">Windows (MSVC)</button>
+        </div>
+
+        <div id="linux" class="platform-content active">
+            <div class="code-area"># Debian / Ubuntu
+sudo apt install cmake libsdl2-dev libcurl4-openssl-dev libseccomp-dev
+
+# Arch
+sudo pacman -S cmake sdl2 curl libseccomp
+
+# Build
+git clone https://github.com/alexbeatnik/wasteland.git
+cd wasteland && git submodule update --init --recursive
+./build.sh
+./build/Wasteland</div>
+        </div>
+
+        <div id="macos" class="platform-content">
+            <div class="code-area">brew install cmake sdl2 curl
+git clone https://github.com/alexbeatnik/wasteland.git
+cd wasteland && git submodule update --init --recursive
+mkdir build && cd build
+cmake ..
+make -j$(sysctl -n hw.ncpu)
+./Wasteland</div>
+        </div>
+
+        <div id="win-mingw" class="platform-content">
+            <div class="code-area">pacman -S mingw-w64-x86_64-cmake mingw-w64-x86_64-SDL2 mingw-w64-x86_64-curl
+git clone https://github.com/alexbeatnik/wasteland.git
+cd wasteland && git submodule update --init --recursive
+mkdir build && cd build
+cmake .. -G "MinGW Makefiles"
+mingw32-make -j$(nproc)</div>
+        </div>
+
+        <div id="win-msvc" class="platform-content">
+            <div class="code-area">vcpkg install sdl2:x64-windows curl:x64-windows
+git clone https://github.com/alexbeatnik/wasteland.git
+cd wasteland && git submodule update --init --recursive
+mkdir build && cd build
+cmake .. -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake
+cmake --build . --config Release</div>
+        </div>
+    </section>
+
+    <section>
+        <h3>--- PREBUILT BINARIES ---</h3>
+        <p>GitHub Actions builds and releases for all platforms on every tag. Push a tag to trigger:</p>
+        <div class="code-area">git tag v0.3
+git push origin v0.3</div>
+        <table class="dl-table">
+            <thead>
+                <tr><th>Platform</th><th>Artifact</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>Linux x86_64</td><td>wasteland_0.3_amd64.deb</td></tr>
+                <tr><td>Linux ARM64</td><td>wasteland_0.3_arm64.deb</td></tr>
+                <tr><td>macOS (universal)</td><td>Wasteland-macos.dmg</td></tr>
+                <tr><td>Windows</td><td>Wasteland-windows.exe</td></tr>
+            </tbody>
+        </table>
+    </section>
+
+    <section>
+        <h3>--- SECURITY MODEL ---</h3>
+        <ol>
+            <li>App boots in offline-capable state with the network reachable so you can download models.</li>
+            <li>Nothing is loaded automatically. You pick a model via the UI.</li>
+            <li>When you click <strong>[ LOAD ]</strong> and the load succeeds, <code>lockdown_network()</code> runs:
+                <ul>
+                    <li><strong>Linux:</strong> seccomp-bpf filter kills the process on any new <code>socket(AF_INET, ...)</code>.</li>
+                    <li><strong>macOS / Windows:</strong> no-op (platform limitation).</li>
+                </ul>
+            </li>
+            <li>seccomp filters cannot be removed for the lifetime of the process. Unloading a model does not lift the lockdown — restart to download more models.</li>
+            <li>The download path is gated by <code>state-&gt;network_lockdown</code> in the UI, so the <strong>[ DOWNLOAD ]</strong> button hides the moment the lockdown is active.</li>
+        </ol>
     </section>
 
     <section>
@@ -225,6 +369,15 @@ $ ./Wasteland</div>
         </div>
     </section>
 </div>
+
+<script>
+function showPlatform(id) {
+    document.querySelectorAll('.platform-content').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.platform-tab').forEach(el => el.classList.remove('active'));
+    document.getElementById(id).classList.add('active');
+    event.target.classList.add('active');
+}
+</script>
 
 </body>
 </html>
