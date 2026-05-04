@@ -393,6 +393,20 @@ int main(int argc, char **argv)
         SDL_GetWindowSize(win, &lw, NULL);
         SDL_GL_GetDrawableSize(win, &dw, NULL);
         dpi_scale = (lw > 0 && dw > 0) ? (float)dw / (float)lw : 1.0f;
+
+        /* On Windows with per-monitor DPI awareness the drawable/logical
+         * ratio is sometimes 1.0 even though the display is scaled (SDL does
+         * not separate the two for OpenGL windows in every configuration).
+         * Fall back to the system-reported DPI so text stays readable. */
+        if (dpi_scale <= 1.01f) {
+            float ddpi = 96.0f;
+            int display = SDL_GetWindowDisplayIndex(win);
+            if (display < 0) display = 0;
+            if (SDL_GetDisplayDPI(display, &ddpi, NULL, NULL) == 0 && ddpi > 96.0f) {
+                dpi_scale = ddpi / 96.0f;
+            }
+        }
+
         if (dpi_scale < 1.0f) dpi_scale = 1.0f;
         if (dpi_scale > 4.0f) dpi_scale = 4.0f;
     }
