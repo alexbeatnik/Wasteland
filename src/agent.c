@@ -159,7 +159,7 @@ int agent_resolve_path(const char *workspace, const char *user_path,
     if (is_abs) {
         snprintf(joined, sizeof(joined), "%s", user_path);
     } else {
-        snprintf(joined, sizeof(joined), "%s/%s", ws, user_path);
+        snprintf(joined, sizeof(joined), "%s%c%s", ws, PATH_SEP, user_path);
     }
 
     /* Try to canonicalise the full path. If the file doesn't exist yet
@@ -187,7 +187,7 @@ int agent_resolve_path(const char *workspace, const char *user_path,
 
         char *parent = xrealpath(dirbuf[0] ? dirbuf : ".");
         if (!parent) { free(ws); return -1; }
-        snprintf(target, sizeof(target), "%s/%s", parent, base);
+        snprintf(target, sizeof(target), "%s%c%s", parent, PATH_SEP, base);
         free(parent);
     }
 

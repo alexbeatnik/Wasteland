@@ -134,21 +134,10 @@ static void platform_sleep_ms(int ms)
    Returns 0 on success, -1 on timeout. */
 static int platform_thread_join_timeout(pthread_t thread, int timeout_ms)
 {
-#ifdef __linux__
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    ts.tv_sec += timeout_ms / 1000;
-    ts.tv_nsec += (timeout_ms % 1000) * 1000000L;
-    if (ts.tv_nsec >= 1000000000L) {
-        ts.tv_sec++;
-        ts.tv_nsec -= 1000000000L;
-    }
-    int rc = pthread_timedjoin_np(thread, NULL, &ts);
-    return (rc == 0) ? 0 : -1;
-#else
-    /* macOS / Windows / others: poll with short sleeps */
+    /* Use polling with pthread_kill for portability across glibc, musl,
+     * macOS, and Windows. pthread_timedjoin_np is glibc-specific and
+     * breaks on Alpine/musl. */
     for (int waited = 0; waited < timeout_ms; waited += 100) {
-        /* pthread_kill(t,0) returns 0 if alive, ESRCH if dead */
         if (pthread_kill(thread, 0) == ESRCH) {
             pthread_join(thread, NULL); /* reap it */
             return 0;
@@ -156,7 +145,6 @@ static int platform_thread_join_timeout(pthread_t thread, int timeout_ms)
         platform_sleep_ms(100);
     }
     return -1;
-#endif
 }
 
 /* ---------------------------------------------------------------------------
@@ -263,8 +251,15 @@ static void platform_pick_data_dir(char *out, size_t out_size)
         return;
     }
 #endif
-    /* Last resort: tmp. Better than aborting. */
+    /* Last resort: temp dir. Better than aborting. */
+#ifdef _WIN32
+    const char *tmp = getenv("TEMP");
+    if (!tmp || !*tmp) tmp = getenv("TMP");
+    if (!tmp || !*tmp) tmp = "C:\\Windows\\Temp";
+    snprintf(out, out_size, "%s\\wasteland", tmp);
+#else
     snprintf(out, out_size, "/tmp/wasteland");
+#endif
     ensure_dir(out);
 }
 
@@ -732,7 +727,9 @@ int main(int argc, char **argv)
 
     /* ---- Background update check (before lockdown, so curl can open sockets) ---- */
     pthread_t update_thread;
-    pthread_create(&update_thread, NULL, update_check_thread, &state);
+    if (pthread_create(&update_thread, NULL, update_check_thread, &state) == 0) {
+        pthread_detach(update_thread);
+    }
 
     /* ---- Spawn inference worker thread ---- */
     pthread_t worker_thread;

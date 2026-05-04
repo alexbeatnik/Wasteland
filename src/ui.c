@@ -108,8 +108,8 @@ int scan_local_chats(char chats_list[][WASTELAND_CHAT_NAME_LEN], int max_chats)
 {
     int count = 0;
 #ifdef _WIN32
-    WIN32_FIND_DATA fd;
-    HANDLE hFind = FindFirstFile("chats\\*.txt", &fd);
+    WIN32_FIND_DATAA fd;
+    HANDLE hFind = FindFirstFileA("chats\\*.txt", &fd);
     if (hFind == INVALID_HANDLE_VALUE) return 0;
     do {
         if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
@@ -118,7 +118,7 @@ int scan_local_chats(char chats_list[][WASTELAND_CHAT_NAME_LEN], int max_chats)
                      "%s", fd.cFileName);
             count++;
         }
-    } while (FindNextFile(hFind, &fd) != 0);
+    } while (FindNextFileA(hFind, &fd) != 0);
     FindClose(hFind);
 #else
     DIR *d = opendir("chats");
@@ -164,6 +164,13 @@ static void rc4_crypt_buffer(unsigned char *data, size_t len)
         unsigned char tmp = s[i]; s[i] = s[j]; s[j] = tmp;
     }
     i = j = 0;
+    /* RC4-drop256: discard the first 256 keystream bytes to mitigate
+     * known biases in the initial output of the RC4 PRGA. */
+    for (int drop = 0; drop < 256; drop++) {
+        i = (i + 1) & 255;
+        j = (j + s[i]) & 255;
+        unsigned char tmp = s[i]; s[i] = s[j]; s[j] = tmp;
+    }
     for (size_t k = 0; k < len; k++) {
         i = (i + 1) & 255;
         j = (j + s[i]) & 255;
@@ -777,8 +784,10 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                 if (nk_button_label(nk, "[ DOWNLOAD UPDATE ]")) {
                     extern void* update_download_thread(void *);
                     pthread_t dl;
-                    pthread_create(&dl, NULL,
-                                   update_download_thread, state);
+                    if (pthread_create(&dl, NULL,
+                                       update_download_thread, state) == 0) {
+                        pthread_detach(dl);
+                    }
                 }
             } else if (state->update_state == 2) {
                 nk_layout_row_dynamic(nk, 18, 1);
@@ -1619,16 +1628,10 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                 if (send && state->input_buffer[0] &&
                     inference_is_model_loaded(state->inference))
                 {
-                    /* Pre-send compact if context is near full. The user's
-                     * new prompt is appended below and ui_set_chat_history()
-                     * mirrors the result into inference, so we only need the
-                     * lock + stats refresh here — no separate push/save. */
+                    /* Pre-send compact if context is near full. */
                     if (state->context_max > 0 &&
                         state->context_tokens > (int)(state->context_max * 0.75f)) {
-                        pthread_mutex_lock(&state->chat_mutex);
-                        compact_chat_history(state, 1);
-                        pthread_mutex_unlock(&state->chat_mutex);
-                        ui_update_context_stats(state);
+                        ui_compact_chat_history(state, 1);
                     }
 
                     /* Auto-create chat if none active */

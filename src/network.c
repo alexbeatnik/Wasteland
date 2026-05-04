@@ -355,7 +355,7 @@ int lockdown_network(void)
         return -1;
     }
 
-    printf("[seccomp] Network lockdown active. "
+    fprintf(stderr, "[seccomp] Network lockdown active. "
            "New AF_INET/AF_INET6/AF_PACKET sockets will SIGKILL.\n");
     return 0;
 #else

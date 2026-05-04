@@ -912,9 +912,9 @@ static int run_one_turn(inference_ctx_t *ictx,
     llama_memory_clear(llama_get_memory(ctx), true);
 
     const struct llama_vocab *vocab = llama_model_get_vocab(model);
-    static llama_token prompt_tokens[8192];
+    static llama_token prompt_tokens[32768];
     int n_tokens = llama_tokenize(vocab, fmtd, fl,
-                                  prompt_tokens, 8192,
+                                  prompt_tokens, (int)(sizeof(prompt_tokens) / sizeof(prompt_tokens[0])),
                                   true, true);
     if (n_tokens <= 0) {
         fprintf(stderr, "[inference] Tokenisation failed (n=%d, fl=%d)\n",
@@ -1238,20 +1238,21 @@ void* inference_worker_thread(void *arg)
 
             /* ---- Generate chat title from model ---- */
             if (ictx->needs_title) {
-                struct llama_chat_message tmsgs[3];
+                struct llama_chat_message tmsgs[2];
+                static char title_prompt[MAX_PROMPT_LEN + 256];
 
                 tmsgs[0].role    = "system";
                 tmsgs[0].content = "You are a helpful assistant. Generate very short chat titles. Reply with ONLY the title text, no quotes, no markdown, no punctuation.";
 
+                snprintf(title_prompt, sizeof(title_prompt),
+                         "Give this conversation a short 3-5 word title based on the following user message. Output ONLY the title text, nothing else.\n\nUser: %s",
+                         prompt);
                 tmsgs[1].role    = "user";
-                tmsgs[1].content = prompt;
-
-                tmsgs[2].role    = "user";
-                tmsgs[2].content = "Give this conversation a short 3-5 word title. Output ONLY the title text, nothing else.";
+                tmsgs[1].content = title_prompt;
 
                 ictx->title_mode = 1;
                 ictx->title_len  = 0;
-                run_one_turn(ictx, model, ctx, tmsgs, 3, NULL, 0, 20);
+                run_one_turn(ictx, model, ctx, tmsgs, 2, NULL, 0, 20);
                 ictx->title_mode = 0;
 
                 /* Clean up the title: strip newlines, quotes, markdown */
