@@ -178,7 +178,7 @@ Wasteland/
 
 ### Left Panel
 
-- **Hub Models** — 4 predefined HuggingFace repos with radio buttons (small, real, public instruction-tuned GGUFs — Qwen 2.5 0.5B/1.5B, Gemma 3 1B IT, SmolLM2 1.7B Instruct)
+- **Hub Models** — 5 predefined HuggingFace repos with radio buttons (small, real, public instruction-tuned GGUFs — Qwen 2.5 0.5B/1.5B, Gemma 3 1B IT, SmolLM2 1.7B Instruct, Qwen3.6 35B A3B)
 - **Custom ID or URL** — Enter any HF repo ID or full `/blob/main/` URL (the downloader auto-rewrites `/blob/main/` → `/resolve/main/`)
 - **Target** — Shows resolved download target before clicking `[ DOWNLOAD ]`
 - **Progress** — Filename + percent during download, with `[ CANCEL ]` button

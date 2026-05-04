@@ -33,7 +33,8 @@ static const char *hub_models[WASTELAND_MAX_HUB_MODELS] = {
     "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
     "ggml-org/gemma-3-1b-it-GGUF",
     "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
-    "ggml-org/SmolLM2-1.7B-Instruct-GGUF"
+    "ggml-org/SmolLM2-1.7B-Instruct-GGUF",
+    "unsloth/Qwen3.6-35B-A3B-GGUF"
 };
 
 /* ---------------------------------------------------------------------------

@@ -40,7 +40,7 @@ Anything that can take >100 ms must not run on the UI thread. The UI thread is t
 - Download code lives only in `network.c`. Do not duplicate libcurl logic elsewhere.
 - On non-Linux platforms, `lockdown_network()` is a no-op — do not add fake implementations.
 - The UI hides the entire HUB MODELS section while `state->network_lockdown` is true.
-- The `hub_models[]` array must contain real, public, reachable HF GGUF repos — fictional IDs fail at HF API resolution time with HTTP 404. When adding a new entry, click DOWNLOAD on it once before merging.
+- The `hub_models[]` array must contain real, public, reachable HF GGUF repos — fictional IDs fail at HF API resolution time with HTTP 404. When adding a new entry, click DOWNLOAD on it once before merging. Current set: `Qwen/Qwen2.5-0.5B-Instruct-GGUF`, `ggml-org/gemma-3-1b-it-GGUF`, `Qwen/Qwen2.5-1.5B-Instruct-GGUF`, `ggml-org/SmolLM2-1.7B-Instruct-GGUF`, `unsloth/Qwen3.6-35B-A3B-GGUF`.
 - The `/blob/main/` → `/resolve/main/` URL rewrite in `network_download_model` must `memmove` the tail right by 3 bytes **before** the `memcpy` overwrite — the obvious order corrupts the first 3 bytes of the filename.
 
 ## UI Rules
