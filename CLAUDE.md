@@ -1,4 +1,4 @@
-# CLAUDE.md — Wasteland v0.3
+# CLAUDE.md — Wasteland v0.4
 
 ## Agent Context
 
@@ -18,6 +18,7 @@ This file provides context for AI coding assistants working on the Wasteland pro
   6. Streams each piece through `emit_filtered_piece()` which converts `<think>` / `</think>` literals to `\n-- THINK --\n` / `\n-- END THINK --\n` markers (with a 7-byte carry buffer to handle tags split across token boundaries).
 - **Async Load Thread:** Joinable, one-shot per click. Spawned by `inference_load_model_async()`. Calls the synchronous `inference_load_model()` (which can block for seconds on multi-GB GGUFs), reads `pending_n_ctx` from `settings_mutex` to set `cparams.n_ctx` and `cparams.n_batch`, then publishes a result via `volatile int load_result`. The UI polls `inference_is_loading()` each frame and consumes the result with `inference_take_load_result()`.
 - **Download Thread:** Detached pthread spawned per click. Runs libcurl. Writes `download_progress` / `download_active` / `download_complete_flag` for the main thread to observe.
+- **Update Check Thread:** Detached pthread spawned once at startup (before any model load / seccomp lockdown). Calls `network_check_update()` to query GitHub Releases API; if a newer version exists, writes `update_version` into `app_state_t` so the UI can display an orange banner.
 
 ### State Sharing
 
@@ -165,8 +166,9 @@ Pure greedy is not used — it causes repetition loops on small models.
 - `scan_local_models()` — `FindFirstFileA` on Windows, `dirent` on POSIX.
 - `lockdown_network()` — Linux seccomp only; no-op on macOS / Windows.
 - Compiler flags:
-  - GCC/Clang: `-O3 -march=native -Wall -Wextra`
+  - GCC/Clang: `-O3 -Wall -Wextra`; `-march=native` is **only** added for local dev builds (`$CI` env var unset) because it produces binaries that crash with `Illegal instruction` on ARM64 devices when built on a server-class CI runner.
   - MSVC: `/O2 /W4`
+- **CI ARM64 builds:** GitHub Actions `ubuntu-22.04-arm` runner passes `-DGGML_NATIVE=OFF -DGGML_CPU_ARM_ARCH=armv8-a` to CMake so the resulting `.deb` runs on Raspberry Pi / ClockworkPi and other baseline ARMv8-A devices.
 
 ## Hub Models & URL Rewrite
 
@@ -181,6 +183,20 @@ The Linux lockdown is **deliberately narrow**: only `socket(AF_INET, …)`, `soc
 2. Gating `socket()` is sufficient: no new IP fd can be opened.
 3. Already-open file descriptors keep working unchanged.
 
+## Auto-Generated Chat Titles
+
+When the user sends the first message in a newly-created chat, the UI sets `inference_set_needs_title(ictx, 1)`. After the normal assistant reply finishes, the worker runs a short secondary inference pass (max 20 tokens) with a dedicated title-generation prompt:
+
+```
+System: Generate very short chat titles. Reply with ONLY the title text...
+User: [original prompt]
+User: Give this conversation a short 3-5 word title. Output ONLY the title text, nothing else.
+```
+
+- `title_mode` flag in `inference_ctx_t` redirects token output from `output_buffer` to `title_buffer` so the title never appears in chat.
+- The title is stripped of newlines, quotes, markdown, and `<>` characters.
+- The UI polls `inference_take_title()` each frame after generation ends; when ready, it renames the chat file (`chats/*.txt`) and updates the label in the left panel.
+
 ## Agent Mode — History & Tool Output
 
 - **Multi-turn history in agent mode:** the worker now calls `parse_chat_history` in the agent branch too, capped at `AGENT_HISTORY_SLOTS = 8` messages (4 turns) to leave room for tool-call turns. `AGENT_MAX_MSGS = 30` (was 23).
@@ -189,8 +205,10 @@ The Linux lockdown is **deliberately narrow**: only `socket(AF_INET, …)`, `soc
 ## Font & DPI
 
 - **Embedded font:** `src/font_dejavu.h` is a generated C byte array of DejaVu Sans Mono (343 KB). It is always available — no file-system lookup required. Covers Basic Latin, Cyrillic (Ukrainian U+0400–U+04FF), and Geometric Shapes (▶ ■ U+25A0–U+25FF).
-- **Loading order in `nk_sdl_init(win, font_size)`:** (1) embedded data via `nk_font_atlas_add_from_memory`, (2) system TTF paths from `nk_sdl_font_candidates[]`, (3) built-in Proggy Clean (ASCII-only last resort).
+- **Loading order in `nk_sdl_init(win, font_size)`:** (1) embedded data via `nk_font_atlas_add_from_memory` (using `sizeof(wst_dejavu_ttf)` to guarantee correctness), (2) system TTF paths from `nk_sdl_font_candidates[]` (including `/System/Library/Fonts/Menlo.ttc` on macOS), (3) built-in Proggy Clean (ASCII-only last resort).
+- **Bake failure retry:** If `nk_font_atlas_bake` returns NULL (usually because 2×2 oversampling produces an atlas too large for the GPU on HiDPI), the atlas is cleared and retried with `oversample_h = oversample_v = 1`. This fixes missing Cyrillic / Geometric Shapes glyphs on Windows/macOS HiDPI.
 - **DPI scaling:** `main.c` computes `dpi_scale = SDL_GL_GetDrawableSize / SDL_GetWindowSize` after window creation. The font is baked at `15.0f * dpi_scale` so text appears the same logical size on standard (1×), Retina/HiDPI (2×), and Windows-scaled (1.25×–2×) displays. Scale is clamped to [1, 4].
+- **Windows DPI fallback:** On Windows with per-monitor DPI awareness, `SDL_GL_GetDrawableSize` sometimes returns the same value as `SDL_GetWindowSize` even when scaling is active. If the computed ratio is ≤ 1.01, we fall back to `SDL_GetDisplayDPI / 96.0f` to ensure readable text.
 - **`memmem` on Windows:** MSVC does not provide `memmem`. A `static` fallback is defined inside `#ifdef _WIN32` in `agent.c`, placed before any call site. No forward declaration — a prior implicit `int ()` declaration from MSVC would conflict and trigger C2040.
 
 ## Build Notes
@@ -201,7 +219,7 @@ The Linux lockdown is **deliberately narrow**: only `socket(AF_INET, …)`, `soc
 - llama.cpp lives in `third_party/llama.cpp/` (with a `vendor/llama.cpp` symlink) and is added as a CMake subdirectory with `LLAMA_BUILD_EXAMPLES=OFF`.
 - `seccomp` is optional (Linux only); CMake skips it gracefully on other platforms.
 - The application does **not** auto-load any model on boot.
-- Package version: **0.3** (`CPACK_PACKAGE_VERSION` in `CMakeLists.txt`).
+- Package version: **0.4** (`CPACK_PACKAGE_VERSION` in `CMakeLists.txt`).
 - MSVC: `nuklear_impl.c` is compiled with `/wd4701`; `ui.c` with `/wd5287`; `_CRT_SECURE_NO_WARNINGS` applied globally for MSVC builds.
 - Linux `.deb` architecture is detected at CMake configure time from `CMAKE_SYSTEM_PROCESSOR` (`x86_64` → `amd64`, `aarch64` → `arm64`). CI builds both via `ubuntu-22.04` and `ubuntu-22.04-arm` runners.
 

@@ -743,8 +743,19 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
     {
         /* ========================= HEADER ========================= */
         nk_layout_row_dynamic(nk, 30, 1);
-        nk_label_colored(nk, "WASTELAND TERMINAL v0.3",
-                         NK_TEXT_CENTERED, amber);
+        {
+            char hdr[64];
+            snprintf(hdr, sizeof(hdr), "WASTELAND TERMINAL v%s",
+                     WASTELAND_VERSION);
+            nk_label_colored(nk, hdr, NK_TEXT_CENTERED, amber);
+        }
+
+        if (state->update_version[0]) {
+            nk_layout_row_dynamic(nk, 18, 1);
+            struct nk_color warn = nk_rgb(0xFF, 0x60, 0x20);
+            nk_label_colored(nk, state->update_version,
+                             NK_TEXT_CENTERED, warn);
+        }
 
         /* Status row: [toggle] | SYS | status | NET
          * \xc2\xab = U+00AB << (collapse)  \xc2\xbb = U+00BB >> (expand) */

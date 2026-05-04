@@ -303,6 +303,22 @@ static void ensure_models_dir(void)
 /* scan_local_models() is now defined in ui.c and declared in ui.h */
 
 /* ---------------------------------------------------------------------------
+ * Background update check thread
+ * --------------------------------------------------------------------------- */
+static void* update_check_thread(void *arg)
+{
+    app_state_t *st = (app_state_t *)arg;
+    char latest[32] = {0};
+    if (network_check_update(latest, sizeof(latest)) == 0) {
+        if (strcmp(latest, WASTELAND_VERSION) != 0) {
+            snprintf(st->update_version, sizeof(st->update_version),
+                     "Update available: v%s", latest);
+        }
+    }
+    return NULL;
+}
+
+/* ---------------------------------------------------------------------------
  * main()
  * --------------------------------------------------------------------------- */
 int main(int argc, char **argv)
@@ -450,6 +466,7 @@ int main(int argc, char **argv)
     state.settings_n_ctx       = 4096;
     state.settings_temperature = 0.8f;
     strncpy(state.status_msg, status_msg, sizeof(state.status_msg) - 1);
+    state.update_version[0]    = '\0';
 
     /* Load system prompt */
     state.system_prompt[0] = '\0';
@@ -516,6 +533,10 @@ int main(int argc, char **argv)
         snprintf(state.status_msg, sizeof(state.status_msg),
                  "No models found. Place .gguf files in ./models/ or download.");
     }
+
+    /* ---- Background update check (before lockdown, so curl can open sockets) ---- */
+    pthread_t update_thread;
+    pthread_create(&update_thread, NULL, update_check_thread, &state);
 
     /* ---- Spawn inference worker thread ---- */
     pthread_t worker_thread;

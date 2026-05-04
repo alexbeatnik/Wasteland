@@ -248,6 +248,72 @@ int network_download_model(const char *model_id, const char *output_dir,
 }
 
 /* ---------------------------------------------------------------------------
+ * network_check_update
+ * --------------------------------------------------------------------------- */
+int network_check_update(char *out_version, size_t out_size)
+{
+    if (!out_version || out_size == 0) return -1;
+    out_version[0] = '\0';
+
+    CURL *curl = curl_easy_init();
+    if (!curl) return -1;
+
+    mem_buf_t buf = { malloc(4096), 0, 4096 };
+    if (!buf.data) { curl_easy_cleanup(curl); return -1; }
+
+    curl_easy_setopt(curl, CURLOPT_URL,
+        "https://api.github.com/repos/alexbeatnik/wasteland/releases/latest");
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, mem_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "Wasteland-AutoUpdate/1.0");
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
+    curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
+
+    CURLcode res = curl_easy_perform(curl);
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_easy_cleanup(curl);
+
+    if (res != CURLE_OK || http_code != 200) {
+        fprintf(stderr, "[update] GitHub API error: %s (HTTP %ld)\n",
+                curl_easy_strerror(res), http_code);
+        free(buf.data);
+        return -1;
+    }
+
+    /* Simple text scan: look for "tag_name":"vX.Y" in JSON */
+    char *p = strstr(buf.data, "\"tag_name\":\"");
+    if (!p) {
+        fprintf(stderr, "[update] No tag_name in GitHub response\n");
+        free(buf.data);
+        return -1;
+    }
+    p += 12; /* skip past "tag_name":" */
+    char *end = strchr(p, '"');
+    if (!end) {
+        free(buf.data);
+        return -1;
+    }
+
+    /* Strip leading 'v' if present */
+    if (*p == 'v' || *p == 'V') p++;
+
+    size_t len = (size_t)(end - p);
+    if (len == 0 || len >= out_size) {
+        free(buf.data);
+        return -1;
+    }
+    memcpy(out_version, p, len);
+    out_version[len] = '\0';
+
+    fprintf(stderr, "[update] Latest release: %s\n", out_version);
+    free(buf.data);
+    return 0;
+}
+
+/* ---------------------------------------------------------------------------
  * seccomp network lockdown (Linux only)
  * --------------------------------------------------------------------------- */
 int lockdown_network(void)

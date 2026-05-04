@@ -1,6 +1,8 @@
 #ifndef WASTELAND_NETWORK_H
 #define WASTELAND_NETWORK_H
 
+#include <stddef.h>
+
 /* ---------------------------------------------------------------------------
  * Wasteland Network & Security Module
  *
@@ -22,6 +24,16 @@ int network_download_model(const char *model_id, const char *output_dir,
                            volatile int *progress,
                            volatile int *active,
                            volatile int *cancel);
+
+/**
+ * @brief Query GitHub for the latest release tag.
+ *
+ * @param out_version Buffer to receive the latest version string (e.g. "0.4").
+ *                    The leading 'v' from the Git tag is stripped.
+ * @param out_size    Size of out_version buffer.
+ * @return 0 on success, -1 on failure or no release found.
+ */
+int network_check_update(char *out_version, size_t out_size);
 
 /**
  * @brief Install a seccomp filter that kills the process if it ever attempts

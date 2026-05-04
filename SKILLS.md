@@ -1,4 +1,4 @@
-# SKILLS.md — Wasteland v0.3
+# SKILLS.md — Wasteland v0.4
 
 ## Available Skills
 
@@ -34,6 +34,8 @@ This project does not use a formal skill system. The following domains are relev
 - Word wrap with measured row heights using the active font's `width()` callback (`wrap_text_into()`).
 - **Embedded font pattern:** `xxd -i font.ttf | sed 's/.../static const unsigned char name[]/' > src/font.h` bakes a TTF into a C byte array. Use `nk_font_atlas_add_from_memory(atlas, data, len, size, cfg)` to load it — no file path required, works identically on Linux/macOS/Windows.
 - **DPI-aware font scaling:** after window creation, compute `dpi_scale = SDL_GL_GetDrawableSize(w) / SDL_GetWindowSize(w)`. Multiply base font size (15 px) by this ratio and pass to the font-baking call. On macOS Retina (2×) and Windows HiDPI (1.25–2×) this prevents text from appearing physically tiny.
+- **Windows DPI fallback:** when `SDL_GL_GetDrawableSize` returns the same value as `SDL_GetWindowSize` (observed on some Windows configs with per-monitor DPI awareness), fall back to `SDL_GetDisplayDPI / 96.0f` so text stays readable at 125–200 % scaling.
+- **Font bake retry:** if `nk_font_atlas_bake` fails (usually because 2×2 oversampling produces a texture too large for the GPU at high DPI), clear the atlas and retry with 1×1 oversampling. This is the canonical fix for missing Cyrillic / Geometric Shapes on HiDPI displays.
 - Custom rendering of TTF fonts (`DejaVuSansMono`) mapped with specific Unicode ranges (e.g. Cyrillic `0x0400-0x04FF`).
 - SDL2 windowing and event handling.
 - OpenGL 2.1 fixed-function pipeline.
@@ -57,6 +59,7 @@ This project does not use a formal skill system. The following domains are relev
 - **Parser invariant:** `parse_chat_history()` discards a trailing user message that has no assistant reply — this is the current prompt, supplied separately by the caller. Failing to do this causes the user turn to appear twice in the message list, which confuses the chat template.
 - **Compact pipeline:** `ui_compact_chat_history(state, n)` is the only correct call site. It locks `chat_mutex`, compacts, unlocks, syncs to inference, saves chat to disk, updates CTX stats, and writes a status message. Direct calls to `compact_chat_history()` from button handlers bypass the sync and persistence steps.
 - **Context stats:** compute using `parse_chat_history` + `llama_chat_apply_template` + `llama_tokenize` (probe mode). Call after every generation finish and after every compact. Display as `CTX: used / max (pct%)` with colour-coded progress bar (orange > 75 %, red > 90 %).
+- **Auto-generated chat titles:** after the first assistant reply in a newly-created chat, run a short secondary inference pass (max ~20 tokens) with a dedicated title-generation prompt. Use a `title_mode` flag to redirect output into a separate `title_buffer` so the title never appears in chat. Sanitise the result (strip newlines, quotes, markdown, `<>`) and rename the chat file on disk. The UI polls `inference_take_title()` each frame after generation ends.
 
 ### Stream Processing & Data Persistence
 
@@ -76,6 +79,8 @@ This project does not use a formal skill system. The following domains are relev
 - libcurl easy API for `.gguf` downloads with progress callbacks.
 - HuggingFace API discovery (`/api/models/.../tree/main`) to resolve a repo to a concrete file URL.
 - HF URL rewriting: `/blob/main/<file>` → `/resolve/main/<file>`. The replacement is `+3` bytes, so you must `memmove` the tail right by 3 *before* the `memcpy` overwrite.
+- **GitHub Releases API:** `api.github.com/repos/{owner}/{repo}/releases/latest` returns JSON with `tag_name`. Parse via simple text scan (`strstr(..., "\"tag_name\":\"v")`) rather than pulling in a JSON library. Strip the leading `v` to get the semver string.
+- **Auto-update thread pattern:** spawn a detached pthread at startup (before any network lockdown) with a 5-second curl timeout. Write the result into a `char update_version[32]` field; the UI polls it every frame and renders an orange banner if non-empty.
 - Linux seccomp-bpf with **argument filtering** (`SCMP_A0(SCMP_CMP_EQ, AF_INET)`) — narrow rules that gate `socket()` creation by address family, leaving X11 / Wayland Unix-domain traffic untouched.
 - Why pointer-deref filtering (sockaddr family on `connect`/`bind`) is impossible in seccomp and what to do instead (gate at `socket()`).
 - Cross-platform security model: features degrade gracefully on macOS / Windows.
@@ -95,7 +100,8 @@ This project does not use a formal skill system. The following domains are relev
 - MinGW cross-compilation from Linux toolchain files.
 - **Per-file MSVC warning suppression:** use `set_source_files_properties(file.c PROPERTIES COMPILE_OPTIONS "/wd<N>")` to suppress a warning from a third-party header included only in that translation unit. Avoids masking the same warning in application code.
 - **Dynamic `.deb` architecture:** map `CMAKE_SYSTEM_PROCESSOR` to Debian arch names (`x86_64`→`amd64`, `aarch64`→`arm64`) at configure time so the same `CMakeLists.txt` produces correctly-named packages on both amd64 and ARM64 CI runners without manual overrides.
+- **GitHub Actions release pipeline:** matrix builds for `ubuntu-22.04`, `ubuntu-22.04-arm`, `macos-14`, `windows-latest`. A separate `release` job (depending on all builds) downloads all artifacts and creates a single GitHub Release with `softprops/action-gh-release@v2`. Tags are created via a separate `workflow_dispatch` workflow (`tag.yml`).
 
 ## Version
 
-Current version: **0.3**
+Current version: **0.4**

@@ -242,7 +242,7 @@ endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(CPACK_PACKAGE_NAME            "wasteland")
-    set(CPACK_PACKAGE_VERSION         "0.3")
+    set(CPACK_PACKAGE_VERSION         "0.4")
     set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
         "Offline-first amber-CRT LLM chat client built on llama.cpp")
     set(CPACK_PACKAGE_CONTACT         "Wasteland Maintainers")

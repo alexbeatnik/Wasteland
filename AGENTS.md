@@ -1,4 +1,4 @@
-# AGENTS.md — Wasteland v0.3
+# AGENTS.md — Wasteland v0.4
 
 ## Agent Instructions
 
@@ -31,6 +31,7 @@ Anything that can take >100 ms must not run on the UI thread. The UI thread is t
 - **Model load:** use `inference_load_model_async()` and poll `inference_is_loading()` from `ui_render`. The synchronous `inference_load_model()` is only safe before the SDL window exists.
 - **Token generation:** the worker thread already runs in the background. The per-token loop polls `ictx->cancel_generation` so a `STOP` click breaks out within one token.
 - **Download:** existing detached pthread pattern; communicate progress via `volatile int state->download_*`. The UI claims `download_active = 1` before `pthread_create` to avoid the double-click race.
+- **Update check:** a detached pthread queries the GitHub Releases API at startup (before seccomp lockdown). Result is written to `state->update_version`; UI shows an orange banner if non-empty. Timeout is 5 s so a slow connection never blocks the window.
 - **Shutdown:** `inference_request_stop()` (defined in `inference.c`) is the canonical way to wake the worker for exit. Do **not** abuse `inference_submit_prompt(ictx, "", "")` for this — with a model loaded the chat template still emits non-empty tokens and the worker burns a generation cycle on the way out.
 
 ## Security Rules
@@ -128,6 +129,9 @@ Before declaring a task complete:
 12. Cyrillic text (Ukrainian) must render correctly — the font covers U+0400–U+04FF via the embedded DejaVu Sans Mono array in `src/font_dejavu.h`.
 13. ▶ and ■ buttons must render (not show `?`) — these are in Geometric Shapes U+25A0–U+25FF, also covered by the embedded font.
 14. On a HiDPI display (or Windows at 125%/150% scaling) text must not be tiny — the font is scaled by `SDL_GL_GetDrawableSize / SDL_GetWindowSize`.
+15. Auto-update banner must appear when `state->update_version` is non-empty (can be tested by temporarily hardcoding a different version string).
+16. A new chat's file must be renamed by the model-generated title after the first assistant reply completes (check `chats/` directory).
+17. ARM64 `.deb` built in CI must run on Raspberry Pi 4/5 without `Illegal instruction`.
 
 ## Font & DPI Rules
 
@@ -138,4 +142,4 @@ Before declaring a task complete:
 
 ## Version
 
-Current version: **0.3**
+Current version: **0.4**

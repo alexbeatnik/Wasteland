@@ -1,4 +1,4 @@
-# Wasteland Terminal v0.3
+# Wasteland Terminal v0.4
 
 ![Wasteland Terminal](assets/icon-512.png)
 
@@ -22,13 +22,14 @@ Wasteland is a local LLM inference client built in pure C with a vintage PC-insp
 - **Context management** — CTX bar shows live token usage. `[ COMPACT ]` drops the oldest turn, saves the compacted history to disk, and mirrors the result into the inference thread immediately. Auto-compact triggers when usage exceeds 80 % after a generation
 - **Configurable inference settings** — N\_CTX (512–262 144) and Temperature (0.10–2.00) are adjustable from the left panel and persist across sessions; N\_CTX takes effect on the next model load, Temperature applies from the next prompt
 - **Repetition-penalty sampler** — Replaces the old greedy sampler with a stacked penalties → top\_k → top\_p → temperature → distribution chain that prevents small models from looping into repeated paragraphs
-- **Multiple Chats** — Create, load, and switch between named chat sessions; auto-named from the first user message; persisted to `chats/*.txt` with simple RC4 obfuscation
+- **Multiple Chats** — Create, load, and switch between named chat sessions; auto-named from the first user message and then refined by the model into a contextual 3–5 word title; persisted to `chats/*.txt` with simple RC4 obfuscation
 - **Built-in behaviour rules** — A base system prompt is always active: instructs the model to output plain text (no markdown), be concise, match the user's language, and understand it is running offline. The user-configurable system prompt is appended on top
 - **System Prompt** — Configure and persist an additional system prompt to further guide model behaviour (`system_prompt.txt`)
 - **Smart Reasoning** — `<think>` reasoning blocks are displayed dimmed in the UI (with a "▒ thinking" label) and automatically excluded from the `◈` copy-to-clipboard text; each turn is rendered in its own box so user prompts never appear inside assistant reply blocks; false-positive detection (e.g. `` `<think>` `` in prose) is suppressed via line-start guard
 - **Auto-scroll + word wrap** — Chat pins to the bottom and wraps long lines to the panel width
 - **Download Progress** — Real-time progress bar with filename, percent, and **cancel** support
 - **Fast close** — Clicking X hides the window instantly, signals the worker via `inference_request_stop()`, joins with a 1.5 s timeout, and falls back to `_Exit` if the worker is still mid-decode
+- **Auto-update check** — On startup the app queries GitHub Releases in the background; if a newer version exists, an orange banner appears under the header with the available version
 - **Unicode & HiDPI** — DejaVu Sans Mono is embedded in the binary (no external font files needed); covers Basic Latin, Cyrillic (Ukrainian), and Geometric Shapes (▶ ■). Font scales automatically with display DPI so text is never tiny on Retina or Windows HiDPI displays
 - **Cross-Platform** — Linux, macOS, Windows (MinGW/MSVC)
 
@@ -119,16 +120,16 @@ GitHub Actions automatically builds and releases for all platforms on every tag:
 
 | Platform | Artifact |
 |----------|----------|
-| Linux x86\_64 (Ubuntu/Debian) | `wasteland_0.3_amd64.deb` — install with `sudo apt install ./wasteland_0.3_amd64.deb` |
-| Linux ARM64 (Raspberry Pi 5, Ampere, etc.) | `wasteland_0.3_arm64.deb` — install with `sudo apt install ./wasteland_0.3_arm64.deb` |
+| Linux x86\_64 (Ubuntu/Debian) | `wasteland_0.4_amd64.deb` — install with `sudo apt install ./wasteland_0.4_amd64.deb` |
+| Linux ARM64 (Raspberry Pi 5, Ampere, etc.) | `wasteland_0.4_arm64.deb` — install with `sudo apt install ./wasteland_0.4_arm64.deb` |
 | macOS (universal) | `Wasteland-macos.dmg` — one .app that runs natively on both Apple Silicon and Intel (deployment target 11.0+) |
 | Windows | `Wasteland-windows.exe` — single self-contained binary (SDL2/curl statically linked) |
 
 Push a tag to trigger a release:
 
 ```bash
-git tag v0.3
-git push origin v0.3
+git tag v0.4
+git push origin v0.4
 ```
 
 ## Running
@@ -178,7 +179,7 @@ Wasteland/
 
 ### Left Panel
 
-- **Hub Models** — 5 predefined HuggingFace repos with radio buttons (small, real, public instruction-tuned GGUFs — Qwen 2.5 0.5B/1.5B, Gemma 3 1B IT, SmolLM2 1.7B Instruct, Qwen3.6 35B A3B)
+- **Hub Models** — 5 predefined HuggingFace repos with radio buttons (small, real, public instruction-tuned GGUFs — Qwen 2.5 0.5B/1.5B, Gemma 3 1B IT, SmolLM2 1.7B Instruct, Qwen3.6 35B A3B). The list is defined in `ui.c` and resolved live via the HF API
 - **Custom ID or URL** — Enter any HF repo ID or full `/blob/main/` URL (the downloader auto-rewrites `/blob/main/` → `/resolve/main/`)
 - **Target** — Shows resolved download target before clicking `[ DOWNLOAD ]`
 - **Progress** — Filename + percent during download, with `[ CANCEL ]` button
@@ -194,10 +195,11 @@ Wasteland/
 - **System Prompt** — Multi-line input for system instructions, saved between sessions
 - **Agent Mode** — Toggle tool-using ReAct loop; set a workspace directory for sandboxed file access
 - **Chats** — Manage multiple persistent chat sessions:
-  - `[ NEW CHAT ]` — Start a new session. It will be automatically named based on your first message.
+  - `[ NEW CHAT ]` — Start a new session. It is initially named from your first message, then the model generates a contextual 3–5 word title after its first reply and the chat file is renamed automatically.
   - `[ LOAD ]` / `[ ACTIVE ]` — Switch between chat sessions
   - `[ DEL ]` — Delete a chat session
 - **Status footer** — "NET: LOCKDOWN ACTIVE" once a model is loaded; otherwise "NET: DISCONNECTED (READY)"
+- **Update banner** — If a newer release exists on GitHub, an orange banner appears under the app header with the available version. The check runs once at startup in a background thread before any network lockdown.
 
 ### Right Panel (Collapsible)
 
