@@ -1,7 +1,11 @@
 #include "test_framework.h"
 #include "../src/agent.h"
 #include <string.h>
-#include <sys/stat.h>
+#ifdef _WIN32
+#  include <direct.h>
+#else
+#  include <sys/stat.h>
+#endif
 #include <stdlib.h>
 
 /* ------------------------------------------------------------------------- */
@@ -104,40 +108,45 @@ static void test_parse_max_limit(void) {
 
 static void test_resolve_inside_workspace(void) {
     char out[AGENT_MAX_PATH_LEN];
-    int rc = agent_resolve_path("/tmp/wst_test_ws", "src/main.c",
+    int rc = agent_resolve_path("wst_test_ws", "src/main.c",
                                 out, sizeof(out));
     ASSERT_EQ_INT(0, rc);
-    ASSERT_TRUE(strstr(out, "wst_test_ws/src/main.c") != NULL);
+    ASSERT_TRUE(strstr(out, "wst_test_ws") != NULL);
+    ASSERT_TRUE(strstr(out, "src") != NULL);
+    ASSERT_TRUE(strstr(out, "main.c") != NULL);
 }
 
 static void test_resolve_rejects_escape(void) {
     char out[AGENT_MAX_PATH_LEN];
-    int rc = agent_resolve_path("/tmp/wst_test_ws", "../etc/passwd",
+    int rc = agent_resolve_path("wst_test_ws", "../etc/passwd",
                                 out, sizeof(out));
     ASSERT_EQ_INT(-1, rc);
 }
 
 static void test_resolve_rejects_absolute_outside(void) {
     char out[AGENT_MAX_PATH_LEN];
-    int rc = agent_resolve_path("/tmp/wst_test_ws", "/etc/passwd",
+    int rc = agent_resolve_path("wst_test_ws", "/etc/passwd",
                                 out, sizeof(out));
     ASSERT_EQ_INT(-1, rc);
 }
 
 static void test_resolve_new_file_in_workspace(void) {
     char out[AGENT_MAX_PATH_LEN];
-    int rc = agent_resolve_path("/tmp/wst_test_ws", "new_dir/new_file.txt",
+    int rc = agent_resolve_path("wst_test_ws", "new_dir/new_file.txt",
                                 out, sizeof(out));
     ASSERT_EQ_INT(0, rc);
-    ASSERT_TRUE(strstr(out, "wst_test_ws/new_dir/new_file.txt") != NULL);
+    ASSERT_TRUE(strstr(out, "wst_test_ws") != NULL);
+    ASSERT_TRUE(strstr(out, "new_dir") != NULL);
+    ASSERT_TRUE(strstr(out, "new_file.txt") != NULL);
 }
 
 static void test_resolve_dot_slash(void) {
     char out[AGENT_MAX_PATH_LEN];
-    int rc = agent_resolve_path("/tmp/wst_test_ws", "./foo.c",
+    int rc = agent_resolve_path("wst_test_ws", "./foo.c",
                                 out, sizeof(out));
     ASSERT_EQ_INT(0, rc);
-    ASSERT_TRUE(strstr(out, "wst_test_ws/foo.c") != NULL);
+    ASSERT_TRUE(strstr(out, "wst_test_ws") != NULL);
+    ASSERT_TRUE(strstr(out, "foo.c") != NULL);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -158,13 +167,13 @@ void run_agent(void) {
     printf("\nagent_resolve_path\n");
     /* Ensure sandbox workspace exists for path resolution tests */
 #ifdef _WIN32
-    _mkdir("\\tmp\\wst_test_ws");
-    _mkdir("\\tmp\\wst_test_ws\\src");
-    _mkdir("\\tmp\\wst_test_ws\\new_dir");
+    _mkdir("wst_test_ws");
+    _mkdir("wst_test_ws\\src");
+    _mkdir("wst_test_ws\\new_dir");
 #else
-    mkdir("/tmp/wst_test_ws", 0755);
-    mkdir("/tmp/wst_test_ws/src", 0755);
-    mkdir("/tmp/wst_test_ws/new_dir", 0755);
+    mkdir("wst_test_ws", 0755);
+    mkdir("wst_test_ws/src", 0755);
+    mkdir("wst_test_ws/new_dir", 0755);
 #endif
     RUN_TEST(test_resolve_inside_workspace);
     RUN_TEST(test_resolve_rejects_escape);

@@ -53,11 +53,34 @@ jobs:
           git tag -f "$TAG"
           git push -f origin "$TAG"
 
+  test:
+    name: Run Unit Tests
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake libsdl2-dev libcurl4-openssl-dev libseccomp-dev
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF
+
+      - name: Build Tests
+        run: cmake --build build --config Release -j 4
+
+      - name: Run Tests
+        run: ctest --output-on-failure --test-dir build
+
   build:
     name: Build on ${{ matrix.os }}
-    needs: [ create-tag ]
+    needs: [ test, create-tag ]
     if: |
       always() &&
+      needs.test.result == 'success' &&
       (github.event_name == 'push' ||
        github.event_name == 'pull_request' ||
        github.event_name == 'workflow_dispatch')
