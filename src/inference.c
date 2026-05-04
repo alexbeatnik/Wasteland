@@ -13,6 +13,7 @@
 
 #include "inference.h"
 #include "agent.h"
+#include "ui.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -130,6 +131,13 @@ struct inference_ctx {
     pthread_mutex_t settings_mutex;
     int   pending_n_ctx;
     float temperature;
+
+    /* Title generation (set by UI before first prompt in a new chat;
+     * worker fills title_buffer after the first assistant reply). */
+    volatile int    needs_title;
+    char            title_buffer[WASTELAND_CHAT_NAME_LEN];
+    size_t          title_len;
+    int             title_mode; /* 1 = emit_filtered_piece writes to title_buffer */
 
     volatile int running;
 };
@@ -537,6 +545,28 @@ void inference_request_stop(inference_ctx_t *ictx)
 }
 
 /* ---------------------------------------------------------------------------
+ * Title generation
+ * --------------------------------------------------------------------------- */
+void inference_set_needs_title(inference_ctx_t *ictx, int needs)
+{
+    if (!ictx) return;
+    ictx->needs_title = needs ? 1 : 0;
+}
+
+int inference_take_title(inference_ctx_t *ictx, char *buf, size_t size)
+{
+    if (!ictx || !buf || size == 0) return 0;
+    if (ictx->needs_title) return 0; /* still being generated */
+    if (ictx->title_len == 0) return 0;
+    size_t n = ictx->title_len;
+    if (n >= size) n = size - 1;
+    memcpy(buf, ictx->title_buffer, n);
+    buf[n] = '\0';
+    ictx->title_len = 0;
+    return 1;
+}
+
+/* ---------------------------------------------------------------------------
  * Chat history mirror
  * --------------------------------------------------------------------------- */
 void inference_set_chat_history(inference_ctx_t *ictx, const char *history)
@@ -700,6 +730,18 @@ static void output_append_locked(inference_ctx_t *ictx,
                                  const char *src, size_t n)
 {
     if (n == 0) return;
+
+    if (ictx->title_mode) {
+        size_t space = WASTELAND_CHAT_NAME_LEN - ictx->title_len - 1;
+        if (n > space) n = space;
+        if (n == 0) return;
+        memcpy(ictx->title_buffer + ictx->title_len, src, n);
+        ictx->title_len += n;
+        ictx->title_buffer[ictx->title_len] = '\0';
+        ictx->tag_prev_char = src[n - 1];
+        return;
+    }
+
     size_t space = OUTPUT_BUFFER_SIZE - ictx->output_write_pos - 1;
     if (n > space) n = space;
     if (n == 0) return;
@@ -827,7 +869,8 @@ static int run_one_turn(inference_ctx_t *ictx,
                         struct llama_model *model,
                         struct llama_context *ctx,
                         const struct llama_chat_message *msgs, int n_msgs,
-                        char *accum, size_t accum_size)
+                        char *accum, size_t accum_size,
+                        int max_new_tokens)
 {
     /* Per-turn state reset (do NOT clobber output_buffer — it's the running
      * chat history visible to the user). */
@@ -917,7 +960,7 @@ static int run_one_turn(inference_ctx_t *ictx,
     }
 
     int rc = 0;
-    for (int i = 0; i < MAX_NEW_TOKENS && ictx->running; i++) {
+    for (int i = 0; i < max_new_tokens && ictx->running; i++) {
         if (ictx->cancel_generation) { rc = -2; break; }
 
         llama_token new_token = llama_sampler_sample(smpl, ctx, -1);
@@ -1179,8 +1222,44 @@ void* inference_worker_thread(void *arg)
                         i, msgs[i].role,
                         msgs[i].content ? msgs[i].content : "(null)");
             }
-            run_one_turn(ictx, model, ctx, msgs, n_msgs, NULL, 0);
+            run_one_turn(ictx, model, ctx, msgs, n_msgs, NULL, 0, MAX_NEW_TOKENS);
             free_parsed_msgs(owned + sys_offset, n_hist);
+
+            /* ---- Generate chat title from model ---- */
+            if (ictx->needs_title) {
+                struct llama_chat_message tmsgs[3];
+
+                tmsgs[0].role    = "system";
+                tmsgs[0].content = "You are a helpful assistant. Generate very short chat titles. Reply with ONLY the title text, no quotes, no markdown, no punctuation.";
+
+                tmsgs[1].role    = "user";
+                tmsgs[1].content = prompt;
+
+                tmsgs[2].role    = "user";
+                tmsgs[2].content = "Give this conversation a short 3-5 word title. Output ONLY the title text, nothing else.";
+
+                ictx->title_mode = 1;
+                ictx->title_len  = 0;
+                run_one_turn(ictx, model, ctx, tmsgs, 3, NULL, 0, 20);
+                ictx->title_mode = 0;
+
+                /* Clean up the title: strip newlines, quotes, markdown */
+                char *tb = ictx->title_buffer;
+                int tj = 0;
+                for (size_t ti = 0; ti < ictx->title_len && tj < (int)WASTELAND_CHAT_NAME_LEN - 5; ti++) {
+                    char c = tb[ti];
+                    if (c == '\n' || c == '\r' || c == '\"' || c == '*' ||
+                        c == '#' || c == '`' || c == '<' || c == '>')
+                        continue;
+                    tb[tj++] = c;
+                }
+                while (tj > 0 && tb[tj-1] == ' ') tj--;
+                tb[tj] = '\0';
+                if (tj == 0) strcpy(tb, "Chat");
+
+                fprintf(stderr, "[worker] Generated title: %s\n", tb);
+                ictx->needs_title = 0;
+            }
         } else {
             /* ---- Agent ReAct loop ---- */
             struct llama_chat_message msgs[AGENT_MAX_MSGS];
@@ -1225,7 +1304,7 @@ void* inference_worker_thread(void *arg)
             {
                 static char accum[AGENT_ACCUM_BUFFER];
                 if (run_one_turn(ictx, model, ctx, msgs, n_msgs,
-                                 accum, sizeof(accum)) != 0) break;
+                                 accum, sizeof(accum), MAX_NEW_TOKENS) != 0) break;
 
                 agent_call_t calls[AGENT_MAX_CALLS_PER_TURN];
                 int n_calls = agent_parse_calls(accum, calls,

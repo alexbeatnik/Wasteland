@@ -636,6 +636,63 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
             state->context_tokens > (int)(state->context_max * 0.80f)) {
             ui_compact_chat_history(state, 1);
         }
+
+        /* If the model produced a title for a newly-created chat,
+         * rename the chat file and update the UI label. */
+        char model_title[WASTELAND_CHAT_NAME_LEN];
+        if (inference_take_title(state->inference,
+                                 model_title, sizeof(model_title))) {
+            if (state->selected_chat >= 0 &&
+                state->selected_chat < state->chat_count) {
+                char old_name[WASTELAND_CHAT_NAME_LEN];
+                snprintf(old_name, sizeof(old_name), "%s",
+                         state->chats[state->selected_chat]);
+
+                /* Sanitise and ensure .txt extension */
+                char base[WASTELAND_CHAT_NAME_LEN];
+                int b = 0;
+                for (size_t i = 0;
+                     model_title[i] && b < (int)sizeof(base) - 5; i++) {
+                    unsigned char c = (unsigned char)model_title[i];
+                    if (c >= 0x80 || (c >= 'a' && c <= 'z') ||
+                        (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+                        base[b++] = (char)c;
+                    } else if (c == ' ' || c == '-') {
+                        if (b > 0 && base[b-1] != ' ') base[b++] = ' ';
+                    }
+                }
+                while (b > 0 && base[b-1] == ' ') b--;
+                base[b] = '\0';
+                if (b == 0) strcpy(base, "Chat");
+
+                char new_name[WASTELAND_CHAT_NAME_LEN];
+                snprintf(new_name, sizeof(new_name), "%s.txt", base);
+
+                /* Ensure uniqueness */
+                char path[512];
+                snprintf(path, sizeof(path), "chats/%s", new_name);
+                struct stat st;
+                int suffix = 1;
+                while (stat(path, &st) == 0 && suffix < 100) {
+                    snprintf(new_name, sizeof(new_name),
+                             "%s_%d.txt", base, suffix);
+                    snprintf(path, sizeof(path), "chats/%s", new_name);
+                    suffix++;
+                }
+
+                /* Rename file */
+                char old_path[512];
+                snprintf(old_path, sizeof(old_path), "chats/%s", old_name);
+                if (rename(old_path, path) == 0) {
+                    snprintf(state->chats[state->selected_chat],
+                             WASTELAND_CHAT_NAME_LEN, "%s", new_name);
+                    snprintf(state->status_msg,
+                             sizeof(state->status_msg),
+                             "Chat renamed to: %s", base);
+                    state->status_timer = SDL_GetTicks();
+                }
+            }
+        }
     }
     was_generating = state->is_generating;
 
@@ -1541,6 +1598,9 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                         state->selected_chat = state->chat_count;
                         state->chat_count++;
                         save_chat_history(new_chat, "");
+                        /* Ask the model to produce a better title after
+                         * the first assistant reply. */
+                        inference_set_needs_title(state->inference, 1);
                     }
 
                     pthread_mutex_lock(&state->chat_mutex);
