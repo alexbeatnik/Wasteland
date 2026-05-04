@@ -15,7 +15,9 @@
 #include <SDL_opengl.h>
 
 /* Nuklear forward declarations (assumes <nuklear.h> is included before this) */
-NK_API struct nk_context* nk_sdl_init(SDL_Window *win);
+/* font_size: logical pixel height for the UI font.  Pass 0 to use the
+ * default (15 px).  Scale by the DPI ratio for HiDPI displays. */
+NK_API struct nk_context* nk_sdl_init(SDL_Window *win, float font_size);
 NK_API void               nk_sdl_shutdown(void);
 NK_API void               nk_sdl_handle_event(SDL_Event *evt);
 NK_API void               nk_sdl_render(enum nk_anti_aliasing AA,
@@ -50,15 +52,24 @@ static struct nk_sdl {
     struct nk_sdl_device dev;
 } sdl;
 
-/* ---------------------------------------------------------------------------
- * Candidate TTF paths searched in order for Cyrillic/Unicode support.
- * --------------------------------------------------------------------------- */
+/* DejaVu Sans Mono embedded as a byte array so Cyrillic and Geometric
+ * Shapes (▶ ■) render correctly on every platform without a file install. */
+#include "font_dejavu.h"
+
+/* Fallback TTF paths — only used if the embedded data somehow fails.
+ * Order matters: fonts with good Cyrillic + Geometric Shapes coverage first. */
 static const char *nk_sdl_font_candidates[] = {
     "fonts/DejaVuSansMono.ttf",
     "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
     "/usr/share/fonts/noto/NotoSansMono-Regular.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",   /* Debian/Ubuntu */
-    "/usr/share/fonts/TTF/Hack-Regular.ttf",
+    /* macOS */
+    "/Library/Fonts/DejaVuSansMono.ttf",
+    "/System/Library/Fonts/Menlo.ttc",
+    "/System/Library/Fonts/Supplemental/Courier New.ttf",
+    /* Windows */
+    "C:/Windows/Fonts/consola.ttf",
+    "C:/Windows/Fonts/cour.ttf",
     NULL
 };
 
@@ -104,8 +115,10 @@ nk_sdl_clipboard_copy(nk_handle usr, const char *text, int len)
 }
 
 NK_API struct nk_context*
-nk_sdl_init(SDL_Window *win)
+nk_sdl_init(SDL_Window *win, float font_size)
 {
+    if (font_size <= 0.0f) font_size = 15.0f;
+
     sdl.win = win;
     nk_init_default(&sdl.ctx, 0);
     nk_buffer_init_default(&sdl.dev.cmds);
@@ -119,42 +132,95 @@ nk_sdl_init(SDL_Window *win)
     nk_font_atlas_init_default(&sdl.atlas);
     nk_font_atlas_begin(&sdl.atlas);
 
-    struct nk_font *font = NULL;
+    struct nk_font_config cfg = nk_font_config(font_size);
+    cfg.range        = nk_sdl_unicode_ranges;
+    cfg.oversample_h = 2;
+    cfg.oversample_v = 2;
 
-    /* Try TTF candidates for Cyrillic support */
-    for (int ci = 0; nk_sdl_font_candidates[ci] != NULL; ci++) {
-        FILE *fp = fopen(nk_sdl_font_candidates[ci], "rb");
-        if (!fp) continue;
-        fclose(fp);
+    /* Primary: embedded DejaVu Sans Mono — always available, covers
+     * Basic Latin, Cyrillic (Ukrainian), and Geometric Shapes (▶ ■).
+     * Use sizeof() so the size is guaranteed correct even if the header
+     * is regenerated. */
+    struct nk_font *font = nk_font_atlas_add_from_memory(
+        &sdl.atlas,
+        (void *)wst_dejavu_ttf, (nk_size)sizeof(wst_dejavu_ttf),
+        font_size, &cfg);
+    if (font) {
+        fprintf(stderr, "[font] Using embedded DejaVu Sans Mono %.0fpx\n", font_size);
+    }
 
-        struct nk_font_config cfg = nk_font_config(15);
-        cfg.range = nk_sdl_unicode_ranges;
-        cfg.oversample_h = 2;
-        cfg.oversample_v = 2;
-        font = nk_font_atlas_add_from_file(&sdl.atlas, nk_sdl_font_candidates[ci],
-                                           15, &cfg);
-        if (font) {
-            fprintf(stderr, "[font] Loaded: %s\n", nk_sdl_font_candidates[ci]);
-            break;
+    /* Fallback: search system TTF paths (useful for dev overrides). */
+    if (!font) {
+        for (int ci = 0; nk_sdl_font_candidates[ci] != NULL; ci++) {
+            FILE *fp = fopen(nk_sdl_font_candidates[ci], "rb");
+            if (!fp) continue;
+            fclose(fp);
+            font = nk_font_atlas_add_from_file(
+                &sdl.atlas, nk_sdl_font_candidates[ci], font_size, &cfg);
+            if (font) {
+                fprintf(stderr, "[font] Loaded: %s\n", nk_sdl_font_candidates[ci]);
+                break;
+            }
         }
     }
 
-    /* Fallback: built-in ASCII-only Proggy Clean */
+    /* Last resort: built-in ASCII-only Proggy Clean */
     if (!font) {
-        fprintf(stderr, "[font] No TTF found — falling back to built-in (ASCII only).\n");
-        struct nk_font_config cfg = nk_font_config(14);
-        font = nk_font_atlas_add_default(&sdl.atlas, 14, &cfg);
+        fprintf(stderr, "[font] Falling back to built-in (ASCII only).\n");
+        font = nk_font_atlas_add_default(&sdl.atlas, font_size, &cfg);
     }
 
     int w, h;
     const void *image = nk_font_atlas_bake(&sdl.atlas, &w, &h, NK_FONT_ATLAS_RGBA32);
 
+    /* If baking failed (e.g. atlas too large for GPU at current oversampling),
+     * clear everything and retry with 1x1 oversampling.  This produces a much
+     * smaller atlas and is the most common fix for missing glyphs on HiDPI
+     * displays where the default 2x2 oversampling explodes the texture size. */
+    if (!image && font) {
+        fprintf(stderr, "[font] Bake failed (oversample 2x2), retrying with 1x1...\n");
+        nk_font_atlas_clear(&sdl.atlas);
+        nk_font_atlas_init_default(&sdl.atlas);
+        nk_font_atlas_begin(&sdl.atlas);
+
+        cfg = nk_font_config(font_size);
+        cfg.range        = nk_sdl_unicode_ranges;
+        cfg.oversample_h = 1;
+        cfg.oversample_v = 1;
+
+        font = nk_font_atlas_add_from_memory(
+            &sdl.atlas,
+            (void *)wst_dejavu_ttf, (nk_size)sizeof(wst_dejavu_ttf),
+            font_size, &cfg);
+        if (!font) {
+            for (int ci = 0; nk_sdl_font_candidates[ci] != NULL; ci++) {
+                FILE *fp = fopen(nk_sdl_font_candidates[ci], "rb");
+                if (!fp) continue;
+                fclose(fp);
+                font = nk_font_atlas_add_from_file(
+                    &sdl.atlas, nk_sdl_font_candidates[ci], font_size, &cfg);
+                if (font) break;
+            }
+        }
+        if (!font) {
+            font = nk_font_atlas_add_default(&sdl.atlas, font_size, &cfg);
+        }
+        image = nk_font_atlas_bake(&sdl.atlas, &w, &h, NK_FONT_ATLAS_RGBA32);
+    }
+
+    if (!image) {
+        fprintf(stderr, "[font] FATAL: nk_font_atlas_bake returned NULL. "
+                        "Text rendering will be broken.\n");
+    }
+
     glGenTextures(1, &sdl.dev.font_tex);
     glBindTexture(GL_TEXTURE_2D, sdl.dev.font_tex);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, (GLsizei)w, (GLsizei)h, 0,
-                 GL_RGBA, GL_UNSIGNED_BYTE, image);
+    if (image) {
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, (GLsizei)w, (GLsizei)h, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, image);
+    }
 
     nk_font_atlas_end(&sdl.atlas, nk_handle_id((int)sdl.dev.font_tex), &sdl.dev.null);
     if (font)

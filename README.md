@@ -1,4 +1,4 @@
-# Wasteland Terminal v0.2
+# Wasteland Terminal v0.3
 
 ![Wasteland Terminal](assets/icon-512.png)
 
@@ -16,7 +16,7 @@ Wasteland is a local LLM inference client built in pure C with a vintage PC-insp
 - **Threaded** — Non-blocking UI at 60 FPS with background inference, async model loading, and a detached download thread
 - **Async model load** — UI stays responsive during multi-second GGUF load
 - **Model Management** — Download from HuggingFace, load / **unload** / delete local `.gguf` files; the local vault is sorted lexicographically for stable ordering
-- **Stop generation** — `■` button cancels an in-flight response within one token
+- **Stop generation** — `■` button cancels an in-flight response within one token; also interrupts the prompt prefill phase (no more waiting through a long context decode)
 - **Chat template** — Uses each model's built-in template (`llama_chat_apply_template`) so instruction-tuned models behave correctly
 - **Multi-turn memory** — Full conversation history is fed to the model on every turn so it remembers previous exchanges; context is managed automatically
 - **Context management** — CTX bar shows live token usage. `[ COMPACT ]` drops the oldest turn, saves the compacted history to disk, and mirrors the result into the inference thread immediately. Auto-compact triggers when usage exceeds 80 % after a generation
@@ -29,6 +29,7 @@ Wasteland is a local LLM inference client built in pure C with a vintage PC-insp
 - **Auto-scroll + word wrap** — Chat pins to the bottom and wraps long lines to the panel width
 - **Download Progress** — Real-time progress bar with filename, percent, and **cancel** support
 - **Fast close** — Clicking X hides the window instantly, signals the worker via `inference_request_stop()`, joins with a 1.5 s timeout, and falls back to `_Exit` if the worker is still mid-decode
+- **Unicode & HiDPI** — DejaVu Sans Mono is embedded in the binary (no external font files needed); covers Basic Latin, Cyrillic (Ukrainian), and Geometric Shapes (▶ ■). Font scales automatically with display DPI so text is never tiny on Retina or Windows HiDPI displays
 - **Cross-Platform** — Linux, macOS, Windows (MinGW/MSVC)
 
 ## Tech Stack
@@ -118,16 +119,16 @@ GitHub Actions automatically builds and releases for all platforms on every tag:
 
 | Platform | Artifact |
 |----------|----------|
-| Linux x86\_64 (Ubuntu/Debian) | `wasteland_0.2.0_amd64.deb` — install with `sudo apt install ./wasteland_0.2.0_amd64.deb` |
-| Linux ARM64 (Raspberry Pi 5, Ampere, etc.) | `wasteland_0.2.0_arm64.deb` — install with `sudo apt install ./wasteland_0.2.0_arm64.deb` |
+| Linux x86\_64 (Ubuntu/Debian) | `wasteland_0.3_amd64.deb` — install with `sudo apt install ./wasteland_0.3_amd64.deb` |
+| Linux ARM64 (Raspberry Pi 5, Ampere, etc.) | `wasteland_0.3_arm64.deb` — install with `sudo apt install ./wasteland_0.3_arm64.deb` |
 | macOS (universal) | `Wasteland-macos.dmg` — one .app that runs natively on both Apple Silicon and Intel (deployment target 11.0+) |
 | Windows | `Wasteland-windows.exe` — single self-contained binary (SDL2/curl statically linked) |
 
 Push a tag to trigger a release:
 
 ```bash
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.3
+git push origin v0.3
 ```
 
 ## Running
@@ -177,7 +178,7 @@ Wasteland/
 
 ### Left Panel
 
-- **Hub Models** — 4 predefined HuggingFace repos with radio buttons (small, real, public instruction-tuned GGUFs — Qwen 2.5 0.5B/1.5B, Gemma 3 1B IT, SmolLM2 1.7B Instruct)
+- **Hub Models** — 5 predefined HuggingFace repos with radio buttons (small, real, public instruction-tuned GGUFs — Qwen 2.5 0.5B/1.5B, Gemma 3 1B IT, SmolLM2 1.7B Instruct, Qwen3.6 35B A3B)
 - **Custom ID or URL** — Enter any HF repo ID or full `/blob/main/` URL (the downloader auto-rewrites `/blob/main/` → `/resolve/main/`)
 - **Target** — Shows resolved download target before clicking `[ DOWNLOAD ]`
 - **Progress** — Filename + percent during download, with `[ CANCEL ]` button
