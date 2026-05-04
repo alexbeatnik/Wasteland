@@ -644,6 +644,7 @@
             <div class="stat"><span class="num">60</span><span class="label">FPS UI Loop</span></div>
             <div class="stat"><span class="num">256k</span><span class="label">Max Context</span></div>
             <div class="stat"><span class="num">3</span><span class="label">OSes Supported</span></div>
+            <div class="stat"><span class="num">81</span><span class="label">Unit Tests</span></div>
         </div>
     </section>
 
@@ -897,24 +898,32 @@ cmake --build . --config Release</pre>
     <!-- ============== TESTING ============== -->
     <section>
         <h2>TESTING</h2>
-        <p>Zero-dependency C test framework — just macros and <code>stdio.h</code>. Run all suites via CTest:</p>
+        <p>Zero-dependency C test framework — just macros and <code>stdio.h</code>. <strong>81 tests across 4 suites</strong>, all green on Linux / macOS / Windows CI runners. Run via CTest:</p>
 <pre>cd build
 ctest --output-on-failure</pre>
 
         <table class="dl-table">
-            <thead><tr><th>Suite</th><th>What It Covers</th></tr></thead>
+            <thead><tr><th>Suite</th><th>Tests</th><th>What It Covers</th></tr></thead>
             <tbody>
                 <tr>
                     <td><code>test_agent</code></td>
-                    <td>Tool-call markdown parsing (<code>read_file</code>, <code>list_dir</code>, <code>write_file</code>, <code>apply_edit</code>) · sandbox path resolution (escape attempts, absolute paths, new files)</td>
+                    <td>35</td>
+                    <td>Tool-call parsing (incl. malformed <code>apply_edit</code>, multi-line SEARCH/REPLACE, non-tool fences, inline backticks) · sandbox path resolution · <strong>real executor round-trips</strong> against a scratch workspace (read / write / apply_edit / list_dir, ambiguous-match refusal, delete-via-empty-replace, escape-block) · system-prompt smoke test</td>
                 </tr>
                 <tr>
                     <td><code>test_chat_history</code></td>
-                    <td>Flat <code>&gt; prompt\nreply\n</code> → user/assistant message splitting · trailing-user discard · max-msg cap · system-prompt concatenation</td>
+                    <td>16</td>
+                    <td>Flat <code>&gt; prompt\nreply\n</code> → user/assistant splitting · CRLF (Windows) line endings · UTF-8 (Cyrillic) · <code>&gt; </code> inside reply does NOT split · trailing pending prompt discard · NULL system-prompt safety · base-then-user concatenation order</td>
                 </tr>
                 <tr>
                     <td><code>test_version</code></td>
-                    <td>Semver comparison (<code>X.Y.Z</code>, optional <code>v</code> prefix) · platform-specific update-filename generation</td>
+                    <td>15</td>
+                    <td>Semver compare (<code>X.Y</code> vs <code>X.Y.Z</code>, optional <code>v</code> prefix, multi-digit minors so <code>0.10</code> &gt; <code>0.9</code>, empty / garbage prefix, release-tag-vs-runtime) · platform-specific update-filename matrix</td>
+                </tr>
+                <tr>
+                    <td><code>test_string_utils</code></td>
+                    <td>15</td>
+                    <td>RC4 chat cipher round-trip (ASCII, UTF-8, empty buffer, deterministic output) · HF <code>/blob/main/</code> → <code>/resolve/main/</code> URL rewrite (basic, idempotent, too-small-buffer refusal, false-substring guard) · chat-name sanitisation (punctuation, space-runs, trim, UTF-8 passthrough, 40-char cap)</td>
                 </tr>
             </tbody>
         </table>

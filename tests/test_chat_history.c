@@ -32,6 +32,8 @@ static int parse_chat_history(const char *history,
         const char *nl = memchr(p, '\n', (size_t)(end - p));
         const char *line_end = nl ? nl : end;
         size_t ulen = (size_t)(line_end - user_start);
+        while (ulen > 0 && (user_start[ulen - 1] == '\r' ||
+                            user_start[ulen - 1] == '\n')) ulen--;
 
         char *uc = (char *)malloc(ulen + 1);
         if (!uc) break;
@@ -200,6 +202,93 @@ static void test_parse_max_msgs(void) {
     for (int i = 0; i < n; i++) free(owned[i]);
 }
 
+/* Leading newlines / whitespace before the first prompt must be skipped, not
+ * mis-parsed as an empty assistant turn. */
+static void test_parse_leading_newlines(void) {
+    const char *hist = "\n\n\n> Hello\nHi!\n";
+    llama_chat_message msgs[16];
+    char *owned[16] = {0};
+    int n = parse_chat_history(hist, msgs, owned, 16);
+    ASSERT_EQ_INT(2, n);
+    ASSERT_EQ_STR("Hello", msgs[0].content);
+    ASSERT_EQ_STR("Hi!", msgs[1].content);
+    for (int i = 0; i < n; i++) free(owned[i]);
+}
+
+/* CRLF line endings (Windows-style chat files) should parse the same as LF. */
+static void test_parse_crlf_endings(void) {
+    const char *hist = "> Hello\r\nHi there!\r\n> Second\r\nReply two\r\n";
+    llama_chat_message msgs[16];
+    char *owned[16] = {0};
+    int n = parse_chat_history(hist, msgs, owned, 16);
+    ASSERT_EQ_INT(4, n);
+    ASSERT_EQ_STR("Hello", msgs[0].content);
+    /* Trailing \r should be stripped from the assistant content. */
+    ASSERT_EQ_STR("Hi there!", msgs[1].content);
+    ASSERT_EQ_STR("Second", msgs[2].content);
+    ASSERT_EQ_STR("Reply two", msgs[3].content);
+    for (int i = 0; i < n; i++) free(owned[i]);
+}
+
+/* UTF-8 (Cyrillic) content must round-trip without truncation. */
+static void test_parse_utf8_content(void) {
+    const char *hist = "> Привіт\nЯк справи?\n";
+    llama_chat_message msgs[16];
+    char *owned[16] = {0};
+    int n = parse_chat_history(hist, msgs, owned, 16);
+    ASSERT_EQ_INT(2, n);
+    ASSERT_EQ_STR("Привіт", msgs[0].content);
+    ASSERT_EQ_STR("Як справи?", msgs[1].content);
+    for (int i = 0; i < n; i++) free(owned[i]);
+}
+
+/* History containing only an in-flight user prompt (no assistant reply yet)
+ * must yield zero messages — the caller supplies the prompt separately. */
+static void test_parse_only_pending_prompt(void) {
+    const char *hist = "> just typed\n";
+    llama_chat_message msgs[16];
+    char *owned[16] = {0};
+    int n = parse_chat_history(hist, msgs, owned, 16);
+    ASSERT_EQ_INT(0, n);
+}
+
+/* `> ` appearing INSIDE an assistant reply (e.g. quoted email) must not
+ * split the reply. Only `\n> ` at line-start does. */
+static void test_parse_gt_inside_reply_no_split(void) {
+    const char *hist =
+        "> Quote my last email\n"
+        "Sure, here it is: 1 > 0 means greater than.\n";
+    llama_chat_message msgs[16];
+    char *owned[16] = {0};
+    int n = parse_chat_history(hist, msgs, owned, 16);
+    ASSERT_EQ_INT(2, n);
+    /* The "1 > 0" snippet should remain inside the assistant text — not get
+     * mis-detected as a new user turn (no '\n' before its '>'). */
+    ASSERT_EQ_STR("Sure, here it is: 1 > 0 means greater than.",
+                  msgs[1].content);
+    for (int i = 0; i < n; i++) free(owned[i]);
+}
+
+/* Three consecutive user lines with an assistant reply in the middle. The
+ * parser must split correctly across multiple newline-prefixed `> ` markers
+ * and not crash on the trailing pending prompt. */
+static void test_parse_three_turns_pending_last(void) {
+    const char *hist =
+        "> First\nReply A\n"
+        "> Second\nReply B\n"
+        "> Third pending\n";  /* no reply yet */
+    llama_chat_message msgs[16];
+    char *owned[16] = {0};
+    int n = parse_chat_history(hist, msgs, owned, 16);
+    /* First two pairs kept; third user is trailing pending → discarded. */
+    ASSERT_EQ_INT(4, n);
+    ASSERT_EQ_STR("First", msgs[0].content);
+    ASSERT_EQ_STR("Reply A", msgs[1].content);
+    ASSERT_EQ_STR("Second", msgs[2].content);
+    ASSERT_EQ_STR("Reply B", msgs[3].content);
+    for (int i = 0; i < n; i++) free(owned[i]);
+}
+
 /* ------------------------------------------------------------------------- */
 /* build_system_prompt tests                                                 */
 /* ------------------------------------------------------------------------- */
@@ -218,6 +307,26 @@ static void test_build_system_prompt_with_user(void) {
     ASSERT_TRUE(strstr(out, "Be extra polite.") != NULL);
 }
 
+/* NULL user-prompt argument must produce the base prompt only, not crash. */
+static void test_build_system_prompt_null_user(void) {
+    char out[2048];
+    build_system_prompt(NULL, out, sizeof(out));
+    ASSERT_TRUE(out[0] != '\0');
+    ASSERT_TRUE(strstr(out, "plain text") != NULL);
+}
+
+/* User prompt is appended AFTER the base — language-matching rule must
+ * appear before any user instructions. */
+static void test_build_system_prompt_order(void) {
+    char out[2048];
+    build_system_prompt("EXTRA_USER_RULE", out, sizeof(out));
+    const char *base_marker = strstr(out, "plain text");
+    const char *user_marker = strstr(out, "EXTRA_USER_RULE");
+    ASSERT_NOT_NULL(base_marker);
+    ASSERT_NOT_NULL(user_marker);
+    ASSERT_TRUE(base_marker < user_marker);
+}
+
 /* ------------------------------------------------------------------------- */
 /* Suite runner                                                              */
 /* ------------------------------------------------------------------------- */
@@ -231,9 +340,18 @@ void run_chat_history(void) {
     RUN_TEST(test_parse_multiline_assistant);
     RUN_TEST(test_parse_max_msgs);
 
+    RUN_TEST(test_parse_leading_newlines);
+    RUN_TEST(test_parse_crlf_endings);
+    RUN_TEST(test_parse_utf8_content);
+    RUN_TEST(test_parse_only_pending_prompt);
+    RUN_TEST(test_parse_gt_inside_reply_no_split);
+    RUN_TEST(test_parse_three_turns_pending_last);
+
     printf("\nbuild_system_prompt\n");
     RUN_TEST(test_build_system_prompt_without_user);
     RUN_TEST(test_build_system_prompt_with_user);
+    RUN_TEST(test_build_system_prompt_null_user);
+    RUN_TEST(test_build_system_prompt_order);
 }
 
 TEST_MAIN(chat_history);

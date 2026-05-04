@@ -235,9 +235,19 @@ User: Give this conversation a short 3-5 word title. Output ONLY the title text,
 - Tests live in `tests/` and use a **zero-dependency** macro framework (`tests/test_framework.h`). No external test library is required.
 - `ctest --output-on-failure` (or `make test`) runs all suites after the main build.
 - To test `static` functions without exposing them in public headers, use `#ifdef TESTING` to drop the `static` keyword and provide a forward-declaration header for the test file (e.g. `inference_test.h`).
-- Suites that depend on the filesystem (sandbox path resolution) must create their scratch directories inside `run_*` before calling `RUN_TEST`.
-- Suites that depend on SDL / llama.cpp should **not** link the whole application binary. Instead, copy the pure functions into a self-contained `tests/test_*.c` file (see `tests/test_chat_history.c` and `tests/test_version.c`).
+- Suites that depend on the filesystem (sandbox path resolution, agent executors, list_dir) must create their scratch directories inside `run_<suite>` *before* the first `RUN_TEST` call. The agent suite uses two separate trees (`wst_test_ws/` for resolver tests, `wst_test_exec_ws/` for read/write/edit/list executors) so failure artefacts can be inspected without polluting the resolver fixtures.
+- Suites that depend on SDL / llama.cpp / curl **must not** link the whole application binary. Instead, copy the pure functions into a self-contained `tests/test_*.c` file (see `tests/test_chat_history.c`, `tests/test_version.c`, `tests/test_string_utils.c`). Each copied block carries an "origin: src/*.c" reference so the duplicate can be hand-synced when the source is touched.
+- The agent suite **does** link `src/agent.c` directly (`add_executable(test_agent tests/test_agent.c src/agent.c)`) because it has no SDL / llama.cpp dependency — that lets us exercise the real `agent_exec_*` executors end-to-end against a scratch workspace.
 - All tests run automatically in CI via `cmake --build build && ctest --output-on-failure`.
+
+### Suite manifest (81 tests as of v0.5)
+
+| Suite | Tests | Targets |
+|---|---|---|
+| `test_agent` | 35 | `agent_parse_calls` (16 cases inc. malformed `apply_edit`, multi-line blocks, non-tool fences, inline backticks), `agent_resolve_path` (5 sandbox cases), `agent_exec_read_file/write_file/apply_edit/list_dir` (13 round-trip + escape-block cases), `agent_system_prompt` smoke test |
+| `test_chat_history` | 16 | `parse_chat_history` (LF, CRLF, UTF-8, leading newlines, trailing pending prompt, `> ` inside reply, three-turn pending-last) · `build_system_prompt` (with / without / NULL user prompt, base-then-user order) |
+| `test_version` | 15 | `version_newer_than` (X.Y vs X.Y.Z, `v` prefix mix, multi-digit minor, empty / garbage prefix, release-tag-vs-runtime) · `build_update_filename` (current platform + version-difference matrix) |
+| `test_string_utils` | 15 | RC4 chat cipher round-trip (ASCII, UTF-8, empty, determinism) · HF URL rewrite (`/blob/main/` → `/resolve/main/`, already-resolve, too-small-buffer, false-substring) · chat-name sanitisation (punctuation, space runs, trim, UTF-8 passthrough, 40-char cap) |
 
 ## Build Notes
 

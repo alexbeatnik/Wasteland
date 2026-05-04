@@ -168,10 +168,11 @@ Wasteland/
 │   ├── nuklear_impl.c      # Nuklear + SDL/GL2 backend impl
 │   └── nuklear_sdl_gl2.h   # Nuklear SDL2/OpenGL2 backend
 ├── tests/
-│   ├── test_framework.h    # Minimal assertion macros (no external deps)
-│   ├── test_agent.c        # Agent parser & sandbox tests
-│   ├── test_chat_history.c # Chat-history parser & system-prompt builder tests
-│   └── test_version.c      # Semver comparison & updater filename tests
+│   ├── test_framework.h     # Minimal assertion macros (no external deps)
+│   ├── test_agent.c         # Tool-call parser, sandbox, real executor round-trips
+│   ├── test_chat_history.c  # History parser (LF / CRLF / UTF-8) + system-prompt builder
+│   ├── test_version.c       # Semver comparison + updater filename matrix
+│   └── test_string_utils.c  # RC4 cipher, HF URL rewrite, chat-name sanitisation
 ├── include/                # nuklear.h
 ├── third_party/
 │   └── llama.cpp/          # Git submodule (vendored llama.cpp)
@@ -192,9 +193,10 @@ ctest --output-on-failure
 Or run individual test binaries directly:
 
 ```bash
-./test_agent         # agent_parse_calls + agent_resolve_path sandbox
+./test_agent         # agent_parse_calls + agent_resolve_path + tool executors
 ./test_chat_history  # parse_chat_history + build_system_prompt
 ./test_version       # version_newer_than + build_update_filename
+./test_string_utils  # RC4 round-trip + HF URL rewrite + chat-name sanitisation
 ```
 
 Tests are compiled automatically by CMake when you configure the project. To add a new test suite:
@@ -206,11 +208,14 @@ Tests are compiled automatically by CMake when you configure the project. To add
 
 ### Current coverage
 
+Four suites, **81 tests** total — all green on Linux / macOS / Windows CI runners. Filesystem-touching cases use `/tmp` scratch directories created at suite startup.
+
 | Suite | What it tests |
 |---|---|
-| `test_agent` | Tool-call markdown parsing (`read_file`, `list_dir`, `write_file`, `apply_edit`), sandbox path resolution (escape attempts, absolute paths, new files) |
-| `test_chat_history` | Flat `> prompt\nreply\n` → user/assistant message splitting, trailing-user discard, max-msg cap, system-prompt concatenation |
-| `test_version` | Semver comparison (`X.Y.Z` with optional `v` prefix), platform-specific update-filename generation |
+| `test_agent` (35) | Tool-call markdown parsing (`read_file`, `list_dir`, `write_file`, `apply_edit`) including malformed `apply_edit`, multi-line SEARCH/REPLACE blocks, empty `write_file` body, non-tool fences, inline backticks · sandbox path resolution (escape attempts, absolute paths, new files, `./` prefix) · **executor round-trips:** real read / write / apply_edit / list_dir against a scratch workspace, ambiguous-match refusal, delete-via-empty-replace, escape-blocked attempts · `agent_system_prompt` describes every tool |
+| `test_chat_history` (16) | Flat `> prompt\nreply\n` → user/assistant message splitting · trailing-user discard · max-msg cap · CRLF (Windows) line-ending normalisation · UTF-8 (Cyrillic) round-trip · `> ` inside an assistant reply does NOT split a turn · NULL user-prompt for `build_system_prompt` · base-then-user concatenation order |
+| `test_version` (15) | Semver comparison (`X.Y.Z` with optional `v` prefix) including release-tag-vs-runtime, two-component versions, multi-digit minors (`0.10` > `0.9`), empty / garbage-prefix inputs · platform-specific update-filename generation · version-different filenames differ on Linux but not on macOS / Windows |
+| `test_string_utils` (15) | RC4 chat cipher round-trip (ASCII, UTF-8, empty buffer, deterministic output) · HuggingFace `/blob/main/` → `/resolve/main/` URL rewrite (basic, already-resolve, too-small-buffer, false-substring matches) · chat-name sanitisation (punctuation strip, space-run collapse, leading/trailing trim, UTF-8 passthrough, 40-char cap) |
 
 ## UI Guide
 

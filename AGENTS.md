@@ -132,9 +132,10 @@ Before declaring a task complete:
 15. Auto-update banner must appear when `state->update_version` is non-empty (can be tested by temporarily hardcoding a different version string).
 16. A new chat's file must be renamed by the model-generated title after the first assistant reply completes (check `chats/` directory).
 17. ARM64 `.deb` built in CI must run on Raspberry Pi 4/5 without `Illegal instruction`.
-18. All CTest suites pass (`ctest --output-on-failure`).
-19. New logic must have a matching `tests/test_*.c` suite if it is testable without SDL/llama.cpp (pure string / file / math functions).
+18. All CTest suites pass (`ctest --output-on-failure`) — currently **81 tests** across 4 suites (`agent`, `chat_history`, `version`, `string_utils`).
+19. New logic must have a matching `tests/test_*.c` suite if it is testable without SDL/llama.cpp (pure string / file / math functions). Filesystem-touching tests use `/tmp`-style scratch directories created in `run_<suite>()` *before* `RUN_TEST` calls.
 20. Existing tests must not be broken by the change — run `ctest` before every commit.
+21. **Test parity rule:** when a function lives in `src/*.c` and has been copy-extracted into `tests/test_*.c` (e.g. `parse_chat_history`, `version_newer_than`, `rc4_crypt_buffer`, the HF URL rewrite), edits to the production version MUST be mirrored into the test copy. The duplication is intentional — it lets the test binaries link without SDL2 / llama.cpp / curl — but you have to keep both halves in lockstep or the tests start passing the wrong code.
 
 ## Font & DPI Rules
 

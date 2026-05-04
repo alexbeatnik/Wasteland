@@ -93,11 +93,16 @@ This project does not use a formal skill system. The following domains are relev
 
 ### Unit Testing
 
-- **Zero-dependency framework:** `tests/test_framework.h` provides `ASSERT`, `ASSERT_EQ_INT`, `ASSERT_EQ_STR`, `RUN_TEST`, and `TEST_MAIN` macros. No GoogleTest, no Unity, no external libs.
-- **Testable-without-SDL rule:** anything that can be tested without an SDL window or a loaded GGUF model should have a suite. Pure string parsers (chat history splitting, system-prompt concatenation), semver comparison, and sandbox path resolution are all ideal candidates.
-- **Exposing static functions for tests:** wrap the function signature in `#ifdef TESTING` / `#else` to drop the `static` keyword. Provide a forward-declaration header (e.g. `tests/inference_test.h`) so the test file can link against it without `#include`ing the entire translation unit.
-- **Filesystem test setup:** suites that exercise `agent_resolve_path` or similar must create their scratch directories (e.g. `/tmp/wst_test_ws`) before calling `RUN_TEST`, because `realpath()` requires the parent to exist.
-- **CI integration:** `cmake --build build && ctest --output-on-failure` runs all suites automatically on every push.
+- **Zero-dependency framework:** `tests/test_framework.h` provides `ASSERT`, `ASSERT_EQ_INT`, `ASSERT_EQ_STR`, `ASSERT_TRUE`, `ASSERT_FALSE`, `ASSERT_NULL`, `ASSERT_NOT_NULL`, `RUN_TEST`, and `TEST_MAIN` macros. No GoogleTest, no Unity, no external libs.
+- **Testable-without-SDL rule:** anything that can be tested without an SDL window or a loaded GGUF model should have a suite. Pure string parsers (chat history splitting, system-prompt concatenation, RC4 cipher, HF URL rewrite, chat-name sanitisation), semver comparison, sandbox path resolution, and filesystem-touching tool executors are all ideal candidates.
+- **Two strategies for reaching internals:**
+  - **Compile-time `#ifdef TESTING`:** wrap the function signature in `#ifdef TESTING ... #else static ...` to drop the `static` keyword for test builds (used in `parse_chat_history`, `build_system_prompt`, `version_newer_than`, `build_update_filename`).
+  - **Hand-copied source duplication:** when the host TU drags SDL / llama.cpp / curl, copy the pure function into the test file with an `origin: src/<file>.c` reference comment (used in `test_chat_history.c`, `test_version.c`, `test_string_utils.c`). Sync the copies whenever the source is edited — the AGENTS.md test-parity rule covers this.
+  - **Direct linking:** when the host TU is dependency-free (e.g. `src/agent.c` has no SDL/llama.cpp), include it as a source in the test executable: `add_executable(test_agent tests/test_agent.c src/agent.c)`. This lets the suite call the real executors end-to-end.
+- **Filesystem test setup:** suites that exercise `agent_resolve_path` or `agent_exec_*` must create their scratch directories (e.g. `wst_test_ws/`, `wst_test_exec_ws/`) before calling `RUN_TEST`, because `realpath()` requires the parent to exist. Use a separate workspace per concern so failure artefacts can be inspected without polluting other tests.
+- **Round-trip pattern for ciphers:** for symmetric streams (RC4), the canonical test is `encrypt + encrypt = identity` plus a `ciphertext != plaintext` sanity check (so a NOP encrypt slipping in still fails). Add a determinism check (two encrypts of the same input produce the same bytes) to catch accidental time-based seeding.
+- **Buffer-overflow contract testing:** for in-place transforms with bounds (e.g. the HF URL `+3` rewrite), pass an artificially tight buffer and assert the function refuses (returns -1) rather than truncating or corrupting the buffer.
+- **CI integration:** `cmake --build build && ctest --output-on-failure` runs all suites automatically on every push. Currently 81 tests across 4 suites.
 
 ### Build Engineering
 
