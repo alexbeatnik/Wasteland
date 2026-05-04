@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Wasteland Terminal v0.2</title>
+    <title>Wasteland Terminal v0.3</title>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=VT323&display=swap');
 
@@ -162,11 +162,11 @@
             <span>SEC: SECCOMP_LOCKED</span>
             <span>NET: AIR_GAPPED</span>
         </div>
-        <h1>WASTELAND TERMINAL <span class="version-tag">v0.2</span></h1>
+        <h1>WASTELAND TERMINAL <span class="version-tag">v0.3</span></h1>
     </header>
 
     <section>
-        <p>A highly secure, offline-first LLM inference client built in pure C with a vintage PC-inspired amber-on-black CRT terminal aesthetic. It runs entirely offline once a model is loaded, using Linux seccomp to physically prevent the process from opening any new sockets for the rest of its lifetime.</p>
+        <p>A highly secure, offline LLM inference client built in pure C with a vintage PC-inspired amber-on-black CRT terminal aesthetic. It runs entirely offline once a model is loaded, using Linux seccomp to physically prevent the process from opening any new sockets for the rest of its lifetime.</p>
     </section>
 
     <section>
@@ -211,7 +211,7 @@
         <h3>--- INITIALIZATION SEQUENCE ---</h3>
         <div class="code-area">
 $ sudo pacman -S cmake sdl2 curl libseccomp
-$ git clone https://github.com/your_username/wasteland.git
+$ git clone https://github.com/alexbeatnik/wasteland.git
 $ cd wasteland && git submodule update --init --recursive
 $ ./build.sh
 $ ./Wasteland</div>
@@ -220,8 +220,8 @@ $ ./Wasteland</div>
     <section>
         <p>AWAITING DIRECTIVE<span class="cursor"></span></p>
         <div class="btn-group">
-            <a href="https://github.com/your_username/wasteland" class="btn">[ ACCESS SOURCE CODE ]</a>
-            <a href="https://github.com/your_username/wasteland/releases" class="btn">[ DOWNLOAD BINARIES ]</a>
+            <a href="https://github.com/alexbeatnik/wasteland" class="btn">[ ACCESS SOURCE CODE ]</a>
+            <a href="https://github.com/alexbeatnik/wasteland/releases" class="btn">[ DOWNLOAD BINARIES ]</a>
         </div>
     </section>
 </div>
