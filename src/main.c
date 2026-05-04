@@ -578,9 +578,6 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
-    int wx, wy, ww, wh;
-    (void)wx; (void)wy; (void)ww; (void)wh;
-
     SDL_GLContext gl_ctx = SDL_GL_CreateContext(win);
     if (!gl_ctx) {
         fprintf(stderr, "[main] SDL_GL_CreateContext error: %s\n", SDL_GetError());

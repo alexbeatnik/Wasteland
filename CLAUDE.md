@@ -183,6 +183,25 @@ The Linux lockdown is **deliberately narrow**: only `socket(AF_INET, …)`, `soc
 2. Gating `socket()` is sufficient: no new IP fd can be opened.
 3. Already-open file descriptors keep working unchanged.
 
+## Auto-Update
+
+The auto-update flow is split across three threads + a generated shell/batch script:
+
+1. **Startup probe (`update_check_thread` in `main.c`):** detached pthread launched **before** any model load (so seccomp lockdown can't kill it). Calls `network_check_update()` which hits `https://api.github.com/repos/alexbeatnik/wasteland/releases/latest` with a 5 s timeout. Parses `tag_name` via simple `strstr(...,"\"tag_name\":\"v")`. If `version_newer_than(latest, WASTELAND_VERSION)` returns true, writes `latest` into `state->update_version`. UI polls this every frame and renders an orange banner under the header when non-empty.
+2. **Download (`update_download_thread` in `main.c`):** spawned when the user clicks `[ DOWNLOAD UPDATE ]`. Computes the platform-appropriate artifact name via `build_update_filename()` (`Wasteland-windows.exe`, `Wasteland-macos.dmg`, `wasteland_<ver>_amd64.deb`, `wasteland_<ver>_arm64.deb`) and downloads it into `downloads/<file>` via `network_download_model`. Sets `state->update_state` to 1 on success, 2 on failure.
+3. **Restart (`launch_updater` in `main.c`):** when the user clicks `[ RESTART TO UPDATE ]`, this generates a small shell script (POSIX) or batch file (Windows) into `/tmp` / `%TEMP%`, then exits the app. The script polls until our PID is gone, then replaces the binary in place — using `pkexec`/`osascript`/`runas` to elevate when the install path isn't user-writable. After the copy it relaunches the new binary and self-deletes.
+
+### Filename matrix (`build_update_filename`)
+
+| Platform | Artifact |
+|---|---|
+| Windows | `Wasteland-windows.exe` |
+| macOS | `Wasteland-macos.dmg` |
+| Linux x86_64 | `wasteland_<ver>_amd64.deb` |
+| Linux aarch64 | `wasteland_<ver>_arm64.deb` |
+
+`version_newer_than` accepts `X.Y` or `X.Y.Z` with optional leading `v`. Both the API tag (`v0.5`) and `WASTELAND_VERSION` (`0.5`) are normalised by skipping non-digit prefix chars before `sscanf`.
+
 ## Auto-Generated Chat Titles
 
 When the user sends the first message in a newly-created chat, the UI sets `inference_set_needs_title(ictx, 1)`. After the normal assistant reply finishes, the worker runs a short secondary inference pass (max 20 tokens) with a dedicated title-generation prompt:

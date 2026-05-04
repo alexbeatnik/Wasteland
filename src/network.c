@@ -117,8 +117,12 @@ typedef struct {
 
 static size_t write_cb(void *ptr, size_t size, size_t nmemb, void *userdata)
 {
+    /* libcurl's WRITEFUNCTION expects the number of bytes consumed.  fwrite
+     * returns the count of items (nmemb) written — multiply back by `size`
+     * so partial-write detection is correct even if libcurl ever passes
+     * size != 1. */
     download_ctx_t *ctx = (download_ctx_t *)userdata;
-    return fwrite(ptr, size, nmemb, ctx->fp);
+    return fwrite(ptr, size, nmemb, ctx->fp) * size;
 }
 
 static int progress_cb(void *clientp,
