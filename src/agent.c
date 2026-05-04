@@ -2,6 +2,15 @@
  * agent.c — Tool-call parser, sandbox, and tool executors
  * ============================================================================
  *
+ * _GNU_SOURCE must be defined before any standard headers so glibc exposes
+ * memmem() (used by the apply_edit parser). Without this, memmem is an
+ * implicit function declaration and its return pointer gets truncated on
+ * 64-bit Linux, breaking the SEARCH/======/REPLACE marker scan.
+ * ============================================================================ */
+#define _GNU_SOURCE
+
+/* ============================================================================
+ *
  * Sandbox model: every path is resolved with realpath(); both the resolved
  * target AND its parent (for create-new-file) must lie strictly inside the
  * user-chosen workspace. There is no escape hatch — symlinks, "..", and
