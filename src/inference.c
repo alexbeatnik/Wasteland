@@ -158,10 +158,17 @@ struct inference_ctx {
  * An unterminated user message at the very end is ignored — the current
  * prompt is supplied separately via ictx->prompt.
  * --------------------------------------------------------------------------- */
+#ifdef TESTING
+int parse_chat_history(const char *history,
+                       struct llama_chat_message *msgs,
+                       char **owned,
+                       int max_msgs)
+#else
 static int parse_chat_history(const char *history,
                               struct llama_chat_message *msgs,
                               char **owned,
                               int max_msgs)
+#endif
 {
     int n = 0;
     const char *p = history;
@@ -263,7 +270,11 @@ static int parse_chat_history(const char *history,
 
 /* Combine BASE_SYSTEM_PROMPT with an optional user system prompt into `out`.
  * Always produces a non-empty string — the base prompt is unconditional. */
+#ifdef TESTING
+void build_system_prompt(const char *user_sys, char *out, size_t out_size)
+#else
 static void build_system_prompt(const char *user_sys, char *out, size_t out_size)
+#endif
 {
     if (user_sys && user_sys[0]) {
         snprintf(out, out_size, "%s\n\n%s", BASE_SYSTEM_PROMPT, user_sys);

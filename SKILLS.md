@@ -91,6 +91,14 @@ This project does not use a formal skill system. The following domains are relev
 - Key rules for a terminal LLM client: suppress markdown (the UI renders text verbatim), enforce conciseness, and communicate the offline/sandboxed nature of the runtime so the model doesn't hallucinate internet access.
 - Agent mode system prompt = base + user sys + tool instructions, concatenated in that order. Buffer size must accommodate all three (~16 KB in Wasteland).
 
+### Unit Testing
+
+- **Zero-dependency framework:** `tests/test_framework.h` provides `ASSERT`, `ASSERT_EQ_INT`, `ASSERT_EQ_STR`, `RUN_TEST`, and `TEST_MAIN` macros. No GoogleTest, no Unity, no external libs.
+- **Testable-without-SDL rule:** anything that can be tested without an SDL window or a loaded GGUF model should have a suite. Pure string parsers (chat history splitting, system-prompt concatenation), semver comparison, and sandbox path resolution are all ideal candidates.
+- **Exposing static functions for tests:** wrap the function signature in `#ifdef TESTING` / `#else` to drop the `static` keyword. Provide a forward-declaration header (e.g. `tests/inference_test.h`) so the test file can link against it without `#include`ing the entire translation unit.
+- **Filesystem test setup:** suites that exercise `agent_resolve_path` or similar must create their scratch directories (e.g. `/tmp/wst_test_ws`) before calling `RUN_TEST`, because `realpath()` requires the parent to exist.
+- **CI integration:** `cmake --build build && ctest --output-on-failure` runs all suites automatically on every push.
+
 ### Build Engineering
 
 - CMake target configuration.

@@ -132,6 +132,9 @@ Before declaring a task complete:
 15. Auto-update banner must appear when `state->update_version` is non-empty (can be tested by temporarily hardcoding a different version string).
 16. A new chat's file must be renamed by the model-generated title after the first assistant reply completes (check `chats/` directory).
 17. ARM64 `.deb` built in CI must run on Raspberry Pi 4/5 without `Illegal instruction`.
+18. All CTest suites pass (`ctest --output-on-failure`).
+19. New logic must have a matching `tests/test_*.c` suite if it is testable without SDL/llama.cpp (pure string / file / math functions).
+20. Existing tests must not be broken by the change — run `ctest` before every commit.
 
 ## Font & DPI Rules
 

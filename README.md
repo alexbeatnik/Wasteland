@@ -167,6 +167,11 @@ Wasteland/
 │   ├── agent.c / agent.h   # Tool-using ReAct agent loop (read_file, list_dir, write_file, apply_edit)
 │   ├── nuklear_impl.c      # Nuklear + SDL/GL2 backend impl
 │   └── nuklear_sdl_gl2.h   # Nuklear SDL2/OpenGL2 backend
+├── tests/
+│   ├── test_framework.h    # Minimal assertion macros (no external deps)
+│   ├── test_agent.c        # Agent parser & sandbox tests
+│   ├── test_chat_history.c # Chat-history parser & system-prompt builder tests
+│   └── test_version.c      # Semver comparison & updater filename tests
 ├── include/                # nuklear.h
 ├── third_party/
 │   └── llama.cpp/          # Git submodule (vendored llama.cpp)
@@ -174,6 +179,38 @@ Wasteland/
 │   └── llama.cpp -> ../third_party/llama.cpp  # symlink the CMake build uses
 └── models/                 # Local .gguf storage (gitignored)
 ```
+
+## Testing
+
+Wasteland ships with a minimal C test framework (`tests/test_framework.h`) — zero external dependencies, only standard macros and `stdio.h`.
+
+```bash
+cd build
+ctest --output-on-failure
+```
+
+Or run individual test binaries directly:
+
+```bash
+./test_agent         # agent_parse_calls + agent_resolve_path sandbox
+./test_chat_history  # parse_chat_history + build_system_prompt
+./test_version       # version_newer_than + build_update_filename
+```
+
+Tests are compiled automatically by CMake when you configure the project. To add a new test suite:
+
+1. Create `tests/test_<module>.c`.
+2. Include `test_framework.h` and define `void run_<name>(void)` that calls `RUN_TEST(...)` for each case.
+3. End with `TEST_MAIN(<name>)`.
+4. Register it in `CMakeLists.txt` via `add_executable(test_<name> ...) + add_test(...)`.
+
+### Current coverage
+
+| Suite | What it tests |
+|---|---|
+| `test_agent` | Tool-call markdown parsing (`read_file`, `list_dir`, `write_file`, `apply_edit`), sandbox path resolution (escape attempts, absolute paths, new files) |
+| `test_chat_history` | Flat `> prompt\nreply\n` → user/assistant message splitting, trailing-user discard, max-msg cap, system-prompt concatenation |
+| `test_version` | Semver comparison (`X.Y.Z` with optional `v` prefix), platform-specific update-filename generation |
 
 ## UI Guide
 

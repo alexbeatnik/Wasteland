@@ -288,3 +288,26 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 
     include(CPack)
 endif()
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+enable_testing()
+
+# Agent tests
+add_executable(test_agent tests/test_agent.c src/agent.c)
+target_compile_definitions(test_agent PRIVATE TESTING)
+target_include_directories(test_agent PRIVATE src include)
+add_test(NAME agent COMMAND test_agent)
+
+# Chat-history tests (self-contained copies of pure functions from inference.c)
+add_executable(test_chat_history tests/test_chat_history.c)
+target_compile_definitions(test_chat_history PRIVATE TESTING)
+target_include_directories(test_chat_history PRIVATE src include)
+add_test(NAME chat_history COMMAND test_chat_history)
+
+# Version / updater tests (self-contained copy of functions from main.c)
+add_executable(test_version tests/test_version.c)
+target_compile_definitions(test_version PRIVATE TESTING)
+target_include_directories(test_version PRIVATE src include)
+add_test(NAME version COMMAND test_version)

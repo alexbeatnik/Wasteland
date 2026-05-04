@@ -115,8 +115,13 @@ typedef struct {
     int   settings_n_ctx;
     float settings_temperature;
 
-    /* Auto-update check result (filled by background pthread at startup) */
-    char update_version[32];
+    /* Auto-update state */
+    char update_version[32];            /* e.g. "0.4" (empty = no update) */
+    volatile int update_progress;       /* 0-100 download progress */
+    volatile int update_active;         /* 1 while downloading */
+    volatile int update_cancel;         /* set to 1 to abort */
+    int          update_state;          /* 0=idle, 1=downloaded, 2=failed */
+    char         update_file[512];      /* path to downloaded installer */
 
     volatile int running;
 } app_state_t;

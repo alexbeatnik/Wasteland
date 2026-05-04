@@ -211,6 +211,15 @@ User: Give this conversation a short 3-5 word title. Output ONLY the title text,
 - **Windows DPI fallback:** On Windows with per-monitor DPI awareness, `SDL_GL_GetDrawableSize` sometimes returns the same value as `SDL_GetWindowSize` even when scaling is active. If the computed ratio is ≤ 1.01, we fall back to `SDL_GetDisplayDPI / 96.0f` to ensure readable text.
 - **`memmem` on Windows:** MSVC does not provide `memmem`. A `static` fallback is defined inside `#ifdef _WIN32` in `agent.c`, placed before any call site. No forward declaration — a prior implicit `int ()` declaration from MSVC would conflict and trigger C2040.
 
+## Testing
+
+- Tests live in `tests/` and use a **zero-dependency** macro framework (`tests/test_framework.h`). No external test library is required.
+- `ctest --output-on-failure` (or `make test`) runs all suites after the main build.
+- To test `static` functions without exposing them in public headers, use `#ifdef TESTING` to drop the `static` keyword and provide a forward-declaration header for the test file (e.g. `inference_test.h`).
+- Suites that depend on the filesystem (sandbox path resolution) must create their scratch directories inside `run_*` before calling `RUN_TEST`.
+- Suites that depend on SDL / llama.cpp should **not** link the whole application binary. Instead, copy the pure functions into a self-contained `tests/test_*.c` file (see `tests/test_chat_history.c` and `tests/test_version.c`).
+- All tests run automatically in CI via `cmake --build build && ctest --output-on-failure`.
+
 ## Build Notes
 
 - `nuklear_impl.c` is the **single compilation unit** for Nuklear implementation.

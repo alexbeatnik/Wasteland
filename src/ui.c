@@ -753,8 +753,42 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
         if (state->update_version[0]) {
             nk_layout_row_dynamic(nk, 18, 1);
             struct nk_color warn = nk_rgb(0xFF, 0x60, 0x20);
-            nk_label_colored(nk, state->update_version,
-                             NK_TEXT_CENTERED, warn);
+            char banner[64];
+            snprintf(banner, sizeof(banner),
+                     "Update available: v%s", state->update_version);
+            nk_label_colored(nk, banner, NK_TEXT_CENTERED, warn);
+
+            if (state->update_active) {
+                nk_layout_row_dynamic(nk, 18, 1);
+                char prog[64];
+                snprintf(prog, sizeof(prog),
+                         "Downloading update: %d%%",
+                         state->update_progress);
+                nk_label_colored(nk, prog, NK_TEXT_CENTERED, warn);
+            } else if (state->update_state == 1) {
+                nk_layout_row_dynamic(nk, 24, 1);
+                if (nk_button_label(nk, "[ RESTART TO UPDATE ]")) {
+                    extern void launch_updater(const char *);
+                    launch_updater(state->update_file);
+                    state->running = 0;
+                }
+            } else if (state->update_state == 0) {
+                nk_layout_row_dynamic(nk, 24, 1);
+                if (nk_button_label(nk, "[ DOWNLOAD UPDATE ]")) {
+                    extern void* update_download_thread(void *);
+                    pthread_t dl;
+                    pthread_create(&dl, NULL,
+                                   update_download_thread, state);
+                }
+            } else if (state->update_state == 2) {
+                nk_layout_row_dynamic(nk, 18, 1);
+                nk_label_colored(nk, "Download failed. Try again.",
+                                 NK_TEXT_CENTERED, warn);
+                nk_layout_row_dynamic(nk, 24, 1);
+                if (nk_button_label(nk, "[ RETRY DOWNLOAD ]")) {
+                    state->update_state = 0;
+                }
+            }
         }
 
         /* Status row: [toggle] | SYS | status | NET
