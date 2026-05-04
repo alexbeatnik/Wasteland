@@ -49,9 +49,13 @@ jobs:
       - name: Create and push tag
         run: |
           TAG="${{ github.event.inputs.version || needs.extract-version.outputs.version }}"
+          if git ls-remote --tags origin "refs/tags/$TAG" | grep -q "$TAG"; then
+            echo "Tag $TAG already exists on remote, skipping."
+            exit 0
+          fi
           echo "Creating tag: $TAG"
-          git tag -f "$TAG"
-          git push -f origin "$TAG"
+          git tag "$TAG"
+          git push origin "$TAG"
 
   test:
     name: Run Unit Tests
