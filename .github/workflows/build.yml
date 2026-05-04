@@ -6,28 +6,67 @@ on:
     tags: [ "v*" ]
   pull_request:
     branches: [ "main" ]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag to create and release (e.g. v0.4)'
+        required: true
+        type: string
 
 jobs:
+  extract-version:
+    name: Extract Version
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: version
+        run: |
+          VER=$(grep '#define WASTELAND_VERSION' src/ui.h | sed 's/.*"\(.*\)".*/\1/')
+          echo "version=v${VER}" >> $GITHUB_OUTPUT
+
+  create-tag:
+    name: Create Tag
+    needs: [ extract-version ]
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.extract-version.result == 'success')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Create and push tag
+        run: |
+          TAG="${{ github.event.inputs.version || needs.extract-version.outputs.version }}"
+          echo "Creating tag: $TAG"
+          git tag -f "$TAG"
+          git push -f origin "$TAG"
+
   build:
     name: Build on ${{ matrix.os }}
+    needs: [ create-tag ]
+    if: |
+      always() &&
+      (github.event_name == 'push' ||
+       github.event_name == 'pull_request' ||
+       github.event_name == 'workflow_dispatch')
     runs-on: ${{ matrix.os }}
     strategy:
-      # Don't cancel sibling jobs if one platform fails — we still want the
-      # other artifacts uploaded so a partial release can be inspected.
       fail-fast: false
       matrix:
-        # ubuntu-20.04 was removed from GitHub-hosted runners in April 2025;
-        # macos-13 (last Intel runner) is being retired and frequently queues
-        # indefinitely with no pickup. Apple Silicon is the only macOS runner
-        # we can rely on getting scheduled — Intel users build from source.
         os: [ubuntu-22.04, ubuntu-22.04-arm, macos-14, windows-latest]
         include:
-          # `file_name` is the on-disk filename CMake/CPack/hdiutil produces and
-          # the name attached to the GitHub Release (raw, no .zip wrapper).
-          # `artifact_name` is the upload-artifact label — GH always re-zips
-          # whatever you upload as `<artifact_name>.zip` for the Actions UI
-          # download, so we deliberately omit the file extension here to avoid
-          # ugly `Wasteland-windows.exe.zip` double-extensions.
           - os: ubuntu-22.04
             file_name: wasteland_0.4_amd64.deb
             artifact_name: wasteland-linux-amd64-deb
@@ -59,19 +98,11 @@ jobs:
     - name: Install Dependencies (macOS)
       if: matrix.target_os == 'macos'
       run: |
-        # Only need cmake + pkg-config from brew. We deliberately DON'T use
-        # brew's sdl2/curl bottles because those are arm64-only on a macos-14
-        # runner and break the universal build. Instead:
-        #   - SDL2: built from source as a universal static lib below
-        #   - curl: linked against macOS's system /usr/lib/libcurl.dylib,
-        #           which Apple ships as a universal binary already
         brew install cmake pkg-config
 
     - name: Build universal SDL2 from source (macOS)
       if: matrix.target_os == 'macos'
       run: |
-        # Pin to a known-good SDL2 release. Static + universal so the .dmg
-        # is a single self-contained .app that runs on Intel and Apple Silicon.
         SDL2_VERSION=2.30.7
         SDL2_PREFIX="$HOME/sdl2-universal"
         curl -L "https://github.com/libsdl-org/SDL/releases/download/release-${SDL2_VERSION}/SDL2-${SDL2_VERSION}.tar.gz" \
@@ -91,11 +122,6 @@ jobs:
     - name: Install Dependencies (Windows)
       if: matrix.target_os == 'windows'
       run: |
-        # Static triplet so the resulting Wasteland.exe is a single
-        # self-contained binary with SDL2, libcurl, and pthreads-win32
-        # linked in — no SDL2.dll / libcurl.dll / pthread.dll need to ship
-        # alongside it. pthreads4w (vcpkg name: pthreads) provides the
-        # POSIX threading API on MSVC, where pthread.h doesn't exist.
         vcpkg install sdl2:x64-windows-static curl:x64-windows-static pthreads:x64-windows-static
 
     - name: Configure CMake (Linux amd64)
@@ -109,13 +135,6 @@ jobs:
     - name: Configure CMake (macOS)
       if: matrix.target_os == 'macos'
       run: |
-        # Universal build: arm64 + x86_64 in one fat binary.
-        #   - SDL2 prefix points at the universal static lib we just built.
-        #   - We deliberately DO NOT add brew curl to CMAKE_PREFIX_PATH so
-        #     find_package(CURL) falls through to macOS's system libcurl
-        #     (universal) at /usr/lib/libcurl.dylib.
-        #   - Deployment target 11.0 = Big Sur (first version supporting both
-        #     archs natively).
         cmake -B build -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
           -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 \
@@ -143,10 +162,6 @@ jobs:
     - name: Package (macOS)
       if: matrix.target_os == 'macos'
       run: |
-        # CMake's MACOSX_BUNDLE produces build/Wasteland.app — a directory
-        # containing Contents/MacOS/Wasteland and Contents/Resources/icon.icns.
-        # Drop it into a staging dir + a /Applications symlink for the classic
-        # drag-to-install DMG layout, then compress.
         cd build
         mkdir dmg_root
         cp -R Wasteland.app dmg_root/
@@ -156,19 +171,11 @@ jobs:
     - name: Package (Windows)
       if: matrix.target_os == 'windows'
       run: |
-        # Hand the binary to the upload step at the same path the other
-        # platforms use: build/<file_name>. With static linkage the
-        # resulting .exe is the entire deliverable — no DLLs needed.
         Copy-Item build/Release/Wasteland.exe build/${{ matrix.file_name }}
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v5
       with:
-        # `name` is the artifact label shown in the Actions UI. GH always
-        # zips the contents on download, so we use a label without an
-        # extension — the result is a clean `<artifact_name>.zip` instead
-        # of `Wasteland-windows.exe.zip`. The actual binary keeps its
-        # platform-correct name inside the zip.
         name: ${{ matrix.artifact_name }}
         path: |
           build/${{ matrix.file_name }}
@@ -176,7 +183,12 @@ jobs:
   release:
     name: Create Release
     needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+    if: |
+      always() &&
+      needs.build.result == 'success' &&
+      (startsWith(github.ref, 'refs/tags/') ||
+       github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
@@ -191,5 +203,6 @@ jobs:
           files: artifacts/*
           draft: false
           prerelease: false
+          tag_name: ${{ github.event.inputs.version || needs.extract-version.outputs.version || github.ref_name }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
