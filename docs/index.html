@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Wasteland Terminal v0.3</title>
+    <title>Wasteland Terminal v0.4</title>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=VT323&display=swap');
 
@@ -211,7 +211,7 @@
             <span>SEC: SECCOMP_LOCKED</span>
             <span>NET: AIR_GAPPED</span>
         </div>
-        <h1>WASTELAND TERMINAL <span class="version-tag">v0.3</span></h1>
+        <h1>WASTELAND TERMINAL <span class="version-tag">v0.4</span></h1>
     </header>
 
     <section>
@@ -250,6 +250,14 @@
                 Built-in tool-using ReAct agent loop with sandboxed file system access (read_file, list_dir, write_file, apply_edit).
             </div>
             <div class="feature-item">
+                <strong>Auto-Generated Chat Titles</strong>
+                First message names the chat; the model then generates a contextual 3–5 word title and the file is renamed automatically.
+            </div>
+            <div class="feature-item">
+                <strong>One-Click Auto-Update</strong>
+                Background GitHub check on startup. Download + replace + restart with a single button press — UAC / pkexec handled automatically.
+            </div>
+            <div class="feature-item">
                 <strong>Multi-Turn Memory</strong>
                 Create, load, and switch between named chat sessions. Persisted locally with RC4 obfuscation.
             </div>
@@ -272,6 +280,7 @@
             <li><strong>Font:</strong> Embedded DejaVu Sans Mono — no external font files needed</li>
             <li><strong>Unicode:</strong> Basic Latin, Cyrillic (Ukrainian), Geometric Shapes (▶ ■)</li>
             <li><strong>HiDPI:</strong> Auto-scales on Retina and Windows scaled displays</li>
+            <li><strong>Testing:</strong> Zero-dependency C test framework with CTest integration</li>
         </ul>
     </section>
 
@@ -330,19 +339,46 @@ cmake --build . --config Release</div>
     <section>
         <h3>--- PREBUILT BINARIES ---</h3>
         <p>GitHub Actions builds and releases for all platforms on every tag. Push a tag to trigger:</p>
-        <div class="code-area">git tag v0.3
-git push origin v0.3</div>
+        <div class="code-area">git tag v0.4
+git push origin v0.4</div>
         <table class="dl-table">
             <thead>
                 <tr><th>Platform</th><th>Artifact</th></tr>
             </thead>
             <tbody>
-                <tr><td>Linux x86_64</td><td>wasteland_0.3_amd64.deb</td></tr>
-                <tr><td>Linux ARM64</td><td>wasteland_0.3_arm64.deb</td></tr>
+                <tr><td>Linux x86_64</td><td>wasteland_0.4_amd64.deb</td></tr>
+                <tr><td>Linux ARM64</td><td>wasteland_0.4_arm64.deb</td></tr>
                 <tr><td>macOS (universal)</td><td>Wasteland-macos.dmg</td></tr>
                 <tr><td>Windows</td><td>Wasteland-windows.exe</td></tr>
             </tbody>
         </table>
+    </section>
+
+    <section>
+        <h3>--- PROJECT STRUCTURE ---</h3>
+        <div class="code-area">Wasteland/
+├── CMakeLists.txt          # Cross-platform build + CTest
+├── build.sh                # One-shot build script (Linux)
+├── README.md / CLAUDE.md   # Docs & AI assistant context
+├── AGENTS.md / SKILLS.md   # Agent conventions & skill reference
+├── src/
+│   ├── main.c              # Entry point, SDL loop, updater launcher
+│   ├── ui.c / ui.h         # Nuklear layout, amber theme, chat boxes
+│   ├── inference.c / .h    # llama.cpp wrapper, title generation, sampler
+│   ├── network.c / .h      # libcurl downloader + auto-update check
+│   ├── agent.c / agent.h   # ReAct tool loop (read/list/write/edit)
+│   └── nuklear_impl.c      # Nuklear + SDL/GL2 backend
+├── tests/
+│   ├── test_framework.h    # Minimal assertion macros
+│   ├── test_agent.c        # Parser & sandbox tests
+│   ├── test_chat_history.c # History & system-prompt tests
+│   └── test_version.c      # Semver & updater filename tests
+├── docs/
+│   └── index.html          # This page
+├── include/                # nuklear.h
+├── third_party/
+│   └── llama.cpp/          # Git submodule
+└── models/                 # Local .gguf storage</div>
     </section>
 
     <section>
@@ -359,6 +395,19 @@ git push origin v0.3</div>
             <li>seccomp filters cannot be removed for the lifetime of the process. Unloading a model does not lift the lockdown — restart to download more models.</li>
             <li>The download path is gated by <code>state-&gt;network_lockdown</code> in the UI, so the <strong>[ DOWNLOAD ]</strong> button hides the moment the lockdown is active.</li>
         </ol>
+    </section>
+
+    <section>
+        <h3>--- TESTING ---</h3>
+        <p>Wasteland ships with a zero-dependency C test framework. Run all suites via CTest:</p>
+        <div class="code-area">cd build
+ctest --output-on-failure</div>
+        <p>Current coverage:</p>
+        <ul>
+            <li><strong>test_agent</strong> — Tool-call markdown parsing + sandbox path resolution</li>
+            <li><strong>test_chat_history</strong> — Flat history → user/assistant pairs + system-prompt builder</li>
+            <li><strong>test_version</strong> — Semver comparison + platform-specific updater filenames</li>
+        </ul>
     </section>
 
     <section>

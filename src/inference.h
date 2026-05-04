@@ -65,6 +65,20 @@ void   inference_cancel_generation(inference_ctx_t *ctx);
  * either already exiting or about to. */
 void   inference_request_stop(inference_ctx_t *ctx);
 
+/* Title generation -------------------------------------------------------- */
+/**
+ * Request the worker to generate a title after the next assistant reply.
+ * The title is produced by a short secondary inference pass and does not
+ * appear in the chat history.
+ */
+void   inference_set_needs_title(inference_ctx_t *ctx, int needs);
+
+/**
+ * If a title has been generated, copy it into buf (up to size bytes) and
+ * return 1.  Returns 0 if no title is ready yet.  Safe to poll every frame.
+ */
+int    inference_take_title(inference_ctx_t *ctx, char *buf, size_t size);
+
 /* Agent mode -------------------------------------------------------------- */
 
 /**

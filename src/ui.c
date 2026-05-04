@@ -108,8 +108,8 @@ int scan_local_chats(char chats_list[][WASTELAND_CHAT_NAME_LEN], int max_chats)
 {
     int count = 0;
 #ifdef _WIN32
-    WIN32_FIND_DATA fd;
-    HANDLE hFind = FindFirstFile("chats\\*.txt", &fd);
+    WIN32_FIND_DATAA fd;
+    HANDLE hFind = FindFirstFileA("chats\\*.txt", &fd);
     if (hFind == INVALID_HANDLE_VALUE) return 0;
     do {
         if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
@@ -118,7 +118,7 @@ int scan_local_chats(char chats_list[][WASTELAND_CHAT_NAME_LEN], int max_chats)
                      "%s", fd.cFileName);
             count++;
         }
-    } while (FindNextFile(hFind, &fd) != 0);
+    } while (FindNextFileA(hFind, &fd) != 0);
     FindClose(hFind);
 #else
     DIR *d = opendir("chats");
@@ -164,6 +164,13 @@ static void rc4_crypt_buffer(unsigned char *data, size_t len)
         unsigned char tmp = s[i]; s[i] = s[j]; s[j] = tmp;
     }
     i = j = 0;
+    /* RC4-drop256: discard the first 256 keystream bytes to mitigate
+     * known biases in the initial output of the RC4 PRGA. */
+    for (int drop = 0; drop < 256; drop++) {
+        i = (i + 1) & 255;
+        j = (j + s[i]) & 255;
+        unsigned char tmp = s[i]; s[i] = s[j]; s[j] = tmp;
+    }
     for (size_t k = 0; k < len; k++) {
         i = (i + 1) & 255;
         j = (j + s[i]) & 255;
@@ -636,6 +643,63 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
             state->context_tokens > (int)(state->context_max * 0.80f)) {
             ui_compact_chat_history(state, 1);
         }
+
+        /* If the model produced a title for a newly-created chat,
+         * rename the chat file and update the UI label. */
+        char model_title[WASTELAND_CHAT_NAME_LEN];
+        if (inference_take_title(state->inference,
+                                 model_title, sizeof(model_title))) {
+            if (state->selected_chat >= 0 &&
+                state->selected_chat < state->chat_count) {
+                char old_name[WASTELAND_CHAT_NAME_LEN];
+                snprintf(old_name, sizeof(old_name), "%s",
+                         state->chats[state->selected_chat]);
+
+                /* Sanitise and ensure .txt extension */
+                char base[WASTELAND_CHAT_NAME_LEN];
+                int b = 0;
+                for (size_t i = 0;
+                     model_title[i] && b < (int)sizeof(base) - 5; i++) {
+                    unsigned char c = (unsigned char)model_title[i];
+                    if (c >= 0x80 || (c >= 'a' && c <= 'z') ||
+                        (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+                        base[b++] = (char)c;
+                    } else if (c == ' ' || c == '-') {
+                        if (b > 0 && base[b-1] != ' ') base[b++] = ' ';
+                    }
+                }
+                while (b > 0 && base[b-1] == ' ') b--;
+                base[b] = '\0';
+                if (b == 0) strcpy(base, "Chat");
+
+                char new_name[WASTELAND_CHAT_NAME_LEN];
+                snprintf(new_name, sizeof(new_name), "%s.txt", base);
+
+                /* Ensure uniqueness */
+                char path[512];
+                snprintf(path, sizeof(path), "chats/%s", new_name);
+                struct stat st;
+                int suffix = 1;
+                while (stat(path, &st) == 0 && suffix < 100) {
+                    snprintf(new_name, sizeof(new_name),
+                             "%s_%d.txt", base, suffix);
+                    snprintf(path, sizeof(path), "chats/%s", new_name);
+                    suffix++;
+                }
+
+                /* Rename file */
+                char old_path[512];
+                snprintf(old_path, sizeof(old_path), "chats/%s", old_name);
+                if (rename(old_path, path) == 0) {
+                    snprintf(state->chats[state->selected_chat],
+                             WASTELAND_CHAT_NAME_LEN, "%s", new_name);
+                    snprintf(state->status_msg,
+                             sizeof(state->status_msg),
+                             "Chat renamed to: %s", base);
+                    state->status_timer = SDL_GetTicks();
+                }
+            }
+        }
     }
     was_generating = state->is_generating;
 
@@ -686,8 +750,55 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
     {
         /* ========================= HEADER ========================= */
         nk_layout_row_dynamic(nk, 30, 1);
-        nk_label_colored(nk, "WASTELAND TERMINAL v0.3",
-                         NK_TEXT_CENTERED, amber);
+        {
+            char hdr[64];
+            snprintf(hdr, sizeof(hdr), "WASTELAND TERMINAL v%s",
+                     WASTELAND_VERSION);
+            nk_label_colored(nk, hdr, NK_TEXT_CENTERED, amber);
+        }
+
+        if (state->update_version[0]) {
+            nk_layout_row_dynamic(nk, 18, 1);
+            struct nk_color warn = nk_rgb(0xFF, 0x60, 0x20);
+            char banner[64];
+            snprintf(banner, sizeof(banner),
+                     "Update available: v%s", state->update_version);
+            nk_label_colored(nk, banner, NK_TEXT_CENTERED, warn);
+
+            if (state->update_active) {
+                nk_layout_row_dynamic(nk, 18, 1);
+                char prog[64];
+                snprintf(prog, sizeof(prog),
+                         "Downloading update: %d%%",
+                         state->update_progress);
+                nk_label_colored(nk, prog, NK_TEXT_CENTERED, warn);
+            } else if (state->update_state == 1) {
+                nk_layout_row_dynamic(nk, 24, 1);
+                if (nk_button_label(nk, "[ RESTART TO UPDATE ]")) {
+                    extern void launch_updater(const char *);
+                    launch_updater(state->update_file);
+                    state->running = 0;
+                }
+            } else if (state->update_state == 0) {
+                nk_layout_row_dynamic(nk, 24, 1);
+                if (nk_button_label(nk, "[ DOWNLOAD UPDATE ]")) {
+                    extern void* update_download_thread(void *);
+                    pthread_t dl;
+                    if (pthread_create(&dl, NULL,
+                                       update_download_thread, state) == 0) {
+                        pthread_detach(dl);
+                    }
+                }
+            } else if (state->update_state == 2) {
+                nk_layout_row_dynamic(nk, 18, 1);
+                nk_label_colored(nk, "Download failed. Try again.",
+                                 NK_TEXT_CENTERED, warn);
+                nk_layout_row_dynamic(nk, 24, 1);
+                if (nk_button_label(nk, "[ RETRY DOWNLOAD ]")) {
+                    state->update_state = 0;
+                }
+            }
+        }
 
         /* Status row: [toggle] | SYS | status | NET
          * \xc2\xab = U+00AB << (collapse)  \xc2\xbb = U+00BB >> (expand) */
@@ -1517,16 +1628,10 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                 if (send && state->input_buffer[0] &&
                     inference_is_model_loaded(state->inference))
                 {
-                    /* Pre-send compact if context is near full. The user's
-                     * new prompt is appended below and ui_set_chat_history()
-                     * mirrors the result into inference, so we only need the
-                     * lock + stats refresh here — no separate push/save. */
+                    /* Pre-send compact if context is near full. */
                     if (state->context_max > 0 &&
                         state->context_tokens > (int)(state->context_max * 0.75f)) {
-                        pthread_mutex_lock(&state->chat_mutex);
-                        compact_chat_history(state, 1);
-                        pthread_mutex_unlock(&state->chat_mutex);
-                        ui_update_context_stats(state);
+                        ui_compact_chat_history(state, 1);
                     }
 
                     /* Auto-create chat if none active */
@@ -1541,6 +1646,9 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                         state->selected_chat = state->chat_count;
                         state->chat_count++;
                         save_chat_history(new_chat, "");
+                        /* Ask the model to produce a better title after
+                         * the first assistant reply. */
+                        inference_set_needs_title(state->inference, 1);
                     }
 
                     pthread_mutex_lock(&state->chat_mutex);

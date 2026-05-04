@@ -34,11 +34,17 @@
 #  include <windows.h>
 #  include <direct.h>
 #  include <shellscalingapi.h>  /* SetProcessDpiAwareness fallback */
+#  include <shellapi.h>
 #  ifndef S_ISDIR
 #    define S_ISDIR(mode) (((mode) & _S_IFMT) == _S_IFDIR)
 #  endif
+#elif defined(__APPLE__)
+#  include <mach-o/dyld.h>
+#  include <unistd.h>
+#  include <sys/types.h>
 #else
 #  include <unistd.h>
+#  include <sys/types.h>
 #  include <dirent.h>
 #endif
 
@@ -131,21 +137,10 @@ static void platform_sleep_ms(int ms)
    Returns 0 on success, -1 on timeout. */
 static int platform_thread_join_timeout(pthread_t thread, int timeout_ms)
 {
-#ifdef __linux__
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    ts.tv_sec += timeout_ms / 1000;
-    ts.tv_nsec += (timeout_ms % 1000) * 1000000L;
-    if (ts.tv_nsec >= 1000000000L) {
-        ts.tv_sec++;
-        ts.tv_nsec -= 1000000000L;
-    }
-    int rc = pthread_timedjoin_np(thread, NULL, &ts);
-    return (rc == 0) ? 0 : -1;
-#else
-    /* macOS / Windows / others: poll with short sleeps */
+    /* Use polling with pthread_kill for portability across glibc, musl,
+     * macOS, and Windows. pthread_timedjoin_np is glibc-specific and
+     * breaks on Alpine/musl. */
     for (int waited = 0; waited < timeout_ms; waited += 100) {
-        /* pthread_kill(t,0) returns 0 if alive, ESRCH if dead */
         if (pthread_kill(thread, 0) == ESRCH) {
             pthread_join(thread, NULL); /* reap it */
             return 0;
@@ -153,7 +148,6 @@ static int platform_thread_join_timeout(pthread_t thread, int timeout_ms)
         platform_sleep_ms(100);
     }
     return -1;
-#endif
 }
 
 /* ---------------------------------------------------------------------------
@@ -260,8 +254,15 @@ static void platform_pick_data_dir(char *out, size_t out_size)
         return;
     }
 #endif
-    /* Last resort: tmp. Better than aborting. */
+    /* Last resort: temp dir. Better than aborting. */
+#ifdef _WIN32
+    const char *tmp = getenv("TEMP");
+    if (!tmp || !*tmp) tmp = getenv("TMP");
+    if (!tmp || !*tmp) tmp = "C:\\Windows\\Temp";
+    snprintf(out, out_size, "%s\\wasteland", tmp);
+#else
     snprintf(out, out_size, "/tmp/wasteland");
+#endif
     ensure_dir(out);
 }
 
@@ -301,6 +302,215 @@ static void ensure_models_dir(void)
 }
 
 /* scan_local_models() is now defined in ui.c and declared in ui.h */
+
+/* ---------------------------------------------------------------------------
+ * Semver comparison — returns 1 if a > b, 0 otherwise.
+ * Accepts "X.Y" or "X.Y.Z" strings with optional leading 'v'.
+ * --------------------------------------------------------------------------- */
+#ifdef TESTING
+int version_newer_than(const char *a, const char *b)
+#else
+static int version_newer_than(const char *a, const char *b)
+#endif
+{
+    int amaj = 0, amin = 0, apatch = 0;
+    int bmaj = 0, bmin = 0, bpatch = 0;
+    const char *ap = a;
+    const char *bp = b;
+    while (*ap && (*ap < '0' || *ap > '9')) ap++;
+    while (*bp && (*bp < '0' || *bp > '9')) bp++;
+    sscanf(ap, "%d.%d.%d", &amaj, &amin, &apatch);
+    sscanf(bp, "%d.%d.%d", &bmaj, &bmin, &bpatch);
+    if (amaj != bmaj) return amaj > bmaj;
+    if (amin != bmin) return amin > bmin;
+    return apatch > bpatch;
+}
+
+/* ---------------------------------------------------------------------------
+ * Background update check thread
+ * --------------------------------------------------------------------------- */
+static void* update_check_thread(void *arg)
+{
+    app_state_t *st = (app_state_t *)arg;
+    char latest[32] = {0};
+    if (network_check_update(latest, sizeof(latest)) == 0) {
+        if (version_newer_than(latest, WASTELAND_VERSION)) {
+            snprintf(st->update_version, sizeof(st->update_version),
+                     "%s", latest);
+        }
+    }
+    return NULL;
+}
+
+/* ---------------------------------------------------------------------------
+ * Update download thread
+ * --------------------------------------------------------------------------- */
+#ifdef TESTING
+void build_update_filename(const char *version, char *fname, size_t fsize)
+#else
+static void build_update_filename(const char *version, char *fname, size_t fsize)
+#endif
+{
+#ifdef _WIN32
+    snprintf(fname, fsize, "Wasteland-windows.exe");
+#elif defined(__APPLE__)
+    snprintf(fname, fsize, "Wasteland-macos.dmg");
+#elif defined(__linux__)
+#   if defined(__x86_64__)
+    snprintf(fname, fsize, "wasteland_%s_amd64.deb", version);
+#   elif defined(__aarch64__) || defined(__arm64__)
+    snprintf(fname, fsize, "wasteland_%s_arm64.deb", version);
+#   else
+    snprintf(fname, fsize, "wasteland_%s.deb", version);
+#   endif
+#else
+    fname[0] = '\0';
+#endif
+}
+
+void* update_download_thread(void *arg)
+{
+    app_state_t *st = (app_state_t *)arg;
+    char fname[256];
+    build_update_filename(st->update_version, fname, sizeof(fname));
+    if (fname[0] == '\0') {
+        st->update_state = 2;
+        return NULL;
+    }
+
+    char url[1024];
+    snprintf(url, sizeof(url),
+             "https://github.com/alexbeatnik/wasteland/releases/download/v%s/%s",
+             st->update_version, fname);
+
+    /* Ensure downloads/ dir exists */
+#ifdef _WIN32
+    _mkdir("downloads");
+#else
+    mkdir("downloads", 0755);
+#endif
+
+    st->update_active = 1;
+    st->update_progress = 0;
+    st->update_cancel = 0;
+    int rc = network_download_model(url, "downloads",
+                                     &st->update_progress,
+                                     &st->update_active,
+                                     &st->update_cancel);
+    snprintf(st->update_file, sizeof(st->update_file),
+             "downloads/%s", fname);
+    st->update_state = (rc == 0) ? 1 : 2;
+    return NULL;
+}
+
+/* ---------------------------------------------------------------------------
+ * Updater launcher — generates a platform-specific script that waits for
+ * this process to exit, replaces the binary, and restarts.
+ * --------------------------------------------------------------------------- */
+#ifdef _WIN32
+void launch_updater(const char *new_file)
+{
+    char current_exe[MAX_PATH];
+    if (!GetModuleFileNameA(NULL, current_exe, MAX_PATH)) return;
+
+    char batch_path[MAX_PATH];
+    GetTempPathA(sizeof(batch_path), batch_path);
+    strncat(batch_path, "wst_updater.bat",
+            sizeof(batch_path) - strlen(batch_path) - 1);
+
+    DWORD pid = GetCurrentProcessId();
+
+    FILE *f = fopen(batch_path, "w");
+    if (!f) return;
+    fprintf(f, "@echo off\n");
+    fprintf(f, ":wait\n");
+    fprintf(f, "timeout /t 1 /nobreak >nul\n");
+    fprintf(f, "tasklist /FI \"PID eq %lu\" 2>nul | findstr /C:\"%lu\" >nul\n", pid, pid);
+    fprintf(f, "if %%errorlevel%% == 0 goto wait\n");
+    /* Try to replace directly; if no write access (Program Files), elevate via runas */
+    fprintf(f, "copy /Y \"%s\" \"%s\" >nul 2>&1\n", new_file, current_exe);
+    fprintf(f, "if %%errorlevel%% neq 0 (\n");
+    fprintf(f, "    powershell -Command \"Start-Process -Verb runAs -FilePath 'cmd' -ArgumentList '/c copy /Y \\\"%s\\\" \\\"%s\\\" && start \\\"\\\" \\\"%s\\\" && del \\\"%s\\\"'\"\n",
+            new_file, current_exe, current_exe, batch_path);
+    fprintf(f, "    exit /b\n");
+    fprintf(f, ")\n");
+    fprintf(f, "start \"\" \"%s\"\n", current_exe);
+    fprintf(f, "del \"%s\"\n", new_file);
+    fprintf(f, "del \"%%~f0\"\n");
+    fclose(f);
+
+    ShellExecuteA(NULL, "open", batch_path, NULL, NULL, SW_HIDE);
+}
+#else
+void launch_updater(const char *new_file)
+{
+    (void)new_file;
+    /* POSIX updater shell script */
+    char script_path[] = "/tmp/wst_updater.sh";
+    char current_exe[1024];
+#ifdef __APPLE__
+    uint32_t size = sizeof(current_exe);
+    if (_NSGetExecutablePath(current_exe, &size) != 0) return;
+    /* Find the .app bundle path (e.g. .../Wasteland.app/Contents/MacOS/Wasteland) */
+    char *dotapp = strstr(current_exe, ".app/");
+    if (dotapp) dotapp[4] = '\0';
+#else
+    ssize_t len = readlink("/proc/self/exe", current_exe, sizeof(current_exe) - 1);
+    if (len <= 0) return;
+    current_exe[len] = '\0';
+#endif
+
+    pid_t pid = getpid();
+
+    FILE *f = fopen(script_path, "w");
+    if (!f) return;
+    fprintf(f, "#!/bin/bash\n");
+    fprintf(f, "PID=%d\n", (int)pid);
+    fprintf(f, "NEW=\"%s\"\n", new_file);
+    fprintf(f, "OLD=\"%s\"\n", current_exe);
+    fprintf(f, "while kill -0 \"$PID\" 2>/dev/null; do sleep 1; done\n");
+
+#ifdef __APPLE__
+    /* macOS: mount DMG, copy .app, open */
+    fprintf(f, "MOUNT=$(hdiutil attach \"$NEW\" | grep Volumes | awk '{print $3}')\n");
+    fprintf(f, "APP_SRC=\"$MOUNT/Wasteland.app\"\n");
+    fprintf(f, "APP_DST=\"$(dirname \"$OLD\")\"\n");
+    fprintf(f, "if [ -w \"$APP_DST\" ]; then\n");
+    fprintf(f, "    rm -rf \"$OLD\"\n");
+    fprintf(f, "    cp -R \"$APP_SRC\" \"$APP_DST/\"\n");
+    fprintf(f, "    open \"$APP_DST/Wasteland.app\"\n");
+    fprintf(f, "else\n");
+    fprintf(f, "    osascript -e \"do shell script \\\"rm -rf '$OLD' && cp -R '$APP_SRC' '$APP_DST/'\\\" with administrator privileges\"\n");
+    fprintf(f, "    open \"$APP_DST/Wasteland.app\"\n");
+    fprintf(f, "fi\n");
+    fprintf(f, "hdiutil detach \"$MOUNT\"\n");
+#else
+    /* Linux: try direct copy first, fall back to pkexec GUI dialog */
+    fprintf(f, "if [ -w \"$(dirname \"$OLD\")\" ]; then\n");
+    fprintf(f, "    cp \"$NEW\" \"$OLD\"\n");
+    fprintf(f, "    chmod +x \"$OLD\"\n");
+    fprintf(f, "    \"$OLD\" &\n");
+    fprintf(f, "else\n");
+    fprintf(f, "    if command -v pkexec >/dev/null 2>&1; then\n");
+    fprintf(f, "        pkexec cp \"$NEW\" \"$OLD\" && pkexec chmod +x \"$OLD\" && \"$OLD\" &\n");
+    fprintf(f, "    else\n");
+    fprintf(f, "        xterm -e bash -c \"echo 'Install: sudo cp \\\"$NEW\\\" \\\"$OLD\\\"'; read -p 'Press Enter'\"\n");
+    fprintf(f, "    fi\n");
+    fprintf(f, "fi\n");
+#endif
+    fprintf(f, "rm -f \"$NEW\"\n");
+    fprintf(f, "rm -f \"%s\"\n", script_path);
+    fclose(f);
+    chmod(script_path, 0755);
+
+    /* Launch detached */
+    if (fork() == 0) {
+        setsid();
+        execl("/bin/sh", "sh", script_path, (char *)NULL);
+        _Exit(1);
+    }
+}
+#endif
 
 /* ---------------------------------------------------------------------------
  * main()
@@ -450,6 +660,7 @@ int main(int argc, char **argv)
     state.settings_n_ctx       = 4096;
     state.settings_temperature = 0.8f;
     strncpy(state.status_msg, status_msg, sizeof(state.status_msg) - 1);
+    state.update_version[0]    = '\0';
 
     /* Load system prompt */
     state.system_prompt[0] = '\0';
@@ -515,6 +726,12 @@ int main(int argc, char **argv)
     } else {
         snprintf(state.status_msg, sizeof(state.status_msg),
                  "No models found. Place .gguf files in ./models/ or download.");
+    }
+
+    /* ---- Background update check (before lockdown, so curl can open sockets) ---- */
+    pthread_t update_thread;
+    if (pthread_create(&update_thread, NULL, update_check_thread, &state) == 0) {
+        pthread_detach(update_thread);
     }
 
     /* ---- Spawn inference worker thread ---- */

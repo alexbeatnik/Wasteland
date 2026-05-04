@@ -28,6 +28,8 @@
 #define WASTELAND_MAX_CHATS        64
 #define WASTELAND_CHAT_NAME_LEN    256
 
+#define WASTELAND_VERSION          "0.4"
+
 /* Agent-mode UI buffer sizes (mirrored from agent.h to avoid the include
  * chain dragging agent internals into every UI compilation unit). */
 #define AGENT_MAX_PATH_LEN_UI      1024
@@ -112,6 +114,14 @@ typedef struct {
      * effect on the next model load. */
     int   settings_n_ctx;
     float settings_temperature;
+
+    /* Auto-update state */
+    char update_version[32];            /* e.g. "0.4" (empty = no update) */
+    volatile int update_progress;       /* 0-100 download progress */
+    volatile int update_active;         /* 1 while downloading */
+    volatile int update_cancel;         /* set to 1 to abort */
+    int          update_state;          /* 0=idle, 1=downloaded, 2=failed */
+    char         update_file[512];      /* path to downloaded installer */
 
     volatile int running;
 } app_state_t;

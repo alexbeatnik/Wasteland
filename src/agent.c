@@ -2,6 +2,15 @@
  * agent.c — Tool-call parser, sandbox, and tool executors
  * ============================================================================
  *
+ * _GNU_SOURCE must be defined before any standard headers so glibc exposes
+ * memmem() (used by the apply_edit parser). Without this, memmem is an
+ * implicit function declaration and its return pointer gets truncated on
+ * 64-bit Linux, breaking the SEARCH/======/REPLACE marker scan.
+ * ============================================================================ */
+#define _GNU_SOURCE
+
+/* ============================================================================
+ *
  * Sandbox model: every path is resolved with realpath(); both the resolved
  * target AND its parent (for create-new-file) must lie strictly inside the
  * user-chosen workspace. There is no escape hatch — symlinks, "..", and
@@ -159,7 +168,7 @@ int agent_resolve_path(const char *workspace, const char *user_path,
     if (is_abs) {
         snprintf(joined, sizeof(joined), "%s", user_path);
     } else {
-        snprintf(joined, sizeof(joined), "%s/%s", ws, user_path);
+        snprintf(joined, sizeof(joined), "%s%c%s", ws, PATH_SEP, user_path);
     }
 
     /* Try to canonicalise the full path. If the file doesn't exist yet
@@ -187,7 +196,7 @@ int agent_resolve_path(const char *workspace, const char *user_path,
 
         char *parent = xrealpath(dirbuf[0] ? dirbuf : ".");
         if (!parent) { free(ws); return -1; }
-        snprintf(target, sizeof(target), "%s/%s", parent, base);
+        snprintf(target, sizeof(target), "%s%c%s", parent, PATH_SEP, base);
         free(parent);
     }
 
