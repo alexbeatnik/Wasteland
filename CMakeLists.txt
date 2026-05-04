@@ -26,7 +26,7 @@ else()
     set(WASTELAND_UNIVERSAL_BUILD OFF)
 endif()
 
-add_subdirectory(vendor/llama.cpp)
+add_subdirectory(third_party/llama.cpp)
 
 # ---------------------------------------------------------------------------
 # Source files
