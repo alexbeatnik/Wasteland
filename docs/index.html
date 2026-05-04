@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wasteland Terminal v0.2</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=VT323&display=swap');
+
+        :root {
+            --amber: #FFB000;
+            --amber-dim: #996a00;
+            --bg-color: #050505;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--amber);
+            font-family: 'VT323', monospace;
+            font-size: 1.25rem;
+            margin: 0;
+            padding: 20px;
+            line-height: 1.2;
+            text-shadow: 0 0 5px rgba(255, 176, 0, 0.5);
+            overflow-x: hidden;
+        }
+
+        body::before {
+            content: " ";
+            display: block;
+            position: fixed;
+            top: 0; left: 0; bottom: 0; right: 0;
+            background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.1) 50%), 
+                        linear-gradient(90deg, rgba(255, 0, 0, 0.03), rgba(0, 255, 0, 0.01), rgba(0, 0, 255, 0.03));
+            z-index: 100;
+            background-size: 100% 3px, 3px 100%;
+            pointer-events: none;
+        }
+
+        .terminal-container {
+            max-width: 900px;
+            margin: 0 auto;
+            border: 2px solid var(--amber);
+            padding: 30px;
+            position: relative;
+            box-shadow: inset 0 0 20px rgba(255, 176, 0, 0.15);
+        }
+
+        header {
+            border-bottom: 2px solid var(--amber);
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+        }
+
+        .sys-info {
+            display: flex;
+            justify-content: space-between;
+            font-size: 1rem;
+            text-transform: uppercase;
+            margin-bottom: 5px;
+        }
+
+        h1 {
+            font-size: 3rem;
+            margin: 0;
+            letter-spacing: 4px;
+        }
+
+        .version-tag {
+            background: var(--amber);
+            color: var(--bg-color);
+            padding: 0 10px;
+            text-shadow: none;
+        }
+
+        section { margin-bottom: 30px; }
+
+        h3 {
+            border-bottom: 1px dashed var(--amber);
+            display: inline-block;
+            margin-bottom: 15px;
+            text-transform: uppercase;
+        }
+
+        .feature-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        .feature-item {
+            border: 1px solid var(--amber-dim);
+            padding: 10px;
+            background: rgba(255, 176, 0, 0.02);
+        }
+
+        .feature-item strong { display: block; margin-bottom: 5px; color: #fff; text-transform: uppercase; }
+
+        .think-block {
+            border-left: 3px solid var(--amber-dim);
+            padding-left: 15px;
+            color: var(--amber-dim);
+            font-style: italic;
+            margin: 15px 0;
+        }
+
+        .code-area {
+            background: rgba(0, 0, 0, 0.5);
+            border: 1px solid var(--amber);
+            padding: 15px;
+            white-space: pre;
+            overflow-x: auto;
+            font-size: 1.1rem;
+        }
+
+        .btn-group {
+            display: flex;
+            gap: 15px;
+            margin-top: 20px;
+        }
+
+        .btn {
+            border: 1px solid var(--amber);
+            padding: 10px 20px;
+            color: var(--amber);
+            text-decoration: none;
+            text-transform: uppercase;
+            transition: 0.2s;
+        }
+
+        .btn:hover {
+            background: var(--amber);
+            color: var(--bg-color);
+            text-shadow: none;
+        }
+
+        .cursor {
+            display: inline-block;
+            width: 10px;
+            height: 1.2rem;
+            background: var(--amber);
+            animation: blink 1s step-end infinite;
+            vertical-align: middle;
+        }
+
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0; }
+        }
+
+        @media (max-width: 600px) {
+            .feature-grid { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+
+<div class="terminal-container">
+    <header>
+        <div class="sys-info">
+            <span>SYS.NODE: PRIMARY</span>
+            <span>SEC: SECCOMP_LOCKED</span>
+            <span>NET: AIR_GAPPED</span>
+        </div>
+        <h1>WASTELAND TERMINAL <span class="version-tag">v0.2</span></h1>
+    </header>
+
+    <section>
+        <p>A highly secure, offline-first LLM inference client built in pure C with a vintage PC-inspired amber-on-black CRT terminal aesthetic. It runs entirely offline once a model is loaded, using Linux seccomp to physically prevent the process from opening any new sockets for the rest of its lifetime.</p>
+    </section>
+
+    <section>
+        <h3>--- CORE PROTOCOLS ---</h3>
+        <div class="feature-grid">
+            <div class="feature-item">
+                <strong>Smart Reasoning</strong>
+                Automatic detection of &lt;think&gt; blocks. The model's thought process is rendered in a separate dimmed box, keeping the final output clean.
+            </div>
+            <div class="feature-item">
+                <strong>Context Compaction</strong>
+                Drop the oldest turns, save the compacted history to disk, and mirror the result into the inference thread without reloading the model.
+            </div>
+            <div class="feature-item">
+                <strong>Agent Mode (ReAct)</strong>
+                Built-in tool-using ReAct agent loop with sandboxed file system access (read_file, list_dir, write_file, apply_edit).
+            </div>
+            <div class="feature-item">
+                <strong>Multi-Turn Memory</strong>
+                Create, load, and switch between named chat sessions. Persisted locally with RC4 obfuscation.
+            </div>
+        </div>
+    </section>
+
+    <section>
+        <div class="think-block">
+            ▒ thinking: Analyzing environment... Seccomp filters active. AF_INET blocked. Local vault mounted. Ready for inference.
+        </div>
+    </section>
+
+    <section>
+        <h3>--- SYSTEM SPECS ---</h3>
+        <ul>
+            <li><strong>Core Engine:</strong> Pure C11 via llama.h</li>
+            <li><strong>Interface:</strong> Nuklear Immediate-Mode GUI (SDL2/OpenGL 2.1)</li>
+            <li><strong>Security:</strong> Linux seccomp-bpf (SCMP_ACT_KILL_PROCESS on new sockets)</li>
+            <li><strong>Networking:</strong> libcurl (download path only; strictly isolated)</li>
+        </ul>
+    </section>
+
+    <section>
+        <h3>--- INITIALIZATION SEQUENCE ---</h3>
+        <div class="code-area">
+$ sudo pacman -S cmake sdl2 curl libseccomp
+$ git clone https://github.com/your_username/wasteland.git
+$ cd wasteland && git submodule update --init --recursive
+$ ./build.sh
+$ ./Wasteland</div>
+    </section>
+
+    <section>
+        <p>AWAITING DIRECTIVE<span class="cursor"></span></p>
+        <div class="btn-group">
+            <a href="https://github.com/your_username/wasteland" class="btn">[ ACCESS SOURCE CODE ]</a>
+            <a href="https://github.com/your_username/wasteland/releases" class="btn">[ DOWNLOAD BINARIES ]</a>
+        </div>
+    </section>
+</div>
+
+</body>
+</html>
