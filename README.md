@@ -29,7 +29,10 @@ Wasteland is a local LLM inference client built in pure C with a vintage PC-insp
 - **Auto-scroll + word wrap** — Chat pins to the bottom and wraps long lines to the panel width
 - **Download Progress** — Real-time progress bar with filename, percent, and **cancel** support
 - **Fast close** — Clicking X hides the window instantly, signals the worker via `inference_request_stop()`, joins with a 1.5 s timeout, and falls back to `_Exit` if the worker is still mid-decode
-- **Auto-update check** — On startup the app queries GitHub Releases in the background; if a newer version exists, an orange banner appears under the header with the available version
+- **Auto-update** — On startup the app queries GitHub Releases in the background; if a newer version exists an orange banner appears under the header. One click downloads the platform artefact, a second click installs it and restarts:
+  - **Linux** — `pkexec dpkg -i` (with `gksudo` / `kdesu` fallback). On non-Debian distros where `dpkg` is unavailable a `notify-send` / `zenity` notification surfaces the manual install command; the `.deb` is kept on disk for the user to install by hand.
+  - **macOS** — `hdiutil attach` mounts the `.dmg`, `cp -R Wasteland.app /Applications/`, with `osascript with administrator privileges` for system locations; relaunches via `open`.
+  - **Windows** — `copy /Y` over the running `.exe` once the parent process exits, with PowerShell `runas` elevation for Program Files paths.
 - **Unicode & HiDPI** — DejaVu Sans Mono is embedded in the binary (no external font files needed); covers Basic Latin, Cyrillic (Ukrainian), and Geometric Shapes (▶ ■). Font scales automatically with display DPI so text is never tiny on Retina or Windows HiDPI displays
 - **Cross-Platform** — Linux, macOS, Windows (MinGW/MSVC)
 

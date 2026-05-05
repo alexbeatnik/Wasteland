@@ -414,6 +414,14 @@ void launch_updater(const char *new_file)
     char current_exe[MAX_PATH];
     if (!GetModuleFileNameA(NULL, current_exe, MAX_PATH)) return;
 
+    /* Resolve `new_file` to an absolute path. The batch script runs from
+     * %TEMP% (set by ShellExecute), so a relative path like
+     * "downloads/foo.exe" would not resolve. */
+    char abs_new[MAX_PATH];
+    if (!_fullpath(abs_new, new_file, sizeof(abs_new))) {
+        snprintf(abs_new, sizeof(abs_new), "%s", new_file);
+    }
+
     char batch_path[MAX_PATH];
     GetTempPathA(sizeof(batch_path), batch_path);
     strncat(batch_path, "wst_updater.bat",
@@ -429,14 +437,14 @@ void launch_updater(const char *new_file)
     fprintf(f, "tasklist /FI \"PID eq %lu\" 2>nul | findstr /C:\"%lu\" >nul\n", pid, pid);
     fprintf(f, "if %%errorlevel%% == 0 goto wait\n");
     /* Try to replace directly; if no write access (Program Files), elevate via runas */
-    fprintf(f, "copy /Y \"%s\" \"%s\" >nul 2>&1\n", new_file, current_exe);
+    fprintf(f, "copy /Y \"%s\" \"%s\" >nul 2>&1\n", abs_new, current_exe);
     fprintf(f, "if %%errorlevel%% neq 0 (\n");
     fprintf(f, "    powershell -Command \"Start-Process -Verb runAs -FilePath 'cmd' -ArgumentList '/c copy /Y \\\"%s\\\" \\\"%s\\\" && start \\\"\\\" \\\"%s\\\" && del \\\"%s\\\"'\"\n",
-            new_file, current_exe, current_exe, batch_path);
+            abs_new, current_exe, current_exe, batch_path);
     fprintf(f, "    exit /b\n");
     fprintf(f, ")\n");
     fprintf(f, "start \"\" \"%s\"\n", current_exe);
-    fprintf(f, "del \"%s\"\n", new_file);
+    fprintf(f, "del \"%s\"\n", abs_new);
     fprintf(f, "del \"%%~f0\"\n");
     fclose(f);
 
@@ -445,7 +453,6 @@ void launch_updater(const char *new_file)
 #else
 void launch_updater(const char *new_file)
 {
-    (void)new_file;
     /* POSIX updater shell script */
     char script_path[] = "/tmp/wst_updater.sh";
     char current_exe[1024];
@@ -461,13 +468,38 @@ void launch_updater(const char *new_file)
     current_exe[len] = '\0';
 #endif
 
+    /* Resolve new_file to an absolute path. pkexec / osascript / hdiutil
+     * all reset CWD (pkexec → /root, osascript → /, hdiutil unclear), so
+     * a relative path like "downloads/foo.deb" passed verbatim into the
+     * generated script would not resolve. realpath() handles `.` /
+     * symlinks; if it fails (file just got deleted), fall back to
+     * `getcwd()/relative` which is correct as long as we run before any
+     * thread changes CWD. */
+    char abs_new[2048];
+    {
+        char *rp = realpath(new_file, NULL);
+        if (rp) {
+            snprintf(abs_new, sizeof(abs_new), "%s", rp);
+            free(rp);
+        } else if (new_file[0] == '/') {
+            snprintf(abs_new, sizeof(abs_new), "%s", new_file);
+        } else {
+            char cwd[1024];
+            if (getcwd(cwd, sizeof(cwd))) {
+                snprintf(abs_new, sizeof(abs_new), "%s/%s", cwd, new_file);
+            } else {
+                snprintf(abs_new, sizeof(abs_new), "%s", new_file);
+            }
+        }
+    }
+
     pid_t pid = getpid();
 
     FILE *f = fopen(script_path, "w");
     if (!f) return;
     fprintf(f, "#!/bin/bash\n");
     fprintf(f, "PID=%d\n", (int)pid);
-    fprintf(f, "NEW=\"%s\"\n", new_file);
+    fprintf(f, "NEW=\"%s\"\n", abs_new);
     fprintf(f, "OLD=\"%s\"\n", current_exe);
     fprintf(f, "while kill -0 \"$PID\" 2>/dev/null; do sleep 1; done\n");
 
@@ -486,20 +518,51 @@ void launch_updater(const char *new_file)
     fprintf(f, "fi\n");
     fprintf(f, "hdiutil detach \"$MOUNT\"\n");
 #else
-    /* Linux: try direct copy first, fall back to pkexec GUI dialog */
-    fprintf(f, "if [ -w \"$(dirname \"$OLD\")\" ]; then\n");
-    fprintf(f, "    cp \"$NEW\" \"$OLD\"\n");
-    fprintf(f, "    chmod +x \"$OLD\"\n");
-    fprintf(f, "    \"$OLD\" &\n");
+    /* Linux: install the .deb via dpkg. NEW is a Debian package archive
+     * (ar format containing data.tar), NOT an ELF binary — the obvious
+     * `cp $NEW $OLD` would replace the running executable with a tarball
+     * and brick the install. dpkg -i does the right thing: extracts to
+     * /usr/bin/Wasteland, runs maintainer scripts, registers in dpkg DB.
+     *
+     * Elevation: prefer pkexec (GUI password dialog from policykit, ships
+     * by default on Ubuntu/Debian/Mint with a desktop environment). Fall
+     * back to a notification telling the user the manual command — better
+     * than a silent failure they can't diagnose. */
+    fprintf(f, "INSTALLED=\"/usr/bin/Wasteland\"\n");
+    fprintf(f, "RC=1\n");
+    fprintf(f, "if command -v pkexec >/dev/null 2>&1; then\n");
+    fprintf(f, "    pkexec dpkg -i \"$NEW\"\n");
+    fprintf(f, "    RC=$?\n");
+    fprintf(f, "elif command -v gksudo >/dev/null 2>&1; then\n");
+    fprintf(f, "    gksudo \"dpkg -i $NEW\"\n");
+    fprintf(f, "    RC=$?\n");
+    fprintf(f, "elif command -v kdesu >/dev/null 2>&1; then\n");
+    fprintf(f, "    kdesu -c \"dpkg -i $NEW\"\n");
+    fprintf(f, "    RC=$?\n");
+    fprintf(f, "fi\n");
+    fprintf(f, "if [ \"$RC\" -eq 0 ] && [ -x \"$INSTALLED\" ]; then\n");
+    fprintf(f, "    \"$INSTALLED\" &\n");
     fprintf(f, "else\n");
-    fprintf(f, "    if command -v pkexec >/dev/null 2>&1; then\n");
-    fprintf(f, "        pkexec cp \"$NEW\" \"$OLD\" && pkexec chmod +x \"$OLD\" && \"$OLD\" &\n");
-    fprintf(f, "    else\n");
-    fprintf(f, "        xterm -e bash -c \"echo 'Install: sudo cp \\\"$NEW\\\" \\\"$OLD\\\"'; read -p 'Press Enter'\"\n");
+    fprintf(f, "    MSG=\"Wasteland update could not be installed automatically.\\n\\nRun manually:\\n  sudo dpkg -i $NEW\"\n");
+    fprintf(f, "    if command -v notify-send >/dev/null 2>&1; then\n");
+    fprintf(f, "        notify-send \"Wasteland Update\" \"$MSG\"\n");
+    fprintf(f, "    elif command -v zenity >/dev/null 2>&1; then\n");
+    fprintf(f, "        zenity --info --title=\"Wasteland Update\" --text=\"$MSG\"\n");
+    fprintf(f, "    elif command -v xmessage >/dev/null 2>&1; then\n");
+    fprintf(f, "        xmessage \"$MSG\"\n");
     fprintf(f, "    fi\n");
     fprintf(f, "fi\n");
 #endif
+    /* Only delete the downloaded artefact if the install actually succeeded.
+     * On failure we keep it around so the user can follow the manual-install
+     * notification (RC == 0 is set inside the install branch on Linux; on
+     * macOS we treat any reach-this-point as success — the osascript / cp
+     * branches both block until done and would have errored visibly). */
+#ifdef __linux__
+    fprintf(f, "if [ \"$RC\" -eq 0 ]; then rm -f \"$NEW\"; fi\n");
+#else
     fprintf(f, "rm -f \"$NEW\"\n");
+#endif
     fprintf(f, "rm -f \"%s\"\n", script_path);
     fclose(f);
     chmod(script_path, 0755);

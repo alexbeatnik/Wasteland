@@ -189,7 +189,15 @@ The auto-update flow is split across three threads + a generated shell/batch scr
 
 1. **Startup probe (`update_check_thread` in `main.c`):** detached pthread launched **before** any model load (so seccomp lockdown can't kill it). Calls `network_check_update()` which hits `https://api.github.com/repos/alexbeatnik/wasteland/releases/latest` with a 5 s timeout. Parses `tag_name` via simple `strstr(...,"\"tag_name\":\"v")`. If `version_newer_than(latest, WASTELAND_VERSION)` returns true, writes `latest` into `state->update_version`. UI polls this every frame and renders an orange banner under the header when non-empty.
 2. **Download (`update_download_thread` in `main.c`):** spawned when the user clicks `[ DOWNLOAD UPDATE ]`. Computes the platform-appropriate artifact name via `build_update_filename()` (`Wasteland-windows.exe`, `Wasteland-macos.dmg`, `wasteland_<ver>_amd64.deb`, `wasteland_<ver>_arm64.deb`) and downloads it into `downloads/<file>` via `network_download_model`. Sets `state->update_state` to 1 on success, 2 on failure.
-3. **Restart (`launch_updater` in `main.c`):** when the user clicks `[ RESTART TO UPDATE ]`, this generates a small shell script (POSIX) or batch file (Windows) into `/tmp` / `%TEMP%`, then exits the app. The script polls until our PID is gone, then replaces the binary in place — using `pkexec`/`osascript`/`runas` to elevate when the install path isn't user-writable. After the copy it relaunches the new binary and self-deletes.
+3. **Restart (`launch_updater` in `main.c`):** when the user clicks `[ RESTART TO UPDATE ]`, this generates a small shell script (POSIX) or batch file (Windows) into `/tmp` / `%TEMP%`, then exits the app. The script polls until our PID is gone, then replaces the binary in place — using `pkexec`/`osascript`/`runas` to elevate when the install path isn't user-writable. After the install it relaunches the new binary and self-deletes.
+
+### Linux install path uses `dpkg`, NOT `cp`
+
+The Linux artefact is a Debian package archive (`wasteland_<ver>_<arch>.deb`), **not** an ELF binary. The naïve `cp $NEW $OLD` would replace the running executable with a tarball and brick the install. The script must invoke `dpkg -i $NEW` (with elevation), which extracts the .deb and lays the binary down at `/usr/bin/Wasteland` via the package manager. The script tries `pkexec` first (PolicyKit, ships on Ubuntu/Debian/Mint with a desktop), falls back to `gksudo` / `kdesu`, and surfaces a `notify-send` / `zenity` / `xmessage` notification with the manual install command on failure. The `.deb` is **kept** on disk if install failed, so the user can follow the notification's `sudo dpkg -i …` instruction.
+
+### Absolute-path resolution before script generation
+
+`pkexec` resets CWD to `/root`, `osascript with administrator privileges` to `/`, Windows ShellExecute to `%TEMP%` — none of them inherit the parent's CWD. A relative `downloads/wasteland_0.6_amd64.deb` passed verbatim into the generated script would not resolve. `launch_updater()` always pre-resolves `new_file` to an absolute path before writing the script: POSIX uses `realpath()` with a `getcwd()/relative` fallback; Windows uses `_fullpath()`. If you ever bypass this layer (e.g. a hot-patch that calls the script directly), make sure the path you pass in is already absolute.
 
 ### Filename matrix (`build_update_filename`)
 
