@@ -2,7 +2,9 @@
  * fs_sandbox.c — Bulletproof filesystem access for the Agent Mode.
  * ============================================================================ */
 
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 
 #include "fs_sandbox.h"
 #include <stdio.h>

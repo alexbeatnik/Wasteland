@@ -10,7 +10,9 @@
  * Usage: wasteland-agent-executor <workspace>
  * ============================================================================ */
 
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -52,17 +54,26 @@ static void handle_request(int out_fd, const agent_ipc_req_hdr_t *hdr,
         break;
     }
     case AGENT_IPC_TOOL_APPLY_EDIT: {
-        /* data format: search\0replace */
-        const char *search = (const char *)data;
-        size_t search_len = strlen(search);
-        if (search_len >= hdr->data_len) {
+        /* data format: search\0replace — locate the in-band separator with
+         * memchr (bounded by hdr->data_len) so a missing NUL can't walk off
+         * the buffer. */
+        if (!data || hdr->data_len == 0) {
+            status = -1;
+            snprintf((char *)resp_data, sizeof(resp_data),
+                     "missing apply_edit payload");
+            resp_len = (uint32_t)strlen((char *)resp_data);
+            break;
+        }
+        const uint8_t *sep = (const uint8_t *)memchr(data, 0, hdr->data_len);
+        if (!sep) {
             status = -1;
             snprintf((char *)resp_data, sizeof(resp_data),
                      "malformed apply_edit request");
             resp_len = (uint32_t)strlen((char *)resp_data);
             break;
         }
-        const char *replace = (const char *)(data + search_len + 1);
+        const char *search  = (const char *)data;
+        const char *replace = (const char *)(sep + 1);
         char err[512] = "";
         int rc = fs_sandbox_apply_edit(path, search, replace, err, sizeof(err));
         if (rc != 0) {
@@ -127,8 +138,13 @@ int main(int argc, char **argv)
         }
 
         char *path = (char *)malloc(hdr.path_len + 1);
-        uint8_t *data = hdr.data_len > 0 ? (uint8_t *)malloc(hdr.data_len) : NULL;
-        if (!path) break;
+        /* +1 for trailing NUL — fs_sandbox_write_file and the apply_edit
+         * search\0replace decoding both rely on a C-string view of the data
+         * payload, but the wire framing carries exactly data_len bytes. */
+        uint8_t *data = hdr.data_len > 0 ? (uint8_t *)malloc(hdr.data_len + 1) : NULL;
+        if (!path || (hdr.data_len > 0 && !data)) {
+            free(path); free(data); break;
+        }
 
         if (agent_ipc_read_all(STDIN_FILENO, (uint8_t *)path, hdr.path_len) != 0) {
             free(path); free(data); break;
@@ -138,6 +154,7 @@ int main(int argc, char **argv)
         if (hdr.data_len > 0 && agent_ipc_read_all(STDIN_FILENO, data, hdr.data_len) != 0) {
             free(path); free(data); break;
         }
+        if (data) data[hdr.data_len] = '\0';
 
         handle_request(STDOUT_FILENO, &hdr, path, data);
 

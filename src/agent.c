@@ -7,7 +7,9 @@
  * implicit function declaration and its return pointer gets truncated on
  * 64-bit Linux, breaking the SEARCH/======/REPLACE marker scan.
  * ============================================================================ */
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 
 /* ============================================================================
  *

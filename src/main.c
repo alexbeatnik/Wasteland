@@ -168,6 +168,9 @@ static void *verify_thread(void *arg)
     verify_thread_ctx_t *ctx = (verify_thread_ctx_t *)arg;
     char hex[65];
     int rc = verify_compute_sha256(ctx->path, hex, sizeof(hex), ctx->progress);
+    /* Force progress to 100 even on early-return failures (fopen/fseek)
+     * so the main loop's completion handler always fires. */
+    if (ctx->progress) *ctx->progress = 100;
     *ctx->result = (rc == 0) ? 1 : 2;
     free(ctx);
     return NULL;
@@ -937,10 +940,10 @@ int main(int argc, char **argv)
             state.verify_active = 0;
             if (state.verify_result == 1) {
                 snprintf(state.status_msg, sizeof(state.status_msg),
-                         "Verify OK: %s", state.verify_path);
+                         "Verify OK: %.240s", state.verify_path);
             } else {
                 snprintf(state.status_msg, sizeof(state.status_msg),
-                         "Verify FAILED: %s", state.verify_path);
+                         "Verify FAILED: %.236s", state.verify_path);
             }
         }
 
