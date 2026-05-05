@@ -208,14 +208,14 @@ Tests are compiled automatically by CMake when you configure the project. To add
 
 ### Current coverage
 
-Four suites, **81 tests** total — all green on Linux / macOS / Windows CI runners. Filesystem-touching cases use `/tmp` scratch directories created at suite startup.
+Four suites, **87 tests** total — all green on Linux / macOS / Windows CI runners. Filesystem-touching cases use `/tmp` scratch directories created at suite startup.
 
 | Suite | What it tests |
 |---|---|
 | `test_agent` (35) | Tool-call markdown parsing (`read_file`, `list_dir`, `write_file`, `apply_edit`) including malformed `apply_edit`, multi-line SEARCH/REPLACE blocks, empty `write_file` body, non-tool fences, inline backticks · sandbox path resolution (escape attempts, absolute paths, new files, `./` prefix) · **executor round-trips:** real read / write / apply_edit / list_dir against a scratch workspace, ambiguous-match refusal, delete-via-empty-replace, escape-blocked attempts · `agent_system_prompt` describes every tool |
 | `test_chat_history` (16) | Flat `> prompt\nreply\n` → user/assistant message splitting · trailing-user discard · max-msg cap · CRLF (Windows) line-ending normalisation · UTF-8 (Cyrillic) round-trip · `> ` inside an assistant reply does NOT split a turn · NULL user-prompt for `build_system_prompt` · base-then-user concatenation order |
 | `test_version` (15) | Semver comparison (`X.Y.Z` with optional `v` prefix) including release-tag-vs-runtime, two-component versions, multi-digit minors (`0.10` > `0.9`), empty / garbage-prefix inputs · platform-specific update-filename generation · version-different filenames differ on Linux but not on macOS / Windows |
-| `test_string_utils` (15) | RC4 chat cipher round-trip (ASCII, UTF-8, empty buffer, deterministic output) · HuggingFace `/blob/main/` → `/resolve/main/` URL rewrite (basic, already-resolve, too-small-buffer, false-substring matches) · chat-name sanitisation (punctuation strip, space-run collapse, leading/trailing trim, UTF-8 passthrough, 40-char cap) |
+| `test_string_utils` (21) | RC4 chat cipher round-trip (ASCII, UTF-8, empty buffer, deterministic output) · HuggingFace `/blob/main/` → `/resolve/main/` URL rewrite (basic, already-resolve, too-small-buffer, false-substring matches) · chat-name sanitisation (punctuation strip, space-run collapse, leading/trailing trim, UTF-8 passthrough, 40-char cap) · **`strip_tool_fences`** (read_file / list_dir / apply_edit elided, plain `` ```c `` / `` ```json `` preserved, unclosed-fence tail dropped, inline backticks kept, multi-fence chains) |
 
 ## UI Guide
 
@@ -237,7 +237,7 @@ Four suites, **81 tests** total — all green on Linux / macOS / Windows CI runn
 - **System Prompt** — Multi-line input for system instructions, saved between sessions
 - **Agent Mode** — Toggle tool-using ReAct loop; set a workspace directory for sandboxed file access
 - **Chats** — Manage multiple persistent chat sessions:
-  - `[ NEW CHAT ]` — Start a new session. It is initially named from your first message, then the model generates a contextual 3–5 word title after its first reply and the chat file is renamed automatically.
+  - `[ NEW CHAT ]` — Reset to an empty buffer. The chat is **created lazily on the first message**, named from the prompt itself (UTF-8-safe, word-boundary truncation at 60 bytes), then refined into a contextual 3–5 word model-generated title after the first assistant reply. If you click `[ NEW CHAT ]` and then switch to another chat without typing, nothing is created — no orphan "New Chat" files.
   - `[ LOAD ]` / `[ ACTIVE ]` — Switch between chat sessions
   - `[ DEL ]` — Delete a chat session
 - **Status footer** — "NET: LOCKDOWN ACTIVE" once a model is loaded; otherwise "NET: DISCONNECTED (READY)"
@@ -249,6 +249,7 @@ Four suites, **81 tests** total — all green on Linux / macOS / Windows CI runn
   - Each user/assistant exchange is rendered in its own edit box — user prompts never bleed into the previous assistant reply.
   - Reasoning blocks (`<think>`) are rendered in a separate dimmed box with a "▒ thinking" label.
   - Empty think boxes (e.g. from `<think></think>` or a cancelled mid-think generation) are suppressed.
+  - In agent mode, the model's tool-call fences (`` ```read_file ``, `` ```list_dir ``, `` ```write_file ``, `` ```apply_edit ``) are **elided from the rendered view** — the `[ TOOL: name | path ]` marker emitted by the worker is the visible cue. The on-disk chat file keeps the raw fences so the agent can re-parse them on subsequent turns; this is purely a rendering transform.
 - **Agent proposal panel** — when Agent Mode is on and the model emits a `write_file` or `apply_edit` tool call, a top-of-panel preview appears with a red/green diff palette matching [docs/index.html](docs/index.html):
   - SEARCH block — orange-red border + text (`#FF6020`)
   - REPLACE / `write_file` body — yellow-green border + text (`#AACC00`)

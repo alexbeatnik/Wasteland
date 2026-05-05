@@ -240,6 +240,154 @@ static void test_chatname_caps_at_40(void) {
 }
 
 /* =========================================================================
+ * Tool-fence stripper — agent fences elided from chat rendering view
+ * (origin: src/ui.c → strip_tool_fences). Pure string transform.
+ * ========================================================================= */
+static int is_tool_fence_header(const char *p, size_t hlen)
+{
+    while (hlen > 0 && (p[hlen-1] == ' ' || p[hlen-1] == '\t' ||
+                        p[hlen-1] == '\r')) hlen--;
+    if (hlen == 9  && memcmp(p, "read_file",  9 ) == 0) return 1;
+    if (hlen == 8  && memcmp(p, "list_dir",   8 ) == 0) return 1;
+    if (hlen == 10 && memcmp(p, "write_file", 10) == 0) return 1;
+    if (hlen == 10 && memcmp(p, "apply_edit", 10) == 0) return 1;
+    return 0;
+}
+
+static void strip_tool_fences(const char *in, char *out, size_t out_size)
+{
+    if (!out || out_size == 0) return;
+    out[0] = '\0';
+    if (!in) return;
+
+    size_t in_len = strlen(in);
+    size_t out_pos = 0;
+    size_t i = 0;
+
+    while (i < in_len && out_pos + 1 < out_size) {
+        int line_start = (i == 0) || (in[i-1] == '\n');
+        if (line_start && i + 3 <= in_len &&
+            in[i] == '`' && in[i+1] == '`' && in[i+2] == '`')
+        {
+            const char *hdr = in + i + 3;
+            const char *hdr_end = memchr(hdr, '\n', in_len - (i + 3));
+            if (!hdr_end) hdr_end = in + in_len;
+            if (is_tool_fence_header(hdr, (size_t)(hdr_end - hdr))) {
+                size_t j = (size_t)(hdr_end - in);
+                if (j < in_len && in[j] == '\n') j++;
+                while (j < in_len) {
+                    int j_line_start = (j == 0) || (in[j-1] == '\n');
+                    if (j_line_start && j + 3 <= in_len &&
+                        in[j] == '`' && in[j+1] == '`' && in[j+2] == '`') {
+                        j += 3;
+                        while (j < in_len && in[j] != '\n') j++;
+                        if (j < in_len) j++;
+                        break;
+                    }
+                    j++;
+                }
+                i = j;
+                continue;
+            }
+        }
+        out[out_pos++] = in[i++];
+    }
+    out[out_pos] = '\0';
+}
+
+static void test_strip_simple_read_file(void) {
+    const char *in =
+        "Sure thing.\n"
+        "```read_file\n"
+        "src/main.c\n"
+        "```\n"
+        "[ TOOL: read_file | src/main.c ]\n";
+    char out[512];
+    strip_tool_fences(in, out, sizeof(out));
+    /* The fence body is gone, the prose and TOOL marker remain. */
+    ASSERT_TRUE(strstr(out, "Sure thing.") != NULL);
+    ASSERT_TRUE(strstr(out, "[ TOOL: read_file | src/main.c ]") != NULL);
+    ASSERT_TRUE(strstr(out, "```read_file") == NULL);
+    ASSERT_TRUE(strstr(out, "src/main.c\n```") == NULL);
+}
+
+static void test_strip_keeps_non_tool_fences(void) {
+    /* A plain ```c code block should pass through unchanged — only the four
+     * known agent tool names are recognised as fences to strip. */
+    const char *in =
+        "Look at this snippet:\n"
+        "```c\n"
+        "int main(void) { return 0; }\n"
+        "```\n"
+        "It compiles.\n";
+    char out[512];
+    strip_tool_fences(in, out, sizeof(out));
+    ASSERT_TRUE(strstr(out, "```c") != NULL);
+    ASSERT_TRUE(strstr(out, "int main") != NULL);
+}
+
+static void test_strip_apply_edit_block(void) {
+    const char *in =
+        "Patching:\n"
+        "```apply_edit\n"
+        "src/foo.c\n"
+        "<<<<<<< SEARCH\n"
+        "old\n"
+        "=======\n"
+        "new\n"
+        ">>>>>>> REPLACE\n"
+        "```\n"
+        "[ TOOL: apply_edit | src/foo.c ]\n";
+    char out[512];
+    strip_tool_fences(in, out, sizeof(out));
+    /* The whole apply_edit body should be elided. */
+    ASSERT_TRUE(strstr(out, "<<<<<<< SEARCH") == NULL);
+    ASSERT_TRUE(strstr(out, ">>>>>>> REPLACE") == NULL);
+    ASSERT_TRUE(strstr(out, "Patching:") != NULL);
+    ASSERT_TRUE(strstr(out, "[ TOOL: apply_edit") != NULL);
+}
+
+static void test_strip_unclosed_fence_drops_tail(void) {
+    /* Mid-stream: model has emitted the opening fence but no closing yet.
+     * Everything after the opener is skipped, prose before is kept. */
+    const char *in =
+        "Listing now:\n"
+        "```list_dir\n"
+        ".\n"
+        "still typing...";
+    char out[256];
+    strip_tool_fences(in, out, sizeof(out));
+    ASSERT_TRUE(strstr(out, "Listing now:") != NULL);
+    ASSERT_TRUE(strstr(out, "list_dir") == NULL);
+    ASSERT_TRUE(strstr(out, "still typing") == NULL);
+}
+
+static void test_strip_inline_backticks_kept(void) {
+    /* Backticks NOT at line-start should never trigger a strip. */
+    const char *in = "Use `read_file` carefully — it's read-only.";
+    char out[256];
+    strip_tool_fences(in, out, sizeof(out));
+    ASSERT_EQ_STR(in, out);
+}
+
+static void test_strip_multiple_fences(void) {
+    const char *in =
+        "First step:\n"
+        "```list_dir\n.\n```\n"
+        "[ TOOL: list_dir | . ]\n"
+        "Now read it:\n"
+        "```read_file\nfoo.c\n```\n"
+        "[ TOOL: read_file | foo.c ]\n";
+    char out[512];
+    strip_tool_fences(in, out, sizeof(out));
+    /* Both fences gone, both TOOL markers preserved. */
+    ASSERT_TRUE(strstr(out, "list_dir\n") == NULL);
+    ASSERT_TRUE(strstr(out, "read_file\nfoo") == NULL);
+    ASSERT_TRUE(strstr(out, "[ TOOL: list_dir") != NULL);
+    ASSERT_TRUE(strstr(out, "[ TOOL: read_file") != NULL);
+}
+
+/* =========================================================================
  * Suite runner
  * ========================================================================= */
 void run_string_utils(void) {
@@ -263,6 +411,14 @@ void run_string_utils(void) {
     RUN_TEST(test_chatname_trims_trailing_space);
     RUN_TEST(test_chatname_keeps_utf8);
     RUN_TEST(test_chatname_caps_at_40);
+
+    printf("\nstrip_tool_fences\n");
+    RUN_TEST(test_strip_simple_read_file);
+    RUN_TEST(test_strip_keeps_non_tool_fences);
+    RUN_TEST(test_strip_apply_edit_block);
+    RUN_TEST(test_strip_unclosed_fence_drops_tail);
+    RUN_TEST(test_strip_inline_backticks_kept);
+    RUN_TEST(test_strip_multiple_fences);
 }
 
 TEST_MAIN(string_utils);

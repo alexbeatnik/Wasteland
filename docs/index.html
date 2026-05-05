@@ -644,7 +644,7 @@
             <div class="stat"><span class="num">60</span><span class="label">FPS UI Loop</span></div>
             <div class="stat"><span class="num">256k</span><span class="label">Max Context</span></div>
             <div class="stat"><span class="num">3</span><span class="label">OSes Supported</span></div>
-            <div class="stat"><span class="num">81</span><span class="label">Unit Tests</span></div>
+            <div class="stat"><span class="num">87</span><span class="label">Unit Tests</span></div>
         </div>
     </section>
 
@@ -898,7 +898,7 @@ cmake --build . --config Release</pre>
     <!-- ============== TESTING ============== -->
     <section>
         <h2>TESTING</h2>
-        <p>Zero-dependency C test framework — just macros and <code>stdio.h</code>. <strong>81 tests across 4 suites</strong>, all green on Linux / macOS / Windows CI runners. Run via CTest:</p>
+        <p>Zero-dependency C test framework — just macros and <code>stdio.h</code>. <strong>87 tests across 4 suites</strong>, all green on Linux / macOS / Windows CI runners. Run via CTest:</p>
 <pre>cd build
 ctest --output-on-failure</pre>
 
@@ -922,8 +922,8 @@ ctest --output-on-failure</pre>
                 </tr>
                 <tr>
                     <td><code>test_string_utils</code></td>
-                    <td>15</td>
-                    <td>RC4 chat cipher round-trip (ASCII, UTF-8, empty buffer, deterministic output) · HF <code>/blob/main/</code> → <code>/resolve/main/</code> URL rewrite (basic, idempotent, too-small-buffer refusal, false-substring guard) · chat-name sanitisation (punctuation, space-runs, trim, UTF-8 passthrough, 40-char cap)</td>
+                    <td>21</td>
+                    <td>RC4 chat cipher round-trip (ASCII, UTF-8, empty buffer, deterministic output) · HF <code>/blob/main/</code> → <code>/resolve/main/</code> URL rewrite (basic, idempotent, too-small-buffer refusal, false-substring guard) · chat-name sanitisation (punctuation, space-runs, trim, UTF-8 passthrough, 40-char cap) · <strong>tool-fence stripping</strong> (agent fences elided, plain code fences preserved, unclosed-fence tail drop, inline backticks kept, multi-fence chains)</td>
                 </tr>
             </tbody>
         </table>

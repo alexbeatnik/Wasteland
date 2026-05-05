@@ -229,15 +229,46 @@ void load_chat_history(const char *chat_name, char *history, size_t max_len)
     }
 }
 
+/* Trim `base` (length *blen) so it doesn't end mid-UTF-8-codepoint. UTF-8
+ * continuation bytes match 10xxxxxx (0x80..0xBF) and a lead byte's expected
+ * sequence length is determined by the top bits (0xC0=2 / 0xE0=3 / 0xF0=4).
+ * If the tail is incomplete, drop the offending bytes. */
+static void trim_partial_utf8(char *base, int *blen)
+{
+    int b = *blen;
+    while (b > 0 && ((unsigned char)base[b-1] & 0xC0) == 0x80) b--;
+    if (b > 0) {
+        unsigned char last = (unsigned char)base[b-1];
+        int need = 0;
+        if      ((last & 0xE0) == 0xC0) need = 2;
+        else if ((last & 0xF0) == 0xE0) need = 3;
+        else if ((last & 0xF8) == 0xF0) need = 4;
+        if (need > 1) {
+            int trail = (*blen) - b;
+            if (trail < need - 1) b--; /* lead byte without all its continuations */
+        }
+    }
+    base[b] = '\0';
+    *blen = b;
+}
+
 static void generate_chat_name_from_prompt(const char *prompt, char *out_name, size_t out_len)
 {
-    char base[64] = {0};
+    /* Cap at 60 bytes — 30 Cyrillic chars, 60 ASCII. Long enough to be
+     * recognisable, short enough to fit in the left-panel chat label
+     * without needing soft-wrap. The auto-rename pass after the first
+     * model reply replaces this with a 3–5 word model-generated title. */
+    enum { CAP_BYTES = 60 };
+    char base[CAP_BYTES + 8] = {0};
     int b = 0;
     while (*prompt == ' ') prompt++;
-    
-    for (int i = 0; prompt[i] && b < 40; i++) {
+
+    int hit_cap = 0;
+    for (int i = 0; prompt[i]; i++) {
+        if (b >= CAP_BYTES) { hit_cap = 1; break; }
         unsigned char c = (unsigned char)prompt[i];
-        if (c >= 0x80 || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+        if (c >= 0x80 || (c >= 'a' && c <= 'z') ||
+            (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
             base[b++] = (char)c;
         } else if (c == ' ' || c == '-') {
             if (b > 0 && base[b-1] != ' ') {
@@ -245,13 +276,28 @@ static void generate_chat_name_from_prompt(const char *prompt, char *out_name, s
             }
         }
     }
+
+    /* If we cut off in the middle of the prompt, prefer breaking at the last
+     * space within the trailing third of the buffer. Avoids ugly mid-word
+     * cuts like "Прочитай рідмі і скаж[и мені про щось]". */
+    if (hit_cap) {
+        int floor_idx = (b * 2) / 3;
+        for (int i = b - 1; i >= floor_idx; i--) {
+            if (base[i] == ' ') { b = i; break; }
+        }
+    }
+
+    /* Drop incomplete UTF-8 tail so we never end mid-codepoint, regardless
+     * of where the cap or word-boundary cut fell. */
+    trim_partial_utf8(base, &b);
+
     while (b > 0 && base[b-1] == ' ') b--;
     base[b] = '\0';
-    
+
     if (b == 0) strcpy(base, "Session");
-    
+
     snprintf(out_name, out_len, "%s.txt", base);
-    
+
     char path[512];
     snprintf(path, sizeof(path), "chats/%s", out_name);
     struct stat st;
@@ -517,6 +563,84 @@ static void wrap_text_into(char *out, size_t out_size,
         } else {
             break;
         }
+    }
+    out[out_pos] = '\0';
+}
+
+/* ---------------------------------------------------------------------------
+ * strip_tool_fences
+ *
+ * In agent mode the assistant's reply contains markdown fences like
+ *     ```read_file
+ *     README.md
+ *     ```
+ * which the worker also annotates with a separate `[ TOOL: read_file | path ]`
+ * line. The fence body adds 3–4 visual lines per call to the chat panel for
+ * information already conveyed by the TOOL marker, so the panel fills up
+ * fast on a multi-step ReAct trace.
+ *
+ * This pass copies `in` to `out`, dropping any line-anchored ``` fence whose
+ * header matches one of the four agent tool names. Everything else (the
+ * model's prose, think markers, user prompts, TOOL markers) is preserved
+ * byte-for-byte. The chat file on disk is unchanged — this is a per-frame
+ * view-only transform applied to the rendering snapshot.
+ *
+ * `out_size` must accommodate `strlen(in) + 1` in the worst case (no fences
+ * found, full passthrough).
+ * --------------------------------------------------------------------------- */
+static int is_tool_fence_header(const char *p, size_t hlen)
+{
+    /* Trim trailing spaces / CR. */
+    while (hlen > 0 && (p[hlen-1] == ' ' || p[hlen-1] == '\t' ||
+                        p[hlen-1] == '\r')) hlen--;
+    if (hlen == 9  && memcmp(p, "read_file",  9 ) == 0) return 1;
+    if (hlen == 8  && memcmp(p, "list_dir",   8 ) == 0) return 1;
+    if (hlen == 10 && memcmp(p, "write_file", 10) == 0) return 1;
+    if (hlen == 10 && memcmp(p, "apply_edit", 10) == 0) return 1;
+    return 0;
+}
+
+static void strip_tool_fences(const char *in, char *out, size_t out_size)
+{
+    if (!out || out_size == 0) return;
+    out[0] = '\0';
+    if (!in) return;
+
+    size_t in_len = strlen(in);
+    size_t out_pos = 0;
+    size_t i = 0;
+
+    while (i < in_len && out_pos + 1 < out_size) {
+        /* A fence opens at column 0 (start-of-buffer or right after '\n'). */
+        int line_start = (i == 0) || (in[i-1] == '\n');
+        if (line_start && i + 3 <= in_len &&
+            in[i] == '`' && in[i+1] == '`' && in[i+2] == '`')
+        {
+            const char *hdr = in + i + 3;
+            const char *hdr_end = memchr(hdr, '\n', in_len - (i + 3));
+            if (!hdr_end) hdr_end = in + in_len;
+            if (is_tool_fence_header(hdr, (size_t)(hdr_end - hdr))) {
+                /* Find the closing ``` at line start. */
+                size_t j = (size_t)(hdr_end - in);
+                if (j < in_len && in[j] == '\n') j++;
+                while (j < in_len) {
+                    int j_line_start = (j == 0) || (in[j-1] == '\n');
+                    if (j_line_start && j + 3 <= in_len &&
+                        in[j] == '`' && in[j+1] == '`' && in[j+2] == '`') {
+                        j += 3;
+                        /* Skip rest of the closing fence line. */
+                        while (j < in_len && in[j] != '\n') j++;
+                        if (j < in_len) j++; /* eat the newline */
+                        break;
+                    }
+                    j++;
+                }
+                i = j;
+                continue;
+            }
+        }
+
+        out[out_pos++] = in[i++];
     }
     out[out_pos] = '\0';
 }
@@ -851,35 +975,22 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
 
             nk_layout_row_dynamic(nk, 20, 1);
             if (nk_button_label(nk, "[ NEW CHAT ]")) {
-                char new_chat[WASTELAND_CHAT_NAME_LEN];
-                char base[] = "New Chat";
-                snprintf(new_chat, sizeof(new_chat), "%s.txt", base);
-                char path[512];
-                snprintf(path, sizeof(path), "chats/%s", new_chat);
-                struct stat st;
-                int suffix = 1;
-                while (stat(path, &st) == 0 && suffix < 100) {
-                    snprintf(new_chat, sizeof(new_chat), "%s_%d.txt", base, suffix);
-                    snprintf(path, sizeof(path), "chats/%s", new_chat);
-                    suffix++;
-                }
-                
+                /* Persist the currently active chat (if any) before clearing. */
                 if (state->selected_chat >= 0 && state->selected_chat < state->chat_count) {
                     save_chat_history(state->chats[state->selected_chat], state->chat_history);
                 }
-                
+
+                /* Defer creation: clear the buffer, drop the selection, and
+                 * let the prompt-submit handler create the chat with a
+                 * prompt-derived name on the first message. This way the
+                 * chat is never permanently named "New Chat" — the auto-
+                 * rename branch (selected_chat == -1) does the right thing
+                 * without us having to fix up an already-existing entry. */
                 state->chat_history[0] = '\0';
                 state->chat_last_len = 0;
                 state->context_tokens = 0;
                 state->context_max = 0;
-                
-                if (state->chat_count < WASTELAND_MAX_CHATS) {
-                    snprintf(state->chats[state->chat_count],
-                             WASTELAND_CHAT_NAME_LEN, "%s", new_chat);
-                    state->selected_chat = state->chat_count;
-                    state->chat_count++;
-                    save_chat_history(new_chat, "");
-                }
+                state->selected_chat = -1;
             }
 
             if (state->chat_count == 0) {
@@ -1455,14 +1566,25 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
              * box visually matches the rest of the terminal. */
 
             /* Snapshot chat_history under lock so the inference thread can't
-             * mutate it mid-render (which used to garble think/normal state). */
+             * mutate it mid-render (which used to garble think/normal state).
+             *
+             * Two-stage copy: raw_hist holds the verbatim chat (for accurate
+             * boundary detection if we ever need it), and local_hist receives
+             * the rendering view with agent tool fences elided so the chat
+             * panel doesn't fill up with redundant ```read_file ... ```
+             * blocks alongside the [ TOOL: ... ] markers. The on-disk file
+             * keeps the raw content. */
+            static char raw_hist  [WASTELAND_MAX_CHAT_HISTORY];
             static char local_hist[WASTELAND_MAX_CHAT_HISTORY];
             pthread_mutex_lock(&state->chat_mutex);
-            size_t chat_len = strlen(state->chat_history);
-            if (chat_len >= sizeof(local_hist)) chat_len = sizeof(local_hist) - 1;
-            memcpy(local_hist, state->chat_history, chat_len);
-            local_hist[chat_len] = '\0';
+            size_t raw_len = strlen(state->chat_history);
+            if (raw_len >= sizeof(raw_hist)) raw_len = sizeof(raw_hist) - 1;
+            memcpy(raw_hist, state->chat_history, raw_len);
+            raw_hist[raw_len] = '\0';
             pthread_mutex_unlock(&state->chat_mutex);
+
+            strip_tool_fences(raw_hist, local_hist, sizeof(local_hist));
+            size_t chat_len = strlen(local_hist);
 
             /* Auto-scroll to bottom whenever new tokens arrive. The outer
              * scrolled group (below) holds many sub-edit-boxes — none of

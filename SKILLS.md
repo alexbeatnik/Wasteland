@@ -63,6 +63,13 @@ This project does not use a formal skill system. The following domains are relev
 - **Context stats:** compute using `parse_chat_history` + `llama_chat_apply_template` + `llama_tokenize` (probe mode). Call after every generation finish and after every compact. Display as `CTX: used / max (pct%)` with colour-coded progress bar (orange > 75 %, red > 90 %).
 - **Auto-generated chat titles:** after the first assistant reply in a newly-created chat, run a short secondary inference pass (max ~20 tokens) with a dedicated title-generation prompt. Use a `title_mode` flag to redirect output into a separate `title_buffer` so the title never appears in chat. Sanitise the result (strip newlines, quotes, markdown, `<>`) and rename the chat file on disk. The UI polls `inference_take_title()` each frame after generation ends.
 
+### Filename Generation from User Input
+
+- **Word-boundary cuts on byte caps:** when truncating a free-form string into a filename with a hard byte limit, scan back to the last space within the trailing third of the buffer rather than cutting mid-word. The "trailing third" floor avoids producing a one-or-two-word stub when the user wrote a long sentence with the first space far from the cap.
+- **UTF-8 tail safety after byte cap:** any cap measured in bytes can split a multi-byte codepoint. Always run a tail pass that (a) drops continuation bytes (`(b & 0xC0) == 0x80`) and (b) drops a lead byte without its full sequence (compute expected length from the top bits: `0xC0`→2, `0xE0`→3, `0xF0`→4). Without this, a 2-byte Cyrillic char halved by the cap renders as `?` and breaks case-insensitive filesystems on normalisation.
+- **Lazy chat creation:** the `[ NEW CHAT ]` button does not create a file on disk; it just resets the buffer and sets the "no active chat" sentinel. The submit handler creates the chat with a prompt-derived name on the first message, so there is no permanent default name. Eager creation produced ugly `New Chat` / `New Chat_2` filenames when the auto-rename branch never fired.
+- **View-only transforms vs. persistent edits:** when the model output contains repetitive markup (e.g. agent tool fences with separate `[ TOOL: ... ]` markers), strip it from the rendered view per-frame, not from the underlying buffer — agent re-parsing on the next turn must still see the original fences. Drive this by copying `state->chat_history` → `view_buf` and applying the transform on the copy.
+
 ### Stream Processing & Data Persistence
 
 - Token-by-token streaming with carry buffers for partial-match safety.
