@@ -28,7 +28,7 @@
 #define WASTELAND_MAX_CHATS        64
 #define WASTELAND_CHAT_NAME_LEN    256
 
-#define WASTELAND_VERSION          "0.5"
+#define WASTELAND_VERSION          "0.6"
 
 /* Agent-mode UI buffer sizes (mirrored from agent.h to avoid the include
  * chain dragging agent internals into every UI compilation unit). */
@@ -114,6 +114,14 @@ typedef struct {
      * effect on the next model load. */
     int   settings_n_ctx;
     float settings_temperature;
+
+    /* Prompt input toggles. `input_expanded` flips the bottom-of-right-panel
+     * prompt edit box from its default ~34 px height to "fills most of the
+     * right panel" so the user can compose long multi-line prompts (or
+     * paste a multi-paragraph block) and scroll within the box. The chat
+     * scroll group shrinks to a 60 px sliver while expanded so the Send
+     * button + CTX bar never go offscreen. */
+    int   input_expanded;
 
     /* Auto-update state */
     char update_version[32];            /* e.g. "0.4" (empty = no update) */

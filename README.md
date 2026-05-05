@@ -1,4 +1,4 @@
-# Wasteland Terminal v0.5
+# Wasteland Terminal v0.6
 
 ![Wasteland Terminal](assets/icon-512.png)
 
@@ -123,16 +123,16 @@ GitHub Actions automatically builds and releases for all platforms on every tag:
 
 | Platform | Artifact |
 |----------|----------|
-| Linux x86\_64 (Ubuntu/Debian) | `wasteland_0.5_amd64.deb` — install with `sudo apt install ./wasteland_0.5_amd64.deb` |
-| Linux ARM64 (Raspberry Pi 5, Ampere, etc.) | `wasteland_0.5_arm64.deb` — install with `sudo apt install ./wasteland_0.5_arm64.deb` |
+| Linux x86\_64 (Ubuntu/Debian) | `wasteland_0.6_amd64.deb` — install with `sudo apt install ./wasteland_0.6_amd64.deb` |
+| Linux ARM64 (Raspberry Pi 5, Ampere, etc.) | `wasteland_0.6_arm64.deb` — install with `sudo apt install ./wasteland_0.6_arm64.deb` |
 | macOS (universal) | `Wasteland-macos.dmg` — one .app that runs natively on both Apple Silicon and Intel (deployment target 11.0+) |
 | Windows | `Wasteland-windows.exe` — single self-contained binary (SDL2/curl statically linked) |
 
 Push a tag to trigger a release:
 
 ```bash
-git tag v0.5
-git push origin v0.5
+git tag v0.6
+git push origin v0.6
 ```
 
 ## Running
@@ -211,12 +211,12 @@ Tests are compiled automatically by CMake when you configure the project. To add
 
 ### Current coverage
 
-Four suites, **87 tests** total — all green on Linux / macOS / Windows CI runners. Filesystem-touching cases use `/tmp` scratch directories created at suite startup.
+Four suites, **89 tests** total — all green on Linux / macOS / Windows CI runners. Filesystem-touching cases use `/tmp` scratch directories created at suite startup.
 
 | Suite | What it tests |
 |---|---|
 | `test_agent` (35) | Tool-call markdown parsing (`read_file`, `list_dir`, `write_file`, `apply_edit`) including malformed `apply_edit`, multi-line SEARCH/REPLACE blocks, empty `write_file` body, non-tool fences, inline backticks · sandbox path resolution (escape attempts, absolute paths, new files, `./` prefix) · **executor round-trips:** real read / write / apply_edit / list_dir against a scratch workspace, ambiguous-match refusal, delete-via-empty-replace, escape-blocked attempts · `agent_system_prompt` describes every tool |
-| `test_chat_history` (16) | Flat `> prompt\nreply\n` → user/assistant message splitting · trailing-user discard · max-msg cap · CRLF (Windows) line-ending normalisation · UTF-8 (Cyrillic) round-trip · `> ` inside an assistant reply does NOT split a turn · NULL user-prompt for `build_system_prompt` · base-then-user concatenation order |
+| `test_chat_history` (18) | Flat `> prompt\nreply\n` → user/assistant message splitting · trailing-user discard · max-msg cap · CRLF (Windows) line-ending normalisation · UTF-8 (Cyrillic) round-trip · `> ` inside an assistant reply does NOT split a turn · **multi-line user prompts** (consecutive `> ` lines glued back into one user message) · NULL user-prompt for `build_system_prompt` · base-then-user concatenation order |
 | `test_version` (15) | Semver comparison (`X.Y.Z` with optional `v` prefix) including release-tag-vs-runtime, two-component versions, multi-digit minors (`0.10` > `0.9`), empty / garbage-prefix inputs · platform-specific update-filename generation · version-different filenames differ on Linux but not on macOS / Windows |
 | `test_string_utils` (21) | RC4 chat cipher round-trip (ASCII, UTF-8, empty buffer, deterministic output) · HuggingFace `/blob/main/` → `/resolve/main/` URL rewrite (basic, already-resolve, too-small-buffer, false-substring matches) · chat-name sanitisation (punctuation strip, space-run collapse, leading/trailing trim, UTF-8 passthrough, 40-char cap) · **`strip_tool_fences`** (read_file / list_dir / apply_edit elided, plain `` ```c `` / `` ```json `` preserved, unclosed-fence tail dropped, inline backticks kept, multi-fence chains) |
 
@@ -234,7 +234,7 @@ Four suites, **87 tests** total — all green on Linux / macOS / Windows CI runn
   - `[ UNLOAD: name | size ]` — currently loaded model; click to free it
   - `[ DELETE ]` — remove the file from disk (disabled while a load is in flight or generation is running)
   - `[ REFRESH ]` — re-scan `models/`
-- **Inference Settings** — Controls visible at all times; values persist in `wasteland.cfg`:
+- **Inference Settings** — Controls visible at all times; values persist in `wasteland.cfg`. Each control pairs a **drag-able slider** (left, fast coarse adjust) with a numeric **property widget** (right, click-to-step / type-exact-value). Both bind to the same field, so you can swipe across the full range in one motion or land on `4096` exactly:
   - **N\_CTX** (512–262 144, step 1024) — context window size; change takes effect on the next model load
   - **TEMP** (0.10–2.00, step 0.05) — sampling temperature; change takes effect immediately on the next prompt
 - **System Prompt** — Multi-line input for system instructions, saved between sessions
@@ -260,8 +260,9 @@ Four suites, **87 tests** total — all green on Linux / macOS / Windows CI runn
   - Worker is paused on the approval gate until you click one. The diff text is selectable so you can copy it for review.
 - **CTX bar** — `CTX: used / max (pct%)` with a progress bar. Turns orange above 75 %, red above 90 %.
 - **`[ COMPACT ]`** — Drop the oldest turn, persist the result to disk, mirror into inference. Disabled during generation. Shows feedback in the status line.
-- **Input** — `>` prompt with text field
-- **`▶` (Play)** — submit the prompt (Enter also works)
+- **Input** — `>` prompt with a **multi-line edit box**. Pasting a multi-paragraph clipboard works as expected — newlines are preserved and the box scrolls internally for long content. Multi-line prompts are reconstructed on the next turn so the model sees the original line breaks.
+- **`⤡` (Expand)** — toggles the input box between its default ~34 px height and "fills most of the right panel" mode for composing long prompts comfortably. The chat view shrinks to a 60 px sliver while expanded so the Send button and CTX bar stay visible.
+- **`▶` (Play)** — submit the prompt. Press Enter inside the input box to insert a newline; click ▶ (or its ■ replacement during generation) to actually send.
 - **`■` (Stop)** — replaces Play while the model is generating; cancels the current response
 - **Status message** — temporary non-intrusive notifications appear beneath the input box
 

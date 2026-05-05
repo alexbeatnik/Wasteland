@@ -1,4 +1,4 @@
-# AGENTS.md — Wasteland v0.5
+# AGENTS.md — Wasteland v0.6
 
 ## Agent Instructions
 
@@ -53,6 +53,14 @@ Anything that can take >100 ms must not run on the UI thread. The UI thread is t
 - **Banner gating:** `state->update_version[0] != '\0'` is the single source of truth. The probe only writes to it when `version_newer_than(latest, WASTELAND_VERSION)` returns true — so on equal or older releases, no banner. Don't add a "force show banner" toggle for testing; just temporarily lower `WASTELAND_VERSION` in `ui.h` and rebuild.
 - **GitHub release `tag_name` parsing is a `strstr` scan, not a JSON library.** Format must stay `vX.Y` or `vX.Y.Z`; the leading `v` is stripped before comparison. If GitHub ever changes the JSON shape, the probe will silently fail (returns -1, no banner) — fine for graceful degradation, but spot-check after any GitHub API breakage.
 
+## CI Release Workflow Rules
+
+- **`release` job MUST list `extract-version` in its `needs:`.** Without it, `needs.extract-version.outputs.version` evaluates to null on a main-branch push, the `||` fallback drops to `github.ref_name` which IS the literal string `main`, and `softprops/action-gh-release` then creates a release AND a tag named `main` at the current commit — silently bypassing the `v0.6` tag that `create-tag` just published.
+- **Resolve the release tag in a dedicated step, not inline in `tag_name:`.** A `bash` step with priority `inputs.version → extract-version.outputs.version → github.ref_name (only if ref_type == tag)` plus a `^v[0-9]+\.[0-9]+(\.[0-9]+)?$` regex validation makes the resolution explicit and fails loudly when nothing matches. Don't rewrite this back into a single-line YAML expression — silent fallthrough to a branch name is exactly the bug we're guarding against.
+- **`release` is gated by `tag_exists == 'false'` on main-push.** Cosmetic pushes to `main` (README tweak, doc fix, anything that doesn't bump `WASTELAND_VERSION` in `src/ui.h`) must NOT regenerate the published release — that would overwrite the `.deb`/`.dmg`/`.exe` artefacts and wipe hand-edited release notes from the GitHub UI. The `extract-version` job probes `git ls-remote --tags` and writes `tag_exists`; the release job's `if:` consults it. `workflow_dispatch` and direct tag-pushes still publish unconditionally.
+- **`GITHUB_TOKEN`-pushed tags do NOT trigger workflow runs.** GitHub safety against recursive events. So the build + release MUST happen in the same workflow run as `create-tag` — don't refactor to "wait for the tag-push event" expecting a second run, because that second run never fires.
+- **Bumping `WASTELAND_VERSION` is the single ceremony that publishes a release.** Edit `src/ui.h`, commit, push to `main`. CI extracts the version, creates the tag, builds for 4 targets, publishes the release. No manual tagging, no release-please-style PR. If you also need to change `CPACK_PACKAGE_VERSION` in `CMakeLists.txt` and the hardcoded filenames in `build.yml`, do it in the same commit.
+
 ## UI Rules
 
 - Amber monochrome palette only: `#FFB000` on dark charcoal / black. `amber_dim` used for reasoning text. Every Nuklear widget type (button, edit, checkbox, progress, scrollbar, property) must be themed in `ui_apply_amber_theme()` — do not leave any control with default grey gradients.
@@ -68,6 +76,10 @@ Anything that can take >100 ms must not run on the UI thread. The UI thread is t
 - **Agent diff palette is canonical:** `[ APPLY ]` and the REPLACE block must be `#AACC00` (yellow-green); `[ REJECT ]` and the SEARCH block must be `#FF6020` (orange-red); the `▼ AGENT PROPOSAL — REVIEW` heading and `// SEARCH:` / `// REPLACE WITH:` labels are amber `#FFB000`. These four exact RGB values match the `docs/index.html` `agent-proposal` mock — keep them in sync if either side changes. Use the snapshot-and-restore pattern (`saved_btn = nk->style.button; ...; nk->style.button = saved_btn;`) so per-button tinting never leaks into the global amber theme.
 - **Diff blocks use `nk_edit_string`, NOT `nk_group + nk_label_colored_wrap`.** The wrap label allocates its own layout rows that don't compose with a fixed-height parent group — text gets clipped past the reserved height, leaving an empty bordered box (the user sees the rectangle, not the content). The proven pattern is `nk_edit_string(NK_EDIT_BOX | NK_EDIT_MULTILINE, …)` writing into a static buffer that's repopulated from the pending-tool pointers each frame. Tint border / text / cursor through a `saved_edit = nk->style.edit; ... ; nk->style.edit = saved_edit;` snapshot-and-restore. Do not switch this to `NK_EDIT_READ_ONLY` — read-only mode disables mouse selection, which kills the user's ability to copy the diff for review.
 - **Pending-panel reserved height:** `pending_panel_h` is `230` for `write_file` (heading 18 + title 16 + label 14 + body 130 + buttons 28 + group padding) and `290` for `apply_edit` (one extra label + one extra body). If you grow either block, update the constants — chat area height is computed as `height - 200 - pending_panel_h`, so under-reserving pushes the input field offscreen.
+- **Prompt input is multi-line `nk_edit_string(NK_EDIT_BOX | NK_EDIT_MULTILINE)`.** Do NOT pass `NK_EDIT_SIG_ENTER` — that would commit on every Enter press, defeating multi-line composition (Enter must insert a newline). Submit is button-only via the `▶` glyph. Pasting a multi-paragraph clipboard works because the box accepts `\n` natively; long content scrolls within the box.
+- **`state->input_expanded` toggle drives chat/input height split.** Collapsed default: `input_h = 100` (≈5 visible rows) — short paragraphs compose without needing to expand, longer content scrolls inside the box. Expanded: `input_h = height - 226 - pending_panel_h` (with `80` px floor), `chat_h` floors to 60 px. Single formula `chat_h = height - 166 - input_h - pending_panel_h` covers both modes. The toggle button uses **U+25B2** (`▲`, expand) / **U+25BC** (`▼`, collapse) from the Geometric Shapes block — confirmed inside the embedded DejaVu Sans Mono atlas range (`0x25A0..0x25FF` in `nk_sdl_unicode_ranges[]`). Do NOT use U+2921/U+2922 (Supplemental Arrows-B) or any other arrow from U+2190..U+21FF — those ranges are NOT baked into the atlas and render as `?` boxes.
+- **Multi-line user prompts are stored as consecutive `> ` lines.** When the user submits a prompt containing `\n`, the UI emits `> line1\n> line2\n...` to `chat_history`. The `parse_chat_history` parser glues consecutive `> ` lines back into a single user message with embedded `\n`s so the chat template sees the original line breaks. Don't simplify the UI write path to a single `> %s\n` snprintf — it would dump the raw `\n` into chat_history and break the parser invariant on the next turn.
+- **Settings sliders pair with property widgets, not replace them.** N_CTX and TEMP each render as `nk_slider_int/float` (left, ~62 % width, drag for fast coarse adjust) PLUS `nk_property_int/float` (right, ~38 %, click-to-step or type exact value). Both bind to the same `state->settings_*` field. Going from 4 K to 256 K through the property's `+` button alone is ~250 clicks; the slider makes the UI usable for big jumps. Do NOT collapse to slider-only — the property is the only way to type an exact value or land on a power-of-two.
 
 ## Chat Creation & Naming
 
@@ -171,4 +183,4 @@ Before declaring a task complete:
 
 ## Version
 
-Current version: **0.5**
+Current version: **0.6**

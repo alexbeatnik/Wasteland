@@ -1,4 +1,4 @@
-# CLAUDE.md — Wasteland v0.5
+# CLAUDE.md — Wasteland v0.6
 
 ## Agent Context
 
@@ -195,6 +195,32 @@ The auto-update flow is split across three threads + a generated shell/batch scr
 
 The Linux artefact is a Debian package archive (`wasteland_<ver>_<arch>.deb`), **not** an ELF binary. The naïve `cp $NEW $OLD` would replace the running executable with a tarball and brick the install. The script must invoke `dpkg -i $NEW` (with elevation), which extracts the .deb and lays the binary down at `/usr/bin/Wasteland` via the package manager. The script tries `pkexec` first (PolicyKit, ships on Ubuntu/Debian/Mint with a desktop), falls back to `gksudo` / `kdesu`, and surfaces a `notify-send` / `zenity` / `xmessage` notification with the manual install command on failure. The `.deb` is **kept** on disk if install failed, so the user can follow the notification's `sudo dpkg -i …` instruction.
 
+### CI release flow — five jobs, two gating outputs
+
+`.github/workflows/build.yml` has five jobs in a strict dependency chain:
+
+```
+extract-version  →  create-tag        ┐
+                                      ├─→  build  →  release
+       test ─────────────────────────┘
+```
+
+- **`extract-version`** runs only on `push` to `main`. It reads `WASTELAND_VERSION` from `src/ui.h` and emits two outputs: `version=v0.6` (the tag string) and `tag_exists=true|false` (a probe of `git ls-remote --tags`). `tag_exists` is the gate that prevents cosmetic main-pushes from regenerating an already-published release.
+- **`create-tag`** pushes `v0.6` to origin if it doesn't already exist. Runs on main pushes and `workflow_dispatch`. Note: tags pushed via `GITHUB_TOKEN` do NOT trigger a new workflow run (GitHub safety against recursive events) — so the same workflow run must continue to build + release.
+- **`test`** is unconditional — every event runs the 87-test ctest suite before anything else proceeds.
+- **`build`** is the 4-platform matrix (Linux amd64, Linux arm64, macOS universal, Windows). Depends on `test` + `create-tag`.
+- **`release`** depends on **both** `build` AND `extract-version` — the `extract-version` dependency is critical because that's the only path through which the resolved tag reaches the release step on a main-branch push.
+
+### Why `release` reads its tag from a dedicated step, not directly from `tag_name:`
+
+The earlier shape `tag_name: ${{ ... || needs.extract-version.outputs.version || github.ref_name }}` looks correct but had a subtle bug: when `extract-version` wasn't in `needs`, the middle expression silently evaluated to null and the OR fell through to `github.ref_name`. On a main-branch push, `github.ref_name` is the literal string `main` — so `softprops/action-gh-release` would create both a release AND a tag named `main` at the current commit, while ignoring the `v0.6` tag that `create-tag` had just published.
+
+Current shape: a dedicated `Resolve release tag` step does the priority resolution (`inputs.version` → `extract-version.outputs.version` → `ref_name` only-if-tag), validates the result against `^v[0-9]+\.[0-9]+(\.[0-9]+)?$`, and fails the job loudly if no usable version is found instead of falling through to a branch name. That regex is the canonical version-tag shape — `extract-version`, `create-tag`, and `release` all assume it.
+
+### Why `release` skips on a main-push when the tag already exists
+
+`needs.extract-version.outputs.tag_exists == 'false'` is part of the release `if`. Without it, every cosmetic push to `main` (README typo, doc tweak, version stays at `0.6`) would rerun the whole build matrix, upload the same `.deb`/`.dmg`/`.exe` to the existing `v0.6` release, and **wipe any hand-edited release notes** from the GitHub UI. With the gate: if `v0.6` is already tagged, the release job is silently skipped on main pushes — you only get a release when `WASTELAND_VERSION` is bumped. Manual `workflow_dispatch` and direct tag pushes still publish unconditionally.
+
 ### Absolute-path resolution before script generation
 
 `pkexec` resets CWD to `/root`, `osascript with administrator privileges` to `/`, Windows ShellExecute to `%TEMP%` — none of them inherit the parent's CWD. A relative `downloads/wasteland_0.6_amd64.deb` passed verbatim into the generated script would not resolve. `launch_updater()` always pre-resolves `new_file` to an absolute path before writing the script: POSIX uses `realpath()` with a `getcwd()/relative` fallback; Windows uses `_fullpath()`. If you ever bypass this layer (e.g. a hot-patch that calls the script directly), make sure the path you pass in is already absolute.
@@ -208,7 +234,7 @@ The Linux artefact is a Debian package archive (`wasteland_<ver>_<arch>.deb`), *
 | Linux x86_64 | `wasteland_<ver>_amd64.deb` |
 | Linux aarch64 | `wasteland_<ver>_arm64.deb` |
 
-`version_newer_than` accepts `X.Y` or `X.Y.Z` with optional leading `v`. Both the API tag (`v0.5`) and `WASTELAND_VERSION` (`0.5`) are normalised by skipping non-digit prefix chars before `sscanf`.
+`version_newer_than` accepts `X.Y` or `X.Y.Z` with optional leading `v`. Both the API tag (`v0.6`) and `WASTELAND_VERSION` (`0.6`) are normalised by skipping non-digit prefix chars before `sscanf`.
 
 ## Chat Creation Lifecycle (lazy)
 
@@ -221,6 +247,39 @@ The Linux artefact is a Debian package archive (`wasteland_<ver>_<arch>.deb`), *
 Result: there is no permanent "New Chat" filename. Hitting `[ NEW CHAT ]` and then immediately switching to another chat creates nothing — no orphan files. The same code path handles both "first ever message" (selected_chat starts at -1) and "user clicked NEW CHAT" (selected_chat reset to -1).
 
 `generate_chat_name_from_prompt` cap is **60 bytes** (≈ 30 Cyrillic chars or 60 ASCII), with two safety passes: (a) if cap was hit, scan back to the last space within the trailing third of the buffer to avoid mid-word cuts; (b) `trim_partial_utf8()` drops any incomplete UTF-8 continuation/lead bytes left at the tail. Without (b), a Cyrillic char split across the cap would persist on disk as an invalid sequence and break some filesystems on import/export.
+
+## Multi-Line Prompt Input
+
+The bottom-of-right-panel prompt input is `nk_edit_string(NK_EDIT_BOX | NK_EDIT_MULTILINE)` — a true multi-line text box. Pasting a multi-paragraph clipboard preserves newlines; the box scrolls internally for long content. Submit is button-only (`▶` glyph) — Enter inserts a newline, never commits, so multi-line composition Just Works.
+
+### `state->input_expanded` toggle
+
+A small `▲` / `▼` button next to `▶` flips the input between two layouts:
+
+- **Collapsed (default):** `input_h = 100` px (~5 visible rows of 18 px). Short paragraphs compose without needing to expand; longer content scrolls inside the box. Chat scroll group takes the rest of the right panel.
+- **Expanded:** `input_h = height - 226 - pending_panel_h` (with 80 px floor). Chat shrinks to a 60 px sliver so the last assistant reply stays visible while composing the follow-up.
+
+Single formula covers both modes: `chat_h = height - 166 - input_h - pending_panel_h` (with 60 px floor). The 166 px constant accounts for the CTX bar, ">" label, status row, and Nuklear group padding/header.
+
+### Glyph compatibility — only Geometric Shapes are safe
+
+`nk_sdl_unicode_ranges[]` in `nuklear_sdl_gl2.h` bakes only Basic Latin, Latin-1 Supplement, Cyrillic, a General Punctuation subset, and Geometric Shapes (`0x25A0..0x25FF`). Any other range — Arrows (U+2190..U+21FF), Supplemental Arrows-A/B, Mathematical Operators, Miscellaneous Symbols — renders as a `?` box.
+
+The expand/collapse button initially used U+2921 (`⤡`) / U+2922 (`⤢`) from Supplemental Arrows-B and shipped as `?` boxes. Replaced with U+25B2 (`▲`) / U+25BC (`▼`) from Geometric Shapes — both confirmed inside the baked range. When picking new icon glyphs, stay inside `0x25A0..0x25FF` or extend the font config (atlas size cost: ~1 KB per 64 glyphs).
+
+### Storage format: consecutive `> ` lines
+
+When the user submits a multi-line prompt (`input_buffer` contains `\n`s), the UI walks the buffer line-by-line and emits **one `> {line}\n` segment per source-line** into `chat_history`. So a 3-line paste lands as:
+
+```
+> first paragraph line
+> second paragraph line
+> third line
+```
+
+`parse_chat_history` then has a continuation loop that glues consecutive `> ` lines back into a single user message with embedded `\n`s, so the chat template sees the user's original line breaks on the next turn.
+
+This format keeps the existing `\n> ` boundary detection (compact, render-split, `parse_chat_history`'s "next user prompt" scan) working without changes. The naïve alternative — write `> {raw_input_buffer}\n` with embedded `\n`s — would split the user's prompt across multiple "turns" because the parser's boundary scanner sees a `\n` followed by `> `.
 
 ## Tool-Fence Stripping in Chat View
 
@@ -296,12 +355,12 @@ The action buttons use the same snapshot-and-restore pattern on `nk->style.butto
 - The agent suite **does** link `src/agent.c` directly (`add_executable(test_agent tests/test_agent.c src/agent.c)`) because it has no SDL / llama.cpp dependency — that lets us exercise the real `agent_exec_*` executors end-to-end against a scratch workspace.
 - All tests run automatically in CI via `cmake --build build && ctest --output-on-failure`.
 
-### Suite manifest (87 tests as of v0.5)
+### Suite manifest (89 tests as of v0.6)
 
 | Suite | Tests | Targets |
 |---|---|---|
 | `test_agent` | 35 | `agent_parse_calls` (16 cases inc. malformed `apply_edit`, multi-line blocks, non-tool fences, inline backticks), `agent_resolve_path` (5 sandbox cases), `agent_exec_read_file/write_file/apply_edit/list_dir` (13 round-trip + escape-block cases), `agent_system_prompt` smoke test |
-| `test_chat_history` | 16 | `parse_chat_history` (LF, CRLF, UTF-8, leading newlines, trailing pending prompt, `> ` inside reply, three-turn pending-last) · `build_system_prompt` (with / without / NULL user prompt, base-then-user order) |
+| `test_chat_history` | 18 | `parse_chat_history` (LF, CRLF, UTF-8, leading newlines, trailing pending prompt, `> ` inside reply, three-turn pending-last, **multi-line user prompt**, **two consecutive multi-line turns**) · `build_system_prompt` (with / without / NULL user prompt, base-then-user order) |
 | `test_version` | 15 | `version_newer_than` (X.Y vs X.Y.Z, `v` prefix mix, multi-digit minor, empty / garbage prefix, release-tag-vs-runtime) · `build_update_filename` (current platform + version-difference matrix) |
 | `test_string_utils` | 21 | RC4 chat cipher round-trip (ASCII, UTF-8, empty, determinism) · HF URL rewrite (`/blob/main/` → `/resolve/main/`, already-resolve, too-small-buffer, false-substring) · chat-name sanitisation (punctuation, space runs, trim, UTF-8 passthrough, 40-char cap) · **`strip_tool_fences`** (read_file / list_dir / apply_edit elided, plain code fences preserved, unclosed-fence tail dropped, inline backticks kept, multi-fence chains) |
 
@@ -313,7 +372,7 @@ The action buttons use the same snapshot-and-restore pattern on `nk->style.butto
 - llama.cpp lives in `third_party/llama.cpp/` (with a `vendor/llama.cpp` symlink) and is added as a CMake subdirectory with `LLAMA_BUILD_EXAMPLES=OFF`.
 - `seccomp` is optional (Linux only); CMake skips it gracefully on other platforms.
 - The application does **not** auto-load any model on boot.
-- Package version: **0.5** (`CPACK_PACKAGE_VERSION` in `CMakeLists.txt`).
+- Package version: **0.6** (`CPACK_PACKAGE_VERSION` in `CMakeLists.txt`).
 - MSVC: `nuklear_impl.c` is compiled with `/wd4701`; `ui.c` with `/wd5287`; `_CRT_SECURE_NO_WARNINGS` applied globally for MSVC builds.
 - Linux `.deb` architecture is detected at CMake configure time from `CMAKE_SYSTEM_PROCESSOR` (`x86_64` → `amd64`, `aarch64` → `arm64`). CI builds both via `ubuntu-22.04` and `ubuntu-22.04-arm` runners.
 

@@ -1365,18 +1365,35 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
             nk_layout_row_dynamic(nk, 2, 1);
             nk_button_color(nk, amber);
 
-            nk_layout_row_dynamic(nk, 24, 1);
+            /* N_CTX: drag-able slider on the left for fast coarse adjust
+             * (going from 4 K to 256 K via the property's tiny inc-button
+             * meant ~250 clicks), property widget on the right for precise
+             * numeric entry / step-by-1024. Both bind to the same field so
+             * the value stays in sync regardless of which one was used. */
+            nk_layout_row_begin(nk, NK_DYNAMIC, 24, 2);
+            nk_layout_row_push(nk, 0.62f);
+            nk_slider_int(nk, 512, &state->settings_n_ctx, 262144, 1024);
+            nk_layout_row_push(nk, 0.38f);
             nk_property_int(nk, "N_CTX:",
                             512, &state->settings_n_ctx, 262144, 1024, 256);
+            nk_layout_row_end(nk);
+
             nk_layout_row_dynamic(nk, 14, 1);
             nk_label_colored(nk,
                 "(applies on next model load)",
                 NK_TEXT_LEFT, col_dark_grey());
 
-            nk_layout_row_dynamic(nk, 24, 1);
+            /* TEMP: same slider+property pairing. The slider gives a quick
+             * "more / less random" sweep; the property locks in 0.05-step
+             * precision when you know exactly what value you want. */
+            nk_layout_row_begin(nk, NK_DYNAMIC, 24, 2);
+            nk_layout_row_push(nk, 0.62f);
+            nk_slider_float(nk, 0.10f, &state->settings_temperature, 2.00f, 0.05f);
+            nk_layout_row_push(nk, 0.38f);
             nk_property_float(nk, "TEMP:",
                               0.10f, &state->settings_temperature, 2.00f,
                               0.05f, 0.01f);
+            nk_layout_row_end(nk);
 
             /* Spacer */
             nk_layout_row_dynamic(nk, 10, 1);
@@ -1599,11 +1616,25 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
             }
             state->chat_last_len = chat_len;
 
-            /* Chat area: right-panel minus header/footer controls.
-             * Spacer(6)+label(18)+input(34)+status(18) ≈ 80px below the chat,
-             * plus Nuklear group padding (~20px) → reserve 200px total.
-             * Subtract pending-approval banner if present. */
-            int chat_h = height - 200 - pending_panel_h;
+            /* Right-panel split:
+             *   chat_h        — top scroll group (chat history sections)
+             *   input_h       — multi-line prompt input
+             *   166 px const  — CTX bar(18) + spacer(6) + ">" label(18) +
+             *                   status row(18) + group padding (~20)
+             *                   + outer reservation (~86 — header etc.)
+             *
+             * Collapsed default is 100 px (≈5 visible rows of 18 px) so the
+             * user can compose a short paragraph without immediately needing
+             * to expand. Anything taller scrolls inside the box.
+             * Expanded mode: input fills the panel, chat shrinks to a 60 px
+             * sliver so the last assistant reply stays visible while
+             * composing the next prompt. */
+            int input_h = state->input_expanded
+                            ? (height - 226 - pending_panel_h)
+                            : 100;
+            if (input_h < 80) input_h = 80;
+
+            int chat_h = height - 166 - input_h - pending_panel_h;
             if (chat_h < 60) chat_h = 60;
 
             {
@@ -1796,31 +1827,54 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
             nk_layout_row_dynamic(nk, 18, 1);
             nk_label_colored(nk, ">", NK_TEXT_LEFT, amber);
 
-            /* Input field + icon button in one row.
+            /* Input field — multi-line edit box with two trailing icon
+             * buttons. Multi-line lets the user paste a multi-paragraph
+             * prompt and scroll within the box; the expand toggle blows
+             * the input up to fill the right panel for long compositions.
+             *
+             * Glyphs (UTF-8 byte sequences so the source file stays ASCII).
+             * All four are inside the Geometric Shapes block U+25A0..U+25FF
+             * which the embedded DejaVu Sans Mono atlas explicitly bakes —
+             * earlier ⤡ / ⤢ from Supplemental Arrows-B (U+2900+) rendered
+             * as `?` boxes because that range isn't in the font config:
              *   \xe2\x96\xb6 = U+25B6 BLACK RIGHT-POINTING TRIANGLE (▶) — send
-             *   \xe2\x96\xa0 = U+25A0 BLACK SQUARE (■)                 — stop */
-            nk_layout_row_begin(nk, NK_DYNAMIC, 34, 2);
+             *   \xe2\x96\xa0 = U+25A0 BLACK SQUARE                  (■) — stop
+             *   \xe2\x96\xb2 = U+25B2 BLACK UP-POINTING TRIANGLE    (▲) — expand
+             *   \xe2\x96\xbc = U+25BC BLACK DOWN-POINTING TRIANGLE  (▼) — collapse
+             *
+             * Submit policy: Enter inserts a newline (default NK_EDIT_BOX
+             * behaviour) so multi-line composition Just Works. Click the
+             * ▶ button to send. We deliberately do NOT pass NK_EDIT_SIG_ENTER
+             * — that would commit on every Enter press, defeating the whole
+             * "compose multi-line then send" flow the expand mode enables. */
+            nk_layout_row_begin(nk, NK_DYNAMIC, (float)input_h, 3);
 
-            nk_layout_row_push(nk, 0.87f);
+            nk_layout_row_push(nk, 0.80f);
             int input_len = (int)strlen(state->input_buffer);
-            nk_flags active = nk_edit_string(nk,
-                NK_EDIT_FIELD | NK_EDIT_SIG_ENTER,
+            nk_edit_string(nk,
+                NK_EDIT_BOX | NK_EDIT_MULTILINE | NK_EDIT_AUTO_SELECT,
                 state->input_buffer,
                 &input_len,
                 WASTELAND_MAX_PROMPT_LEN,
                 nk_filter_default);
             state->input_buffer[input_len] = '\0';
 
-            nk_layout_row_push(nk, 0.13f);
+            nk_layout_row_push(nk, 0.08f);
+            if (nk_button_label(nk, state->input_expanded
+                                    ? "\xe2\x96\xbc"   /* ▼ collapse */
+                                    : "\xe2\x96\xb2")) /* ▲ expand */ {
+                state->input_expanded = !state->input_expanded;
+            }
+
+            nk_layout_row_push(nk, 0.12f);
             if (state->is_generating) {
                 /* ■ — click to cancel */
                 if (nk_button_label(nk, "\xe2\x96\xa0")) {
                     inference_cancel_generation(state->inference);
                 }
             } else {
-                /* ▶ — click (or Enter) to send */
-                int send = (active & NK_EDIT_COMMITED) ||
-                           nk_button_label(nk, "\xe2\x96\xb6");
+                /* ▶ — click to send */
+                int send = nk_button_label(nk, "\xe2\x96\xb6");
                 if (send && state->input_buffer[0] &&
                     inference_is_model_loaded(state->inference))
                 {
@@ -1851,10 +1905,52 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                     size_t hlen = strlen(state->chat_history);
                     size_t room = WASTELAND_MAX_CHAT_HISTORY - hlen - 1;
                     if (room > 0) {
-                        /* Append user prompt */
-                        char prompt[WASTELAND_MAX_PROMPT_LEN + 8];
-                        snprintf(prompt, sizeof(prompt), "> %s\n", state->input_buffer);
-                        size_t plen = strlen(prompt);
+                        /* Build the on-disk representation of the user
+                         * prompt: each source-line gets its own `> ` marker
+                         * so `parse_chat_history` can glue them back into
+                         * one multi-line user message on the next turn.
+                         * Single-line prompts still produce `> text\n`. */
+                        char prompt[WASTELAND_MAX_PROMPT_LEN + 256];
+                        size_t plen = 0;
+                        const char *src = state->input_buffer;
+                        const char *line_start = src;
+                        size_t cap = sizeof(prompt) - 4; /* leave room for "> " + "\n" + "\0" */
+
+                        while (*src) {
+                            if (*src == '\n') {
+                                size_t llen = (size_t)(src - line_start);
+                                if (plen + 3 + llen >= cap) break;
+                                prompt[plen++] = '>';
+                                prompt[plen++] = ' ';
+                                memcpy(prompt + plen, line_start, llen);
+                                plen += llen;
+                                prompt[plen++] = '\n';
+                                line_start = src + 1;
+                            }
+                            src++;
+                        }
+                        /* Trailing line (no terminating \n) — emit unless it
+                         * is empty (would produce a stray `> \n`). */
+                        if (line_start < src) {
+                            size_t llen = (size_t)(src - line_start);
+                            if (plen + 3 + llen < cap) {
+                                prompt[plen++] = '>';
+                                prompt[plen++] = ' ';
+                                memcpy(prompt + plen, line_start, llen);
+                                plen += llen;
+                                prompt[plen++] = '\n';
+                            }
+                        } else if (plen == 0) {
+                            /* Input is exactly one trailing newline (or empty
+                             * but we already gated on input_buffer[0]) — emit
+                             * a single empty prompt line so the turn isn't
+                             * silently dropped from history. */
+                            prompt[plen++] = '>';
+                            prompt[plen++] = ' ';
+                            prompt[plen++] = '\n';
+                        }
+                        prompt[plen] = '\0';
+
                         if (plen > room) plen = room;
                         memcpy(state->chat_history + hlen, prompt, plen);
                         state->chat_history[hlen + plen] = '\0';

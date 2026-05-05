@@ -39,13 +39,40 @@ static int parse_chat_history(const char *history,
         if (!uc) break;
         memcpy(uc, user_start, ulen);
         uc[ulen] = '\0';
+        size_t uc_len = ulen;
+        size_t uc_cap = ulen + 1;
+
+        p = line_end + 1;
+
+        while (p + 2 <= end && p[0] == '>' && p[1] == ' ') {
+            const char *cont_start = p + 2;
+            const char *cont_nl = memchr(p, '\n', (size_t)(end - p));
+            const char *cont_end = cont_nl ? cont_nl : end;
+            size_t clen = (size_t)(cont_end - cont_start);
+            while (clen > 0 && (cont_start[clen - 1] == '\r' ||
+                                cont_start[clen - 1] == '\n')) clen--;
+            size_t need = uc_len + 1 + clen + 1;
+            if (need > uc_cap) {
+                size_t new_cap = uc_cap * 2;
+                if (new_cap < need) new_cap = need;
+                char *new_uc = (char *)realloc(uc, new_cap);
+                if (!new_uc) { free(uc); uc = NULL; break; }
+                uc = new_uc;
+                uc_cap = new_cap;
+            }
+            uc[uc_len++] = '\n';
+            memcpy(uc + uc_len, cont_start, clen);
+            uc_len += clen;
+            uc[uc_len] = '\0';
+            p = cont_nl ? cont_nl + 1 : end;
+        }
+
+        if (!uc) break;
 
         msgs[n].role = "user";
         msgs[n].content = uc;
         owned[n] = uc;
         n++;
-
-        p = line_end + 1;
         if (p >= end) {
             n--;
             free(owned[n]);
@@ -269,6 +296,48 @@ static void test_parse_gt_inside_reply_no_split(void) {
     for (int i = 0; i < n; i++) free(owned[i]);
 }
 
+/* Multi-line user prompt: consecutive `> ` lines must be glued back into
+ * a single user message with embedded `\n`s. Lets the user paste a
+ * paragraph and the chat template still sees the original line breaks. */
+static void test_parse_multiline_user_prompt(void) {
+    const char *hist =
+        "> first paragraph line\n"
+        "> second paragraph line\n"
+        "> third line\n"
+        "Got it, processing your three lines.\n";
+    llama_chat_message msgs[16];
+    char *owned[16] = {0};
+    int n = parse_chat_history(hist, msgs, owned, 16);
+    ASSERT_EQ_INT(2, n);
+    ASSERT_EQ_STR("user", msgs[0].role);
+    ASSERT_EQ_STR("first paragraph line\nsecond paragraph line\nthird line",
+                  msgs[0].content);
+    ASSERT_EQ_STR("assistant", msgs[1].role);
+    ASSERT_EQ_STR("Got it, processing your three lines.", msgs[1].content);
+    for (int i = 0; i < n; i++) free(owned[i]);
+}
+
+/* Multi-line prompt followed by another multi-line prompt — both must
+ * be reconstructed correctly as separate turns. */
+static void test_parse_two_multiline_turns(void) {
+    const char *hist =
+        "> alpha 1\n"
+        "> alpha 2\n"
+        "Reply A\n"
+        "> beta 1\n"
+        "> beta 2\n"
+        "Reply B\n";
+    llama_chat_message msgs[16];
+    char *owned[16] = {0};
+    int n = parse_chat_history(hist, msgs, owned, 16);
+    ASSERT_EQ_INT(4, n);
+    ASSERT_EQ_STR("alpha 1\nalpha 2", msgs[0].content);
+    ASSERT_EQ_STR("Reply A", msgs[1].content);
+    ASSERT_EQ_STR("beta 1\nbeta 2", msgs[2].content);
+    ASSERT_EQ_STR("Reply B", msgs[3].content);
+    for (int i = 0; i < n; i++) free(owned[i]);
+}
+
 /* Three consecutive user lines with an assistant reply in the middle. The
  * parser must split correctly across multiple newline-prefixed `> ` markers
  * and not crash on the trailing pending prompt. */
@@ -346,6 +415,8 @@ void run_chat_history(void) {
     RUN_TEST(test_parse_only_pending_prompt);
     RUN_TEST(test_parse_gt_inside_reply_no_split);
     RUN_TEST(test_parse_three_turns_pending_last);
+    RUN_TEST(test_parse_multiline_user_prompt);
+    RUN_TEST(test_parse_two_multiline_turns);
 
     printf("\nbuild_system_prompt\n");
     RUN_TEST(test_build_system_prompt_without_user);

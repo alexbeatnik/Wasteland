@@ -23,12 +23,26 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      tag_exists: ${{ steps.version.outputs.tag_exists }}
     steps:
       - uses: actions/checkout@v5
       - id: version
         run: |
           VER=$(grep '#define WASTELAND_VERSION' src/ui.h | sed 's/.*"\(.*\)".*/\1/')
-          echo "version=v${VER}" >> $GITHUB_OUTPUT
+          TAG="v${VER}"
+          echo "version=${TAG}" >> "$GITHUB_OUTPUT"
+          # Probe whether the tag is already on the remote. If yes, this push
+          # is just a cosmetic update (README tweak, doc fix, etc.) — we must
+          # NOT recreate the release, otherwise the freshly-built artefacts
+          # would overwrite the published ones and any hand-edited release
+          # notes would be lost. Release job uses this flag to gate itself.
+          if git ls-remote --tags origin "refs/tags/${TAG}" | grep -q "${TAG}"; then
+            echo "tag_exists=true" >> "$GITHUB_OUTPUT"
+            echo "Tag ${TAG} already exists on remote — release will be skipped."
+          else
+            echo "tag_exists=false" >> "$GITHUB_OUTPUT"
+            echo "Tag ${TAG} is new — release will be created."
+          fi
 
   create-tag:
     name: Create Tag
@@ -98,11 +112,11 @@ jobs:
         os: [ubuntu-22.04, ubuntu-22.04-arm, macos-14, windows-latest]
         include:
           - os: ubuntu-22.04
-            file_name: wasteland_0.5_amd64.deb
+            file_name: wasteland_0.6_amd64.deb
             artifact_name: wasteland-linux-amd64-deb
             target_os: linux
           - os: ubuntu-22.04-arm
-            file_name: wasteland_0.5_arm64.deb
+            file_name: wasteland_0.6_arm64.deb
             artifact_name: wasteland-linux-arm64-deb
             target_os: linux
           - os: macos-14
@@ -212,17 +226,58 @@ jobs:
 
   release:
     name: Create Release
-    needs: build
+    # `extract-version` is in `needs` so this job can read its output.
+    # Without it, `needs.extract-version.outputs.version` evaluates to null
+    # on a `main`-branch push, the `||` fallback drops to `github.ref_name`
+    # which IS the literal string `main`, and softprops/action-gh-release
+    # then creates both a release AND a git tag named `main` at the current
+    # commit — bypassing the `v0.5` tag that `create-tag` just pushed.
+    needs: [ build, extract-version ]
     if: |
       always() &&
       needs.build.result == 'success' &&
       (startsWith(github.ref, 'refs/tags/') ||
        github.event_name == 'workflow_dispatch' ||
-       (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+       (github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+        needs.extract-version.outputs.tag_exists == 'false'))
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - name: Resolve release tag
+        id: tag
+        run: |
+          # Priority order:
+          #   1. Manual workflow_dispatch input  → user-supplied (e.g. v0.6)
+          #   2. extract-version output         → pulled from src/ui.h on a main push
+          #   3. github.ref_name                → only meaningful when ref is already a tag
+          # Anything else (notably: `main` from a branch ref) is rejected so
+          # we never accidentally create a `main` release/tag.
+          INPUT_VER="${{ github.event.inputs.version }}"
+          EXTRACT_VER="${{ needs.extract-version.outputs.version }}"
+          REF_NAME="${{ github.ref_name }}"
+          REF_KIND="${{ github.ref_type }}"
+
+          if [ -n "$INPUT_VER" ]; then
+            TAG="$INPUT_VER"
+          elif [ -n "$EXTRACT_VER" ]; then
+            TAG="$EXTRACT_VER"
+          elif [ "$REF_KIND" = "tag" ]; then
+            TAG="$REF_NAME"
+          else
+            echo "::error::No usable version: inputs='$INPUT_VER', extract='$EXTRACT_VER', ref_kind='$REF_KIND', ref_name='$REF_NAME'"
+            exit 1
+          fi
+
+          # Sanity-check: must look like vX.Y or vX.Y.Z.
+          if ! echo "$TAG" | grep -qE '^v[0-9]+\.[0-9]+(\.[0-9]+)?$'; then
+            echo "::error::Resolved tag '$TAG' is not a valid version (expected vX.Y or vX.Y.Z)"
+            exit 1
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Release will use tag: $TAG"
+
       - name: Download all artifacts
         uses: actions/download-artifact@v5
         with:
@@ -235,6 +290,6 @@ jobs:
           files: artifacts/*
           draft: false
           prerelease: false
-          tag_name: ${{ github.event.inputs.version || needs.extract-version.outputs.version || github.ref_name }}
+          tag_name: ${{ steps.tag.outputs.tag }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
