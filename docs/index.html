@@ -3,9 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Wasteland Terminal v0.5 — Offline LLM Chat in pure C</title>
+    <title>Wasteland Terminal v0.6 — Offline LLM Chat in pure C</title>
     <meta name="description" content="A highly secure, offline-first LLM chat client with a vintage amber-on-black CRT aesthetic. Pure C, llama.cpp, Linux seccomp lockdown, sandboxed agent mode.">
-    <meta property="og:title" content="Wasteland Terminal v0.5">
+    <meta property="og:title" content="Wasteland Terminal v0.6">
     <meta property="og:description" content="Offline-first LLM chat in pure C — amber CRT UI, hard network lockdown, sandboxed agent mode.">
     <meta name="theme-color" content="#FFB000">
     <style>
@@ -594,7 +594,7 @@
 
     <!-- ============== HERO ============== -->
     <header class="hero">
-        <h1>WASTELAND<span class="v">v0.5</span></h1>
+        <h1>WASTELAND<span class="v">v0.6</span></h1>
         <p class="tagline">// OFFLINE LLM TERMINAL · PURE C · NO TELEMETRY</p>
 
         <p class="lead">
@@ -615,7 +615,7 @@
         </div>
 
         <div class="btn-row">
-            <a href="https://github.com/alexbeatnik/wasteland/releases/latest" class="btn primary">[ DOWNLOAD v0.5 ]</a>
+            <a href="https://github.com/alexbeatnik/wasteland/releases/latest" class="btn primary">[ DOWNLOAD v0.6 ]</a>
             <a href="https://github.com/alexbeatnik/wasteland" class="btn">[ SOURCE CODE ]</a>
             <a href="#initialize" class="btn">[ BUILD FROM SOURCE ]</a>
         </div>
@@ -627,7 +627,7 @@
         <span class="line"><span class="ok">[OK]</span> Embedded font: DejaVu Sans Mono · 343 KB · Latin / Cyrillic / U+25A0–U+25FF</span>
         <span class="line"><span class="ok">[OK]</span> DPI scale: 2.00× (Retina)  ·  Window: 1280×800  ·  Drawable: 2560×1600</span>
         <span class="line"><span class="ok">[OK]</span> Inference worker thread spawned · prompt_cond armed</span>
-        <span class="line"><span class="ok">[OK]</span> Update probe: api.github.com/.../releases/latest → v0.5 (current)</span>
+        <span class="line"><span class="ok">[OK]</span> Update probe: api.github.com/.../releases/latest → v0.6 (current)</span>
         <span class="line"><span class="dim">[..]</span> Awaiting model selection from local vault…</span>
         <span class="line"><span class="ok">[OK]</span> Model loaded: Qwen2.5-1.5B-Instruct.Q4_K_M.gguf (1.0 GB)</span>
         <span class="line"><span class="warn">[!!]</span> seccomp filter installed · AF_INET / AF_INET6 / AF_PACKET → SIGKILL</span>
@@ -644,7 +644,7 @@
             <div class="stat"><span class="num">60</span><span class="label">FPS UI Loop</span></div>
             <div class="stat"><span class="num">256k</span><span class="label">Max Context</span></div>
             <div class="stat"><span class="num">3</span><span class="label">OSes Supported</span></div>
-            <div class="stat"><span class="num">87</span><span class="label">Unit Tests</span></div>
+            <div class="stat"><span class="num">89</span><span class="label">Unit Tests</span></div>
         </div>
     </section>
 
@@ -734,6 +734,24 @@
                 Amber #FFB000 monochrome. Every Nuklear widget themed — buttons, edits, properties,
                 checkboxes, scrollbars, progress. No rounded corners. No gradients. Just terminal.
                 <small>// theme: ui_apply_amber_theme</small>
+            </div>
+            <div class="feature-item">
+                <strong><span class="icon">⤡</span> Multi-Line Composer</strong>
+                Prompt input is a true multi-line edit box. Paste a multi-paragraph clipboard and
+                the newlines survive into the next turn — the chat-history parser glues consecutive
+                <code>&gt; </code> lines back into one user message. The <code>⤡</code> button blows
+                the input up to fill the right panel for long compositions; chat shrinks to a
+                60 px sliver so the last reply stays in view.
+                <small>// NK_EDIT_BOX | MULTILINE</small>
+            </div>
+            <div class="feature-item">
+                <strong><span class="icon">↔</span> Drag-to-Sweep Sliders</strong>
+                <code>N_CTX</code> (512 → 256 K) and <code>TEMP</code> (0.10 → 2.00) each pair a
+                drag-able slider with a numeric property widget. Slider for fast coarse sweep
+                (4 K → 256 K is one motion, not 250 clicks); property for click-to-step or
+                type-exact-value precision. Both bind to the same field — whichever you touch
+                last wins.
+                <small>// nk_slider + nk_property</small>
             </div>
         </div>
     </section>
@@ -866,8 +884,8 @@ cmake --build . --config Release</pre>
                 <tr><th>Platform</th><th>Architecture</th><th>Artifact</th></tr>
             </thead>
             <tbody>
-                <tr><td>Linux (Debian / Ubuntu)</td><td>x86_64</td><td><code>wasteland_0.5_amd64.deb</code></td></tr>
-                <tr><td>Linux (Raspberry Pi 4/5, Ampere, …)</td><td>arm64</td><td><code>wasteland_0.5_arm64.deb</code></td></tr>
+                <tr><td>Linux (Debian / Ubuntu)</td><td>x86_64</td><td><code>wasteland_0.6_amd64.deb</code></td></tr>
+                <tr><td>Linux (Raspberry Pi 4/5, Ampere, …)</td><td>arm64</td><td><code>wasteland_0.6_arm64.deb</code></td></tr>
                 <tr><td>macOS (universal binary)</td><td>arm64 + x86_64</td><td><code>Wasteland-macos.dmg</code></td></tr>
                 <tr><td>Windows 10/11</td><td>x86_64</td><td><code>Wasteland-windows.exe</code></td></tr>
             </tbody>
@@ -898,7 +916,7 @@ cmake --build . --config Release</pre>
     <!-- ============== TESTING ============== -->
     <section>
         <h2>TESTING</h2>
-        <p>Zero-dependency C test framework — just macros and <code>stdio.h</code>. <strong>87 tests across 4 suites</strong>, all green on Linux / macOS / Windows CI runners. Run via CTest:</p>
+        <p>Zero-dependency C test framework — just macros and <code>stdio.h</code>. <strong>89 tests across 4 suites</strong>, all green on Linux / macOS / Windows CI runners. Run via CTest:</p>
 <pre>cd build
 ctest --output-on-failure</pre>
 
@@ -912,8 +930,8 @@ ctest --output-on-failure</pre>
                 </tr>
                 <tr>
                     <td><code>test_chat_history</code></td>
-                    <td>16</td>
-                    <td>Flat <code>&gt; prompt\nreply\n</code> → user/assistant splitting · CRLF (Windows) line endings · UTF-8 (Cyrillic) · <code>&gt; </code> inside reply does NOT split · trailing pending prompt discard · NULL system-prompt safety · base-then-user concatenation order</td>
+                    <td>18</td>
+                    <td>Flat <code>&gt; prompt\nreply\n</code> → user/assistant splitting · CRLF (Windows) line endings · UTF-8 (Cyrillic) · <code>&gt; </code> inside reply does NOT split · trailing pending prompt discard · <strong>multi-line user prompts</strong> (consecutive <code>&gt; </code> lines glued back into one user message) · NULL system-prompt safety · base-then-user concatenation order</td>
                 </tr>
                 <tr>
                     <td><code>test_version</code></td>
@@ -952,7 +970,7 @@ ctest --output-on-failure</pre>
             <a href="https://github.com/alexbeatnik/wasteland/releases">Releases</a> ·
             <a href="https://github.com/alexbeatnik/wasteland/blob/main/LICENSE">License</a>
         </p>
-        <p>WASTELAND TERMINAL · v0.5 · END OF TRANSMISSION<span class="cursor" style="display: inline-block; width: 9px; height: 1.1rem; background: var(--amber); vertical-align: middle; animation: blink 1s step-end infinite;"></span></p>
+        <p>WASTELAND TERMINAL · v0.6 · END OF TRANSMISSION<span class="cursor" style="display: inline-block; width: 9px; height: 1.1rem; background: var(--amber); vertical-align: middle; animation: blink 1s step-end infinite;"></span></p>
     </footer>
 
 </div>

@@ -197,13 +197,46 @@ static int parse_chat_history(const char *history,
         if (!uc) break;
         memcpy(uc, user_start, ulen);
         uc[ulen] = '\0';
+        size_t uc_len = ulen;
+        size_t uc_cap = ulen + 1;
+
+        p = line_end + 1;
+
+        /* Multi-line user prompts are stored in chat_history as consecutive
+         * `> ` lines (the UI emits one per source-line). Glue them back
+         * into a single user message with embedded `\n`s so the chat
+         * template sees the user's original line breaks. */
+        while (p + 2 <= end && p[0] == '>' && p[1] == ' ') {
+            const char *cont_start = p + 2;
+            const char *cont_nl = memchr(p, '\n', (size_t)(end - p));
+            const char *cont_end = cont_nl ? cont_nl : end;
+            size_t clen = (size_t)(cont_end - cont_start);
+            while (clen > 0 && (cont_start[clen - 1] == '\r' ||
+                                cont_start[clen - 1] == '\n')) clen--;
+
+            size_t need = uc_len + 1 + clen + 1;
+            if (need > uc_cap) {
+                size_t new_cap = uc_cap * 2;
+                if (new_cap < need) new_cap = need;
+                char *new_uc = (char *)realloc(uc, new_cap);
+                if (!new_uc) { free(uc); uc = NULL; break; }
+                uc = new_uc;
+                uc_cap = new_cap;
+            }
+            uc[uc_len++] = '\n';
+            memcpy(uc + uc_len, cont_start, clen);
+            uc_len += clen;
+            uc[uc_len] = '\0';
+
+            p = cont_nl ? cont_nl + 1 : end;
+        }
+
+        if (!uc) break;
 
         msgs[n].role = "user";
         msgs[n].content = uc;
         owned[n] = uc;
         n++;
-
-        p = line_end + 1;
         if (p >= end) {
             /* User line at the very end of history with no assistant reply
              * — this is the current prompt about to be submitted. Drop it
