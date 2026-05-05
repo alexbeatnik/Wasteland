@@ -248,13 +248,19 @@ Four suites, **92 tests** total — all green on Linux / macOS / Windows CI runn
   - **N\_CTX** (512–262 144, step 1024) — context window size; change takes effect on the next model load
   - **TEMP** (0.01–5.0, step 0.05) — sampling temperature; change takes effect immediately on the next prompt
 - **System Prompt** — Multi-line input for system instructions, saved between sessions
-- **Agent Mode** — Toggle tool-using ReAct loop with capability presets (OFF / READ_ONLY / READ_WRITE / CUSTOM); set a workspace directory for sandboxed file access
+- **Agent Mode** — Toggle tool-using ReAct loop with **capability presets** rendered as a 4-button selector (`OFF` / `READ` / `RW` / `CUST`):
+  - `OFF` — agent ignores all tool calls
+  - `READ` — only `read_file` and `list_dir` (auto-approved, read-only)
+  - `RW` (default for new installs) — all four tools, `write_file` and `apply_edit` go through the approval gate
+  - `CUST` — exposes per-tool checkboxes (`read_file`, `list_dir`, `write_file`, `apply_edit`)
+  - The selected preset renders amber-filled with black text so it stays legible against the active background; non-selected ones use the standard amber-on-black theme
+  - Persisted to `wasteland.cfg` as `capability_preset` + `capability_custom_bits`. Set a **workspace directory** below the preset row to scope sandboxed file access
 - **Chats** — Manage multiple persistent chat sessions:
   - `[ NEW CHAT ]` — Reset to an empty buffer. The chat is **created lazily on the first message**, named from the prompt itself (UTF-8-safe, word-boundary truncation at 60 bytes), then refined into a contextual 3–5 word model-generated title after the first assistant reply. If you click `[ NEW CHAT ]` and then switch to another chat without typing, nothing is created — no orphan "New Chat" files.
   - `[ LOAD ]` / `[ ACTIVE ]` — Switch between chat sessions
   - `[ DEL ]` — Delete a chat session
-- **Status footer** — "NET: LOCKDOWN ACTIVE" once a model is loaded; otherwise "NET: DISCONNECTED (READY)"
-- **Sandbox status indicator** — Persistent green/amber/red badge showing available platform sandbox capabilities (seccomp, Landlock, process isolation)
+- **Top-bar status row** — three labels along the header: `SYS: ONLINE` (always), `SEC: UNLOCKED` → `SEC: LOCKDOWN ACTIVE` once a model is loaded, and `NET: AVAILABLE` → `NET: DISCONNECTED` after the seccomp lockdown
+- **Sandbox status indicator** — Persistent green/amber/red badge below the local vault showing available platform sandbox capabilities (seccomp, Landlock, process isolation). Text reads `Full Sandbox`, `Partial Sandbox — Network locked, FS open`, `Partial Sandbox — Process isolated, FS unconfined`, or `No Sandbox` depending on the runtime probe
 - **Update banner** — If a newer release exists on GitHub, an orange banner appears under the app header with the available version. The check runs once at startup in a background thread before any network lockdown.
 
 ### Right Panel (Collapsible)

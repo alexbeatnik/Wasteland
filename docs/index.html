@@ -688,8 +688,11 @@
             <div class="feature-item">
                 <strong><span class="icon">⌬</span> Sandboxed Agent Mode</strong>
                 Tool-using ReAct loop: <code>read_file</code>, <code>list_dir</code>,
-                <code>write_file</code>, <code>apply_edit</code>. Capability presets
-                (OFF / READ_ONLY / READ_WRITE / CUSTOM) gate which tools are available.
+                <code>write_file</code>, <code>apply_edit</code>. Four-button capability
+                selector (<code>OFF</code> / <code>READ</code> / <code>RW</code> /
+                <code>CUST</code>) gates which tools the model may invoke; the active
+                button is amber-filled with black text so the choice is unambiguous.
+                <code>CUST</code> exposes per-tool checkboxes for fine-grained policy.
                 On Linux, a separate <code>wasteland-agent-executor</code> subprocess
                 applies seccomp + Landlock before touching the filesystem.
                 <small>// 10-turn cap · approval gate · IPC executor</small>

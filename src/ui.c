@@ -1358,14 +1358,22 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                 nk_label_colored(nk, "Capability preset:", NK_TEXT_LEFT, amber);
                 nk_layout_row_dynamic(nk, 24, 4);
                 static const char *preset_labels[] = {"OFF", "READ", "RW", "CUST"};
+                struct nk_color black = nk_rgb(0, 0, 0);
                 for (int p = 0; p < 4; p++) {
                     int active = (state->capability_preset == p);
                     if (active) {
-                        struct nk_color saved = nk->style.button.normal.data.color;
-                        nk->style.button.normal.data.color = amber;
+                        /* Amber-filled "selected" state — flip text to black
+                         * so the label stays legible against the amber bg. */
+                        struct nk_style_button saved_btn = nk->style.button;
+                        nk->style.button.normal       = nk_style_item_color(amber);
+                        nk->style.button.hover        = nk_style_item_color(amber);
+                        nk->style.button.active       = nk_style_item_color(amber);
+                        nk->style.button.text_normal  = black;
+                        nk->style.button.text_hover   = black;
+                        nk->style.button.text_active  = black;
                         if (nk_button_label(nk, preset_labels[p]))
                             state->capability_preset = p;
-                        nk->style.button.normal.data.color = saved;
+                        nk->style.button = saved_btn;
                     } else {
                         if (nk_button_label(nk, preset_labels[p]))
                             state->capability_preset = p;
