@@ -229,9 +229,23 @@ When a `write_file` or `apply_edit` is awaiting user approval, `ui.c` renders a 
 - **`add_c = #AACC00`** — yellow-green for REPLACE (add side), `write_file` body, and the `[ APPLY ]` button.
 - **`warn = #FFB000`** — amber heading colour for `▼ AGENT PROPOSAL — REVIEW` and the `// SEARCH:` / `// REPLACE WITH:` labels.
 
-Each diff block is rendered inside its own `nk_group_begin` with a tinted border, achieved by temporarily swapping `nk->style.window.group_border_color` before each call and restoring it afterwards. The action buttons swap the entire `nk->style.button` struct (border / text / hover / active) per click target so only those two buttons carry the diff palette — the global amber theme stays untouched. Hover state inverts text → black, background → tint, so buttons feel "armed" before the click commits.
+### Why `nk_edit_string`, not `nk_group` + `nk_label_colored_wrap`
 
-`pending_panel_h` is `210` for `write_file` (one green block) and `270` for `apply_edit` (red SEARCH + green REPLACE blocks). Chat area height is reduced by this amount so the input field and CTX bar never get pushed offscreen.
+The first iteration tried bordered `nk_group` containers with `nk_label_colored_wrap` text inside. Result: the boxes rendered with the right colours but the text was invisible — `nk_label_colored_wrap` does its own layout allocation that doesn't compose with a fixed-height parent group (the wrapped lines were being clipped past the group's reserved height). The chat-history panel doesn't hit this because it uses `nk_edit_string` with `NK_EDIT_BOX | NK_EDIT_MULTILINE` and pre-computed row heights.
+
+Current implementation: each diff block IS an `nk_edit_string(NK_EDIT_BOX | NK_EDIT_MULTILINE, …)` writing into a static buffer that is repopulated from `p_search` / `p_replace` / `p_content` every frame (so any stray edits are clobbered immediately — read-only-ish). The buffer's text + border + cursor colours are tinted via a snapshot-and-restore on `nk->style.edit`:
+
+```c
+struct nk_style_edit saved_edit = nk->style.edit;
+nk->style.edit.border_color = rej_c;
+nk->style.edit.text_normal  = rej_c;
+/* ... render edit_string ... */
+nk->style.edit = saved_edit;
+```
+
+The action buttons use the same snapshot-and-restore pattern on `nk->style.button` (border / text / hover / active) per click target, so only those two buttons carry the diff palette — the global amber theme stays untouched. Hover state inverts text → black, background → tint, so buttons feel "armed" before the click commits.
+
+`pending_panel_h` is `230` for `write_file` (one green 130 px block) and `290` for `apply_edit` (two 80 px blocks: red SEARCH + green REPLACE). Chat area height is reduced by this amount so the input field and CTX bar never get pushed offscreen.
 
 ## Font & DPI
 

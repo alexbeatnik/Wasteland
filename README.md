@@ -249,6 +249,11 @@ Four suites, **81 tests** total — all green on Linux / macOS / Windows CI runn
   - Each user/assistant exchange is rendered in its own edit box — user prompts never bleed into the previous assistant reply.
   - Reasoning blocks (`<think>`) are rendered in a separate dimmed box with a "▒ thinking" label.
   - Empty think boxes (e.g. from `<think></think>` or a cancelled mid-think generation) are suppressed.
+- **Agent proposal panel** — when Agent Mode is on and the model emits a `write_file` or `apply_edit` tool call, a top-of-panel preview appears with a red/green diff palette matching [docs/index.html](docs/index.html):
+  - SEARCH block — orange-red border + text (`#FF6020`)
+  - REPLACE / `write_file` body — yellow-green border + text (`#AACC00`)
+  - `[ APPLY ]` button — green; `[ REJECT ]` button — red
+  - Worker is paused on the approval gate until you click one. The diff text is selectable so you can copy it for review.
 - **CTX bar** — `CTX: used / max (pct%)` with a progress bar. Turns orange above 75 %, red above 90 %.
 - **`[ COMPACT ]`** — Drop the oldest turn, persist the result to disk, mirror into inference. Disabled during generation. Shows feedback in the status line.
 - **Input** — `>` prompt with text field
