@@ -1,4 +1,4 @@
-# SKILLS.md — Wasteland v0.4
+# SKILLS.md — Wasteland v0.5
 
 ## Available Skills
 
@@ -31,6 +31,8 @@ This project does not use a formal skill system. The following domains are relev
 - Collapsible UI panels dynamically adjusting layout widths.
 - **Per-turn box rendering:** the chat rendering loop splits on `\n> ` boundaries unconditionally (not only inside think blocks). This ensures each user/assistant exchange occupies its own `nk_edit_string` box and new user prompts never render inside previous assistant reply blocks.
 - **Empty-section suppression:** before calling `nk_edit_string`, scan the section buffer for at least one visible character (codepoint > `' '`). Sections with only `\n`/spaces (stray whitespace between `-- THINK --` markers) are dropped entirely — no box, no "▒ thinking" label.
+- **`nk_label_colored_wrap` does NOT compose with fixed-height parent groups.** The wrap label allocates its own layout rows via `nk_panel_alloc_row`, which extend past the group's reserved height and get clipped — visible result is an empty bordered box (the rectangle renders, the text doesn't). For diff-style rendering inside a fixed-height container, use `nk_edit_string(NK_EDIT_BOX | NK_EDIT_MULTILINE, …)` writing into a buffer that is repopulated each frame from the source-of-truth pointers (read-only feel without `NK_EDIT_READ_ONLY`, which would break mouse selection / copy). This is the canonical pattern for the chat history panel and the agent-proposal SEARCH/REPLACE blocks.
+- **Per-widget colour tinting via snapshot-and-restore:** to colour a single button or edit box differently from the global theme, copy the relevant `nk->style.button` / `nk->style.edit` struct into a local, mutate the copy's `border_color` / `text_normal` / `text_hover` / `text_active` / `cursor_normal` / `hover` / `active` fields, render, then assign the saved copy back. Don't touch fields one-by-one without the restore — leaks to the next widget render. The agent-proposal panel uses this for both the diff blocks (red SEARCH / green REPLACE edit boxes) and the action buttons (green APPLY / red REJECT).
 - Word wrap with measured row heights using the active font's `width()` callback (`wrap_text_into()`).
 - **Embedded font pattern:** `xxd -i font.ttf | sed 's/.../static const unsigned char name[]/' > src/font.h` bakes a TTF into a C byte array. Use `nk_font_atlas_add_from_memory(atlas, data, len, size, cfg)` to load it — no file path required, works identically on Linux/macOS/Windows.
 - **DPI-aware font scaling:** after window creation, compute `dpi_scale = SDL_GL_GetDrawableSize(w) / SDL_GetWindowSize(w)`. Multiply base font size (15 px) by this ratio and pass to the font-baking call. On macOS Retina (2×) and Windows HiDPI (1.25–2×) this prevents text from appearing physically tiny.
@@ -61,6 +63,13 @@ This project does not use a formal skill system. The following domains are relev
 - **Context stats:** compute using `parse_chat_history` + `llama_chat_apply_template` + `llama_tokenize` (probe mode). Call after every generation finish and after every compact. Display as `CTX: used / max (pct%)` with colour-coded progress bar (orange > 75 %, red > 90 %).
 - **Auto-generated chat titles:** after the first assistant reply in a newly-created chat, run a short secondary inference pass (max ~20 tokens) with a dedicated title-generation prompt. Use a `title_mode` flag to redirect output into a separate `title_buffer` so the title never appears in chat. Sanitise the result (strip newlines, quotes, markdown, `<>`) and rename the chat file on disk. The UI polls `inference_take_title()` each frame after generation ends.
 
+### Filename Generation from User Input
+
+- **Word-boundary cuts on byte caps:** when truncating a free-form string into a filename with a hard byte limit, scan back to the last space within the trailing third of the buffer rather than cutting mid-word. The "trailing third" floor avoids producing a one-or-two-word stub when the user wrote a long sentence with the first space far from the cap.
+- **UTF-8 tail safety after byte cap:** any cap measured in bytes can split a multi-byte codepoint. Always run a tail pass that (a) drops continuation bytes (`(b & 0xC0) == 0x80`) and (b) drops a lead byte without its full sequence (compute expected length from the top bits: `0xC0`→2, `0xE0`→3, `0xF0`→4). Without this, a 2-byte Cyrillic char halved by the cap renders as `?` and breaks case-insensitive filesystems on normalisation.
+- **Lazy chat creation:** the `[ NEW CHAT ]` button does not create a file on disk; it just resets the buffer and sets the "no active chat" sentinel. The submit handler creates the chat with a prompt-derived name on the first message, so there is no permanent default name. Eager creation produced ugly `New Chat` / `New Chat_2` filenames when the auto-rename branch never fired.
+- **View-only transforms vs. persistent edits:** when the model output contains repetitive markup (e.g. agent tool fences with separate `[ TOOL: ... ]` markers), strip it from the rendered view per-frame, not from the underlying buffer — agent re-parsing on the next turn must still see the original fences. Drive this by copying `state->chat_history` → `view_buf` and applying the transform on the copy.
+
 ### Stream Processing & Data Persistence
 
 - Token-by-token streaming with carry buffers for partial-match safety.
@@ -81,6 +90,11 @@ This project does not use a formal skill system. The following domains are relev
 - HF URL rewriting: `/blob/main/<file>` → `/resolve/main/<file>`. The replacement is `+3` bytes, so you must `memmove` the tail right by 3 *before* the `memcpy` overwrite.
 - **GitHub Releases API:** `api.github.com/repos/{owner}/{repo}/releases/latest` returns JSON with `tag_name`. Parse via simple text scan (`strstr(..., "\"tag_name\":\"v")`) rather than pulling in a JSON library. Strip the leading `v` to get the semver string.
 - **Auto-update thread pattern:** spawn a detached pthread at startup (before any network lockdown) with a 5-second curl timeout. Write the result into a `char update_version[32]` field; the UI polls it every frame and renders an orange banner if non-empty.
+- **Self-replace via generated script (the in-place upgrade pattern):** the running process can't overwrite its own binary on Windows (sharing violation) and shouldn't on POSIX (mid-decode threads). Solution: write a tiny shell/batch file to `/tmp` / `%TEMP%`, fork+exec it detached, then exit. The script polls `kill -0 $PID` / `tasklist /FI` until the parent dies, then performs the install + relaunches the new binary + self-deletes. No external supervisor needed.
+- **Package format vs binary format:** the install method depends on what the platform artefact actually is. macOS `.dmg` needs `hdiutil attach` + `cp -R Wasteland.app`. Linux `.deb` is an `ar` archive (NOT an ELF) — it needs `dpkg -i`, never `cp` over the running binary. Windows `.exe` IS the binary, so `copy /Y` over the file works directly. Picking the wrong method (e.g. `cp` on a `.deb`) bricks the install in a way that's hard for the user to recover from.
+- **Privilege escalation tools reset CWD.** `pkexec` runs with CWD `/root` (or `$PWD` if exported, but unreliable), `osascript with administrator privileges` runs from `/`, Windows `ShellExecute` starts batch files in `%TEMP%`. Before passing any path to a generated script that will invoke these tools, resolve it to absolute via `realpath()` (POSIX) or `_fullpath()` (Windows) — relative paths silently fail to resolve in the privileged subshell.
+- **Linux GUI elevation fallback chain:** PolicyKit's `pkexec` is the modern default (Ubuntu/Debian/Mint/Fedora with desktop), but absent on minimal/server setups and on some Arch installs. Fall back to `gksudo` (deprecated GNOME tool, still around), then `kdesu` (KDE), then a desktop notification (`notify-send` → `zenity` → `xmessage`) telling the user the manual command. Don't error out silently — surface what the user can do instead.
+- **Keep the artefact on install failure.** If the download succeeded but the install was rejected (user clicked Cancel on the pkexec prompt, dpkg returned non-zero, no elevation tool available), leave the downloaded `.deb`/`.dmg`/`.exe` on disk so the user can follow the manual-install message. Only `rm -f` after `RC == 0`.
 - Linux seccomp-bpf with **argument filtering** (`SCMP_A0(SCMP_CMP_EQ, AF_INET)`) — narrow rules that gate `socket()` creation by address family, leaving X11 / Wayland Unix-domain traffic untouched.
 - Why pointer-deref filtering (sockaddr family on `connect`/`bind`) is impossible in seccomp and what to do instead (gate at `socket()`).
 - Cross-platform security model: features degrade gracefully on macOS / Windows.
@@ -93,11 +107,16 @@ This project does not use a formal skill system. The following domains are relev
 
 ### Unit Testing
 
-- **Zero-dependency framework:** `tests/test_framework.h` provides `ASSERT`, `ASSERT_EQ_INT`, `ASSERT_EQ_STR`, `RUN_TEST`, and `TEST_MAIN` macros. No GoogleTest, no Unity, no external libs.
-- **Testable-without-SDL rule:** anything that can be tested without an SDL window or a loaded GGUF model should have a suite. Pure string parsers (chat history splitting, system-prompt concatenation), semver comparison, and sandbox path resolution are all ideal candidates.
-- **Exposing static functions for tests:** wrap the function signature in `#ifdef TESTING` / `#else` to drop the `static` keyword. Provide a forward-declaration header (e.g. `tests/inference_test.h`) so the test file can link against it without `#include`ing the entire translation unit.
-- **Filesystem test setup:** suites that exercise `agent_resolve_path` or similar must create their scratch directories (e.g. `/tmp/wst_test_ws`) before calling `RUN_TEST`, because `realpath()` requires the parent to exist.
-- **CI integration:** `cmake --build build && ctest --output-on-failure` runs all suites automatically on every push.
+- **Zero-dependency framework:** `tests/test_framework.h` provides `ASSERT`, `ASSERT_EQ_INT`, `ASSERT_EQ_STR`, `ASSERT_TRUE`, `ASSERT_FALSE`, `ASSERT_NULL`, `ASSERT_NOT_NULL`, `RUN_TEST`, and `TEST_MAIN` macros. No GoogleTest, no Unity, no external libs.
+- **Testable-without-SDL rule:** anything that can be tested without an SDL window or a loaded GGUF model should have a suite. Pure string parsers (chat history splitting, system-prompt concatenation, RC4 cipher, HF URL rewrite, chat-name sanitisation), semver comparison, sandbox path resolution, and filesystem-touching tool executors are all ideal candidates.
+- **Two strategies for reaching internals:**
+  - **Compile-time `#ifdef TESTING`:** wrap the function signature in `#ifdef TESTING ... #else static ...` to drop the `static` keyword for test builds (used in `parse_chat_history`, `build_system_prompt`, `version_newer_than`, `build_update_filename`).
+  - **Hand-copied source duplication:** when the host TU drags SDL / llama.cpp / curl, copy the pure function into the test file with an `origin: src/<file>.c` reference comment (used in `test_chat_history.c`, `test_version.c`, `test_string_utils.c`). Sync the copies whenever the source is edited — the AGENTS.md test-parity rule covers this.
+  - **Direct linking:** when the host TU is dependency-free (e.g. `src/agent.c` has no SDL/llama.cpp), include it as a source in the test executable: `add_executable(test_agent tests/test_agent.c src/agent.c)`. This lets the suite call the real executors end-to-end.
+- **Filesystem test setup:** suites that exercise `agent_resolve_path` or `agent_exec_*` must create their scratch directories (e.g. `wst_test_ws/`, `wst_test_exec_ws/`) before calling `RUN_TEST`, because `realpath()` requires the parent to exist. Use a separate workspace per concern so failure artefacts can be inspected without polluting other tests.
+- **Round-trip pattern for ciphers:** for symmetric streams (RC4), the canonical test is `encrypt + encrypt = identity` plus a `ciphertext != plaintext` sanity check (so a NOP encrypt slipping in still fails). Add a determinism check (two encrypts of the same input produce the same bytes) to catch accidental time-based seeding.
+- **Buffer-overflow contract testing:** for in-place transforms with bounds (e.g. the HF URL `+3` rewrite), pass an artificially tight buffer and assert the function refuses (returns -1) rather than truncating or corrupting the buffer.
+- **CI integration:** `cmake --build build && ctest --output-on-failure` runs all suites automatically on every push. Currently 81 tests across 4 suites.
 
 ### Build Engineering
 
@@ -112,4 +131,4 @@ This project does not use a formal skill system. The following domains are relev
 
 ## Version
 
-Current version: **0.4**
+Current version: **0.5**

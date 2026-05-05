@@ -1,4 +1,4 @@
-# AGENTS.md — Wasteland v0.4
+# AGENTS.md — Wasteland v0.5
 
 ## Agent Instructions
 
@@ -21,7 +21,7 @@ This file contains conventions and preferences for AI agents working on Wastelan
 4. **String Buffers:** Always size via `sizeof(buf) - 1` for `strncpy`. Prefer `snprintf` for formatted output. Capacity macros (`WASTELAND_MAX_CHATS`, `WASTELAND_CHAT_NAME_LEN`, `WASTELAND_MAX_MODELS`, `WASTELAND_MAX_HUB_MODELS`) live in `ui.h` — use them instead of literal integers.
 5. **Error Handling:** Print to `stderr` with a `[module]` prefix, then return an error code. Never silently ignore failures. UI status text goes through `state->status_msg`.
 6. **Cross-Platform:** Wrap platform-specific code in `#ifdef _WIN32`, `#ifdef __linux__`, `#ifdef __APPLE__`. Provide a working stub for non-Linux platforms when a feature is Linux-only (e.g. seccomp).
-7. **Backwards-compat shims:** Don't add them. We're at v0.2 — break the API and update callers.
+7. **Backwards-compat shims:** Don't add them. We're pre-1.0 — break the API and update callers.
 8. **Race-free flag claims:** When dispatching a background pthread that owns a state flag (e.g. `download_active`), the **dispatcher** sets the flag to 1 *before* `pthread_create`. Setting it inside the worker leaves a window where a second click sees the flag still 0 and spawns a duplicate.
 
 ## Long-Running Operations
@@ -44,6 +44,15 @@ Anything that can take >100 ms must not run on the UI thread. The UI thread is t
 - The `hub_models[]` array must contain real, public, reachable HF GGUF repos — fictional IDs fail at HF API resolution time with HTTP 404. When adding a new entry, click DOWNLOAD on it once before merging. Current set: `Qwen/Qwen2.5-0.5B-Instruct-GGUF`, `ggml-org/gemma-3-1b-it-GGUF`, `Qwen/Qwen2.5-1.5B-Instruct-GGUF`, `ggml-org/SmolLM2-1.7B-Instruct-GGUF`, `unsloth/Qwen3.6-35B-A3B-GGUF`.
 - The `/blob/main/` → `/resolve/main/` URL rewrite in `network_download_model` must `memmove` the tail right by 3 bytes **before** the `memcpy` overwrite — the obvious order corrupts the first 3 bytes of the filename.
 
+## Auto-Update Rules
+
+- **Linux artefact is a `.deb`, not an ELF.** `launch_updater()` MUST install it with `dpkg -i`, not `cp` — copying a Debian package archive over the running binary bricks the install. The script tries `pkexec` → `gksudo` → `kdesu` for elevation; on failure, it surfaces a `notify-send` / `zenity` / `xmessage` notification with the manual `sudo dpkg -i $NEW` command. The `.deb` is **kept on disk** when install fails so the user can follow that instruction; only `rm -f` it after `RC == 0`.
+- **Always pre-resolve `new_file` to an absolute path before writing the script.** `pkexec` resets CWD to `/root`, `osascript with administrator privileges` resets to `/`, Windows `ShellExecute` runs the batch file from `%TEMP%`. None inherit the parent's CWD, so a relative `downloads/foo.deb` will silently fail with "file not found" in the privileged subshell. Use `realpath()` (POSIX) / `_fullpath()` (Windows) at the top of `launch_updater()` — both with a `getcwd()`-based fallback for the case where the file just got deleted.
+- **Do not call `pthread_cancel` on the update download thread.** It owns a libcurl handle; libcurl is not async-cancel-safe. Use the `state->update_cancel` flag — `progress_cb` polls it and returns 1, which makes curl abort the transfer cleanly.
+- **The startup probe runs BEFORE seccomp lockdown.** Moving `update_check_thread`'s `pthread_create` after model load would silently break the banner — the lockdown SIGKILLs any new `socket(AF_INET, …)`. The probe must complete (or its 5-second curl timeout must fire) before the user clicks `[ LOAD ]`.
+- **Banner gating:** `state->update_version[0] != '\0'` is the single source of truth. The probe only writes to it when `version_newer_than(latest, WASTELAND_VERSION)` returns true — so on equal or older releases, no banner. Don't add a "force show banner" toggle for testing; just temporarily lower `WASTELAND_VERSION` in `ui.h` and rebuild.
+- **GitHub release `tag_name` parsing is a `strstr` scan, not a JSON library.** Format must stay `vX.Y` or `vX.Y.Z`; the leading `v` is stripped before comparison. If GitHub ever changes the JSON shape, the probe will silently fail (returns -1, no banner) — fine for graceful degradation, but spot-check after any GitHub API breakage.
+
 ## UI Rules
 
 - Amber monochrome palette only: `#FFB000` on dark charcoal / black. `amber_dim` used for reasoning text. Every Nuklear widget type (button, edit, checkbox, progress, scrollbar, property) must be themed in `ui_apply_amber_theme()` — do not leave any control with default grey gradients.
@@ -56,6 +65,22 @@ Anything that can take >100 ms must not run on the UI thread. The UI thread is t
 - Status messages are shown below the input buffer and auto-cleared using `SDL_GetTicks()`.
 - The `◈` icon copies assistant responses and explicitly skips content inside `-- THINK --` blocks.
 - Each user/assistant turn is rendered in its own `nk_edit_string` box. The rendering loop splits on `\n> ` boundaries unconditionally (not only inside think blocks) so a new user prompt always starts a fresh box. Empty or whitespace-only sections (stray `\n` between markers) are suppressed and produce no box.
+- **Agent diff palette is canonical:** `[ APPLY ]` and the REPLACE block must be `#AACC00` (yellow-green); `[ REJECT ]` and the SEARCH block must be `#FF6020` (orange-red); the `▼ AGENT PROPOSAL — REVIEW` heading and `// SEARCH:` / `// REPLACE WITH:` labels are amber `#FFB000`. These four exact RGB values match the `docs/index.html` `agent-proposal` mock — keep them in sync if either side changes. Use the snapshot-and-restore pattern (`saved_btn = nk->style.button; ...; nk->style.button = saved_btn;`) so per-button tinting never leaks into the global amber theme.
+- **Diff blocks use `nk_edit_string`, NOT `nk_group + nk_label_colored_wrap`.** The wrap label allocates its own layout rows that don't compose with a fixed-height parent group — text gets clipped past the reserved height, leaving an empty bordered box (the user sees the rectangle, not the content). The proven pattern is `nk_edit_string(NK_EDIT_BOX | NK_EDIT_MULTILINE, …)` writing into a static buffer that's repopulated from the pending-tool pointers each frame. Tint border / text / cursor through a `saved_edit = nk->style.edit; ... ; nk->style.edit = saved_edit;` snapshot-and-restore. Do not switch this to `NK_EDIT_READ_ONLY` — read-only mode disables mouse selection, which kills the user's ability to copy the diff for review.
+- **Pending-panel reserved height:** `pending_panel_h` is `230` for `write_file` (heading 18 + title 16 + label 14 + body 130 + buttons 28 + group padding) and `290` for `apply_edit` (one extra label + one extra body). If you grow either block, update the constants — chat area height is computed as `height - 200 - pending_panel_h`, so under-reserving pushes the input field offscreen.
+
+## Chat Creation & Naming
+
+- **`[ NEW CHAT ]` is lazy.** It saves the active chat, clears history, and sets `selected_chat = -1`. It does **not** create a file on disk or append to `state->chats[]`. The submit handler does that on the first prompt, with a name derived from the prompt itself. Don't reintroduce eager creation — it permanently named chats `New Chat` / `New Chat_2` / etc., because the rename branch (`selected_chat == -1`) never fired.
+- **`generate_chat_name_from_prompt` byte cap is 60.** Lower (40) produced ugly mid-word cuts on Cyrillic; higher (80+) overflows the left-panel chat label. If you change the cap, also adjust the word-boundary scan window — currently the trailing third of the buffer is the floor for the last-space search.
+- **UTF-8 tail trimming is mandatory.** `trim_partial_utf8(base, &b)` runs after the cap and word-boundary pass to drop any incomplete continuation/lead byte. A Cyrillic codepoint cut across the cap stored as raw bytes would render as `?` and could break filesystems on case-insensitive normalisation.
+- **Auto-rename to model-generated title** still runs after the first assistant reply (`needs_title = 1` set inside the same submit handler that creates the chat). Cleaning the title (strip `*`, `\`, `<>`, newlines, quotes) happens in the worker before publishing — UI just renames the file.
+
+## Chat View Transforms
+
+- **`strip_tool_fences(raw, out, sz)` is a render-time view, not a mutation.** The on-disk chat file and `state->chat_history` always carry the raw fences (so subsequent agent turns can re-parse them if needed). The strip pass writes into a separate static buffer that is what the chat panel renders. Don't strip into `state->chat_history` directly — you'll erase context the model needs.
+- **Recognised tool-fence headers** are exactly the four agent tools: `read_file`, `list_dir`, `write_file`, `apply_edit`. Plain code fences (` ```c `, ` ```json `, ` ```python `, ` ```rust `, …) are deliberately NOT stripped — they're real code the user wants to see. Keep the recogniser list in lockstep with `agent.c::header_to_kind()` and `tests/test_string_utils.c::is_tool_fence_header()`.
+- **Mid-stream fences (opening emitted, closing not yet)** elide the entire tail. This is intentional — the user gets the prose lead-in, then the next visible character is the `[ TOOL: ... ]` line once the worker emits it. Don't try to "preview" half-emitted fences; it just churns visible state every token for a payload that's about to disappear.
 
 ## Chat History & Context
 
@@ -132,9 +157,10 @@ Before declaring a task complete:
 15. Auto-update banner must appear when `state->update_version` is non-empty (can be tested by temporarily hardcoding a different version string).
 16. A new chat's file must be renamed by the model-generated title after the first assistant reply completes (check `chats/` directory).
 17. ARM64 `.deb` built in CI must run on Raspberry Pi 4/5 without `Illegal instruction`.
-18. All CTest suites pass (`ctest --output-on-failure`).
-19. New logic must have a matching `tests/test_*.c` suite if it is testable without SDL/llama.cpp (pure string / file / math functions).
+18. All CTest suites pass (`ctest --output-on-failure`) — currently **81 tests** across 4 suites (`agent`, `chat_history`, `version`, `string_utils`).
+19. New logic must have a matching `tests/test_*.c` suite if it is testable without SDL/llama.cpp (pure string / file / math functions). Filesystem-touching tests use `/tmp`-style scratch directories created in `run_<suite>()` *before* `RUN_TEST` calls.
 20. Existing tests must not be broken by the change — run `ctest` before every commit.
+21. **Test parity rule:** when a function lives in `src/*.c` and has been copy-extracted into `tests/test_*.c` (e.g. `parse_chat_history`, `version_newer_than`, `rc4_crypt_buffer`, the HF URL rewrite), edits to the production version MUST be mirrored into the test copy. The duplication is intentional — it lets the test binaries link without SDL2 / llama.cpp / curl — but you have to keep both halves in lockstep or the tests start passing the wrong code.
 
 ## Font & DPI Rules
 
@@ -145,4 +171,4 @@ Before declaring a task complete:
 
 ## Version
 
-Current version: **0.4**
+Current version: **0.5**

@@ -242,7 +242,7 @@ endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(CPACK_PACKAGE_NAME            "wasteland")
-    set(CPACK_PACKAGE_VERSION         "0.4")
+    set(CPACK_PACKAGE_VERSION         "0.5")
     set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
         "Offline-first amber-CRT LLM chat client built on llama.cpp")
     set(CPACK_PACKAGE_CONTACT         "Wasteland Maintainers")
@@ -311,3 +311,11 @@ add_executable(test_version tests/test_version.c)
 target_compile_definitions(test_version PRIVATE TESTING)
 target_include_directories(test_version PRIVATE src include)
 add_test(NAME version COMMAND test_version)
+
+# String utility tests — RC4 chat cipher round-trip, HF URL rewrite,
+# chat-name sanitisation. Pure functions copied out of ui.c / network.c
+# so the suite stays SDL/curl-free.
+add_executable(test_string_utils tests/test_string_utils.c)
+target_compile_definitions(test_string_utils PRIVATE TESTING)
+target_include_directories(test_string_utils PRIVATE src include)
+add_test(NAME string_utils COMMAND test_string_utils)

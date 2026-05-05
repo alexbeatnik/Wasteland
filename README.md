@@ -1,4 +1,4 @@
-# Wasteland Terminal v0.4
+# Wasteland Terminal v0.5
 
 ![Wasteland Terminal](assets/icon-512.png)
 
@@ -29,7 +29,10 @@ Wasteland is a local LLM inference client built in pure C with a vintage PC-insp
 - **Auto-scroll + word wrap** — Chat pins to the bottom and wraps long lines to the panel width
 - **Download Progress** — Real-time progress bar with filename, percent, and **cancel** support
 - **Fast close** — Clicking X hides the window instantly, signals the worker via `inference_request_stop()`, joins with a 1.5 s timeout, and falls back to `_Exit` if the worker is still mid-decode
-- **Auto-update check** — On startup the app queries GitHub Releases in the background; if a newer version exists, an orange banner appears under the header with the available version
+- **Auto-update** — On startup the app queries GitHub Releases in the background; if a newer version exists an orange banner appears under the header. One click downloads the platform artefact, a second click installs it and restarts:
+  - **Linux** — `pkexec dpkg -i` (with `gksudo` / `kdesu` fallback). On non-Debian distros where `dpkg` is unavailable a `notify-send` / `zenity` notification surfaces the manual install command; the `.deb` is kept on disk for the user to install by hand.
+  - **macOS** — `hdiutil attach` mounts the `.dmg`, `cp -R Wasteland.app /Applications/`, with `osascript with administrator privileges` for system locations; relaunches via `open`.
+  - **Windows** — `copy /Y` over the running `.exe` once the parent process exits, with PowerShell `runas` elevation for Program Files paths.
 - **Unicode & HiDPI** — DejaVu Sans Mono is embedded in the binary (no external font files needed); covers Basic Latin, Cyrillic (Ukrainian), and Geometric Shapes (▶ ■). Font scales automatically with display DPI so text is never tiny on Retina or Windows HiDPI displays
 - **Cross-Platform** — Linux, macOS, Windows (MinGW/MSVC)
 
@@ -120,16 +123,16 @@ GitHub Actions automatically builds and releases for all platforms on every tag:
 
 | Platform | Artifact |
 |----------|----------|
-| Linux x86\_64 (Ubuntu/Debian) | `wasteland_0.4_amd64.deb` — install with `sudo apt install ./wasteland_0.4_amd64.deb` |
-| Linux ARM64 (Raspberry Pi 5, Ampere, etc.) | `wasteland_0.4_arm64.deb` — install with `sudo apt install ./wasteland_0.4_arm64.deb` |
+| Linux x86\_64 (Ubuntu/Debian) | `wasteland_0.5_amd64.deb` — install with `sudo apt install ./wasteland_0.5_amd64.deb` |
+| Linux ARM64 (Raspberry Pi 5, Ampere, etc.) | `wasteland_0.5_arm64.deb` — install with `sudo apt install ./wasteland_0.5_arm64.deb` |
 | macOS (universal) | `Wasteland-macos.dmg` — one .app that runs natively on both Apple Silicon and Intel (deployment target 11.0+) |
 | Windows | `Wasteland-windows.exe` — single self-contained binary (SDL2/curl statically linked) |
 
 Push a tag to trigger a release:
 
 ```bash
-git tag v0.4
-git push origin v0.4
+git tag v0.5
+git push origin v0.5
 ```
 
 ## Running
@@ -168,10 +171,11 @@ Wasteland/
 │   ├── nuklear_impl.c      # Nuklear + SDL/GL2 backend impl
 │   └── nuklear_sdl_gl2.h   # Nuklear SDL2/OpenGL2 backend
 ├── tests/
-│   ├── test_framework.h    # Minimal assertion macros (no external deps)
-│   ├── test_agent.c        # Agent parser & sandbox tests
-│   ├── test_chat_history.c # Chat-history parser & system-prompt builder tests
-│   └── test_version.c      # Semver comparison & updater filename tests
+│   ├── test_framework.h     # Minimal assertion macros (no external deps)
+│   ├── test_agent.c         # Tool-call parser, sandbox, real executor round-trips
+│   ├── test_chat_history.c  # History parser (LF / CRLF / UTF-8) + system-prompt builder
+│   ├── test_version.c       # Semver comparison + updater filename matrix
+│   └── test_string_utils.c  # RC4 cipher, HF URL rewrite, chat-name sanitisation
 ├── include/                # nuklear.h
 ├── third_party/
 │   └── llama.cpp/          # Git submodule (vendored llama.cpp)
@@ -192,9 +196,10 @@ ctest --output-on-failure
 Or run individual test binaries directly:
 
 ```bash
-./test_agent         # agent_parse_calls + agent_resolve_path sandbox
+./test_agent         # agent_parse_calls + agent_resolve_path + tool executors
 ./test_chat_history  # parse_chat_history + build_system_prompt
 ./test_version       # version_newer_than + build_update_filename
+./test_string_utils  # RC4 round-trip + HF URL rewrite + chat-name sanitisation
 ```
 
 Tests are compiled automatically by CMake when you configure the project. To add a new test suite:
@@ -206,11 +211,14 @@ Tests are compiled automatically by CMake when you configure the project. To add
 
 ### Current coverage
 
+Four suites, **87 tests** total — all green on Linux / macOS / Windows CI runners. Filesystem-touching cases use `/tmp` scratch directories created at suite startup.
+
 | Suite | What it tests |
 |---|---|
-| `test_agent` | Tool-call markdown parsing (`read_file`, `list_dir`, `write_file`, `apply_edit`), sandbox path resolution (escape attempts, absolute paths, new files) |
-| `test_chat_history` | Flat `> prompt\nreply\n` → user/assistant message splitting, trailing-user discard, max-msg cap, system-prompt concatenation |
-| `test_version` | Semver comparison (`X.Y.Z` with optional `v` prefix), platform-specific update-filename generation |
+| `test_agent` (35) | Tool-call markdown parsing (`read_file`, `list_dir`, `write_file`, `apply_edit`) including malformed `apply_edit`, multi-line SEARCH/REPLACE blocks, empty `write_file` body, non-tool fences, inline backticks · sandbox path resolution (escape attempts, absolute paths, new files, `./` prefix) · **executor round-trips:** real read / write / apply_edit / list_dir against a scratch workspace, ambiguous-match refusal, delete-via-empty-replace, escape-blocked attempts · `agent_system_prompt` describes every tool |
+| `test_chat_history` (16) | Flat `> prompt\nreply\n` → user/assistant message splitting · trailing-user discard · max-msg cap · CRLF (Windows) line-ending normalisation · UTF-8 (Cyrillic) round-trip · `> ` inside an assistant reply does NOT split a turn · NULL user-prompt for `build_system_prompt` · base-then-user concatenation order |
+| `test_version` (15) | Semver comparison (`X.Y.Z` with optional `v` prefix) including release-tag-vs-runtime, two-component versions, multi-digit minors (`0.10` > `0.9`), empty / garbage-prefix inputs · platform-specific update-filename generation · version-different filenames differ on Linux but not on macOS / Windows |
+| `test_string_utils` (21) | RC4 chat cipher round-trip (ASCII, UTF-8, empty buffer, deterministic output) · HuggingFace `/blob/main/` → `/resolve/main/` URL rewrite (basic, already-resolve, too-small-buffer, false-substring matches) · chat-name sanitisation (punctuation strip, space-run collapse, leading/trailing trim, UTF-8 passthrough, 40-char cap) · **`strip_tool_fences`** (read_file / list_dir / apply_edit elided, plain `` ```c `` / `` ```json `` preserved, unclosed-fence tail dropped, inline backticks kept, multi-fence chains) |
 
 ## UI Guide
 
@@ -232,7 +240,7 @@ Tests are compiled automatically by CMake when you configure the project. To add
 - **System Prompt** — Multi-line input for system instructions, saved between sessions
 - **Agent Mode** — Toggle tool-using ReAct loop; set a workspace directory for sandboxed file access
 - **Chats** — Manage multiple persistent chat sessions:
-  - `[ NEW CHAT ]` — Start a new session. It is initially named from your first message, then the model generates a contextual 3–5 word title after its first reply and the chat file is renamed automatically.
+  - `[ NEW CHAT ]` — Reset to an empty buffer. The chat is **created lazily on the first message**, named from the prompt itself (UTF-8-safe, word-boundary truncation at 60 bytes), then refined into a contextual 3–5 word model-generated title after the first assistant reply. If you click `[ NEW CHAT ]` and then switch to another chat without typing, nothing is created — no orphan "New Chat" files.
   - `[ LOAD ]` / `[ ACTIVE ]` — Switch between chat sessions
   - `[ DEL ]` — Delete a chat session
 - **Status footer** — "NET: LOCKDOWN ACTIVE" once a model is loaded; otherwise "NET: DISCONNECTED (READY)"
@@ -244,6 +252,12 @@ Tests are compiled automatically by CMake when you configure the project. To add
   - Each user/assistant exchange is rendered in its own edit box — user prompts never bleed into the previous assistant reply.
   - Reasoning blocks (`<think>`) are rendered in a separate dimmed box with a "▒ thinking" label.
   - Empty think boxes (e.g. from `<think></think>` or a cancelled mid-think generation) are suppressed.
+  - In agent mode, the model's tool-call fences (`` ```read_file ``, `` ```list_dir ``, `` ```write_file ``, `` ```apply_edit ``) are **elided from the rendered view** — the `[ TOOL: name | path ]` marker emitted by the worker is the visible cue. The on-disk chat file keeps the raw fences so the agent can re-parse them on subsequent turns; this is purely a rendering transform.
+- **Agent proposal panel** — when Agent Mode is on and the model emits a `write_file` or `apply_edit` tool call, a top-of-panel preview appears with a red/green diff palette matching [docs/index.html](docs/index.html):
+  - SEARCH block — orange-red border + text (`#FF6020`)
+  - REPLACE / `write_file` body — yellow-green border + text (`#AACC00`)
+  - `[ APPLY ]` button — green; `[ REJECT ]` button — red
+  - Worker is paused on the approval gate until you click one. The diff text is selectable so you can copy it for review.
 - **CTX bar** — `CTX: used / max (pct%)` with a progress bar. Turns orange above 75 %, red above 90 %.
 - **`[ COMPACT ]`** — Drop the oldest turn, persist the result to disk, mirror into inference. Disabled during generation. Shows feedback in the status line.
 - **Input** — `>` prompt with text field

@@ -3,429 +3,970 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Wasteland Terminal v0.4</title>
+    <title>Wasteland Terminal v0.5 — Offline LLM Chat in pure C</title>
+    <meta name="description" content="A highly secure, offline-first LLM chat client with a vintage amber-on-black CRT aesthetic. Pure C, llama.cpp, Linux seccomp lockdown, sandboxed agent mode.">
+    <meta property="og:title" content="Wasteland Terminal v0.5">
+    <meta property="og:description" content="Offline-first LLM chat in pure C — amber CRT UI, hard network lockdown, sandboxed agent mode.">
+    <meta name="theme-color" content="#FFB000">
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=VT323&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=VT323&family=Share+Tech+Mono&display=swap');
 
         :root {
-            --amber: #FFB000;
-            --amber-dim: #996a00;
-            --bg-color: #050505;
+            --amber:        #FFB000;
+            --amber-bright: #FFD060;
+            --amber-dim:    #996a00;
+            --amber-faint:  #5a3d00;
+            --bg-color:     #050505;
+            --bg-panel:     #0a0a0a;
+            --bg-deep:      #000000;
+            --warn:         #FF6020;
         }
+
+        * { box-sizing: border-box; }
+
+        html, body { margin: 0; padding: 0; }
 
         body {
             background-color: var(--bg-color);
             color: var(--amber);
-            font-family: 'VT323', monospace;
+            font-family: 'VT323', 'Share Tech Mono', monospace;
             font-size: 1.25rem;
-            margin: 0;
-            padding: 20px;
-            line-height: 1.2;
+            padding: 0;
+            line-height: 1.3;
             text-shadow: 0 0 5px rgba(255, 176, 0, 0.5);
             overflow-x: hidden;
+            min-height: 100vh;
         }
 
+        /* CRT scanlines + chromatic aberration overlay */
         body::before {
             content: " ";
             display: block;
             position: fixed;
             top: 0; left: 0; bottom: 0; right: 0;
-            background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.1) 50%),
-                        linear-gradient(90deg, rgba(255, 0, 0, 0.03), rgba(0, 255, 0, 0.01), rgba(0, 0, 255, 0.03));
-            z-index: 100;
+            background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.18) 50%),
+                        linear-gradient(90deg, rgba(255, 0, 0, 0.04), rgba(0, 255, 0, 0.012), rgba(0, 0, 255, 0.04));
+            z-index: 200;
             background-size: 100% 3px, 3px 100%;
+            pointer-events: none;
+            animation: flicker 6s infinite;
+        }
+
+        /* Vignette */
+        body::after {
+            content: " ";
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            box-shadow: inset 0 0 200px rgba(0, 0, 0, 0.85);
+            z-index: 199;
             pointer-events: none;
         }
 
+        @keyframes flicker {
+            0%, 100% { opacity: 1; }
+            48%      { opacity: 1; }
+            50%      { opacity: 0.92; }
+            52%      { opacity: 1; }
+            85%      { opacity: 0.97; }
+        }
+
+        @keyframes blink {
+            0%, 49%   { opacity: 1; }
+            50%, 100% { opacity: 0; }
+        }
+
+        @keyframes scan-fade-in {
+            from { opacity: 0; transform: translateY(8px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+
         .terminal-container {
-            max-width: 960px;
+            max-width: 1100px;
             margin: 0 auto;
-            border: 2px solid var(--amber);
-            padding: 30px;
+            padding: 30px 22px 60px;
             position: relative;
-            box-shadow: inset 0 0 20px rgba(255, 176, 0, 0.15);
+            animation: scan-fade-in 0.6s ease-out;
         }
 
-        header {
-            border-bottom: 2px solid var(--amber);
-            margin-bottom: 20px;
-            padding-bottom: 10px;
-        }
-
-        .sys-info {
+        /* ============== TOP BAR ============== */
+        .topbar {
             display: flex;
             justify-content: space-between;
-            font-size: 1rem;
+            align-items: center;
+            font-size: 0.95rem;
             text-transform: uppercase;
-            margin-bottom: 5px;
+            border-bottom: 1px dashed var(--amber-dim);
+            padding-bottom: 6px;
+            margin-bottom: 18px;
+            color: var(--amber-dim);
             flex-wrap: wrap;
             gap: 10px;
         }
 
-        h1 {
-            font-size: 3rem;
-            margin: 0;
-            letter-spacing: 4px;
+        .topbar .pulse {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            background: var(--amber);
+            border-radius: 50%;
+            margin-right: 6px;
+            box-shadow: 0 0 6px var(--amber);
+            animation: blink 1.6s step-end infinite;
         }
 
-        .version-tag {
+        /* ============== HERO ============== */
+        .hero {
+            border: 2px solid var(--amber);
+            box-shadow: inset 0 0 30px rgba(255, 176, 0, 0.18),
+                        0 0 12px rgba(255, 176, 0, 0.15);
+            padding: 30px 30px 22px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .hero::before {
+            content: "[ PRIMARY DISPLAY ]";
+            position: absolute;
+            top: -12px;
+            left: 18px;
+            background: var(--bg-color);
+            padding: 0 8px;
+            font-size: 0.85rem;
+            color: var(--amber-dim);
+            letter-spacing: 2px;
+        }
+
+        .hero h1 {
+            font-size: clamp(2rem, 6vw, 3.5rem);
+            margin: 0 0 6px;
+            letter-spacing: 4px;
+            line-height: 1;
+        }
+
+        .hero h1 .v {
             background: var(--amber);
-            color: var(--bg-color);
-            padding: 0 10px;
+            color: var(--bg-deep);
+            padding: 0 12px;
+            text-shadow: none;
+            font-size: 0.6em;
+            vertical-align: middle;
+            margin-left: 8px;
+        }
+
+        .hero .tagline {
+            font-size: 1.3rem;
+            color: var(--amber-bright);
+            margin: 0 0 18px;
+            letter-spacing: 1px;
+        }
+
+        .hero .lead {
+            margin: 0 0 18px;
+            max-width: 80ch;
+        }
+
+        .badges {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin: 14px 0 22px;
+        }
+
+        .badge {
+            border: 1px solid var(--amber-dim);
+            padding: 3px 10px;
+            font-size: 0.95rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: var(--amber);
+            background: rgba(255, 176, 0, 0.04);
+        }
+
+        .btn-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 14px;
+        }
+
+        .btn {
+            border: 1px solid var(--amber);
+            padding: 10px 22px;
+            color: var(--amber);
+            text-decoration: none;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            transition: 0.15s ease;
+            font-family: inherit;
+            font-size: 1.05rem;
+            background: rgba(255, 176, 0, 0.04);
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .btn:hover {
+            background: var(--amber);
+            color: var(--bg-deep);
+            text-shadow: none;
+            box-shadow: 0 0 16px rgba(255, 176, 0, 0.6);
+        }
+
+        .btn.primary {
+            background: var(--amber);
+            color: var(--bg-deep);
             text-shadow: none;
         }
 
-        section { margin-bottom: 30px; }
-
-        h3 {
-            border-bottom: 1px dashed var(--amber);
-            display: inline-block;
-            margin-bottom: 15px;
-            text-transform: uppercase;
+        .btn.primary:hover {
+            background: var(--amber-bright);
         }
 
+        /* ============== BOOT LOG ============== */
+        .boot-log {
+            background: var(--bg-deep);
+            border: 1px solid var(--amber-dim);
+            padding: 16px 18px;
+            margin: 22px 0 30px;
+            font-size: 1.05rem;
+            line-height: 1.4;
+            color: var(--amber-dim);
+            position: relative;
+        }
+
+        .boot-log::before {
+            content: "$ wasteland --boot";
+            position: absolute;
+            top: -10px;
+            left: 14px;
+            background: var(--bg-color);
+            padding: 0 8px;
+            color: var(--amber);
+            font-size: 0.85rem;
+        }
+
+        .boot-log .line { display: block; }
+        .boot-log .ok  { color: var(--amber); }
+        .boot-log .warn { color: var(--warn); }
+        .boot-log .dim  { color: var(--amber-faint); }
+        .boot-log .cursor {
+            display: inline-block;
+            width: 9px;
+            height: 1.1rem;
+            background: var(--amber);
+            vertical-align: middle;
+            animation: blink 1s step-end infinite;
+        }
+
+        /* ============== SECTIONS ============== */
+        section { margin: 38px 0; }
+
+        h2 {
+            font-size: 1.8rem;
+            margin: 0 0 6px;
+            letter-spacing: 3px;
+            display: inline-block;
+            position: relative;
+        }
+
+        h2::before { content: "// "; color: var(--amber-dim); }
+        h2::after  { content: " //"; color: var(--amber-dim); }
+
+        h3 {
+            font-size: 1.3rem;
+            border-bottom: 1px dashed var(--amber-dim);
+            display: inline-block;
+            margin: 0 0 14px;
+            padding-bottom: 4px;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }
+
+        p { margin: 0 0 12px; }
+
+        /* ============== FEATURE GRID ============== */
         .feature-grid {
             display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 20px;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 16px;
+            margin-top: 18px;
         }
 
         .feature-item {
             border: 1px solid var(--amber-dim);
-            padding: 10px;
-            background: rgba(255, 176, 0, 0.02);
+            padding: 14px 16px 16px;
+            background: linear-gradient(180deg,
+                        rgba(255, 176, 0, 0.05) 0%,
+                        rgba(255, 176, 0, 0.01) 100%);
+            position: relative;
+            transition: 0.2s;
         }
 
-        .feature-item strong { display: block; margin-bottom: 5px; color: #fff; text-transform: uppercase; }
+        .feature-item:hover {
+            border-color: var(--amber);
+            box-shadow: 0 0 14px rgba(255, 176, 0, 0.25);
+            transform: translateY(-2px);
+        }
 
-        .think-block {
-            border-left: 3px solid var(--amber-dim);
-            padding-left: 15px;
+        .feature-item .icon {
+            display: inline-block;
+            font-size: 1.4rem;
+            color: var(--amber-bright);
+            margin-right: 6px;
+        }
+
+        .feature-item strong {
+            display: block;
+            margin-bottom: 6px;
+            color: var(--amber-bright);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            font-weight: normal;
+        }
+
+        .feature-item small {
+            display: block;
+            margin-top: 8px;
+            color: var(--amber-faint);
+            font-size: 0.95rem;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+        }
+
+        /* ============== STATS ============== */
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 14px;
+            margin: 18px 0;
+        }
+
+        .stat {
+            text-align: center;
+            border: 1px solid var(--amber-dim);
+            padding: 18px 8px;
+            background: rgba(255, 176, 0, 0.03);
+        }
+
+        .stat .num {
+            display: block;
+            font-size: 2.4rem;
+            color: var(--amber);
+            line-height: 1;
+            text-shadow: 0 0 12px rgba(255, 176, 0, 0.6);
+        }
+
+        .stat .label {
+            display: block;
+            margin-top: 6px;
+            font-size: 0.95rem;
             color: var(--amber-dim);
-            font-style: italic;
-            margin: 15px 0;
+            text-transform: uppercase;
+            letter-spacing: 1px;
         }
 
-        .code-area {
-            background: rgba(0, 0, 0, 0.5);
+        /* ============== CHAT DEMO ============== */
+        .chat-demo {
+            background: var(--bg-deep);
             border: 1px solid var(--amber);
-            padding: 15px;
+            padding: 16px 18px;
+            margin: 18px 0;
+            font-size: 1.1rem;
+            line-height: 1.45;
+            position: relative;
+            box-shadow: inset 0 0 18px rgba(255, 176, 0, 0.08);
+        }
+
+        .chat-demo::before {
+            content: "RIGHT PANEL — CHAT";
+            position: absolute;
+            top: -10px;
+            left: 14px;
+            background: var(--bg-color);
+            padding: 0 8px;
+            color: var(--amber-dim);
+            font-size: 0.8rem;
+            letter-spacing: 2px;
+        }
+
+        .chat-demo .user { color: var(--amber); }
+        .chat-demo .user::before { content: "> "; color: var(--amber-bright); }
+
+        .chat-demo .think {
+            display: block;
+            border-left: 2px solid var(--amber-faint);
+            padding: 4px 12px;
+            margin: 8px 0;
+            color: var(--amber-faint);
+            font-style: italic;
+        }
+
+        .chat-demo .think::before {
+            content: "▒ thinking";
+            display: block;
+            color: var(--amber-dim);
+            font-style: normal;
+            margin-bottom: 4px;
+            font-size: 0.85rem;
+            letter-spacing: 1px;
+        }
+
+        .chat-demo .reply {
+            display: block;
+            color: var(--amber);
+            margin: 6px 0;
+        }
+
+        .chat-demo .tool {
+            display: block;
+            color: var(--warn);
+            margin: 6px 0;
+            font-size: 1rem;
+        }
+
+        /* ============== CODE AREAS ============== */
+        .code-area, pre {
+            background: rgba(0, 0, 0, 0.7);
+            border: 1px solid var(--amber-dim);
+            border-left: 3px solid var(--amber);
+            padding: 14px 18px;
             white-space: pre;
             overflow-x: auto;
-            font-size: 1.1rem;
+            font-family: 'Share Tech Mono', 'VT323', monospace;
+            font-size: 1rem;
+            color: var(--amber);
+            margin: 12px 0;
         }
 
+        /* ============== PLATFORM TABS ============== */
         .platform-tabs {
             display: flex;
-            gap: 10px;
-            margin-bottom: 10px;
+            gap: 0;
+            margin-bottom: -1px;
             flex-wrap: wrap;
         }
 
         .platform-tab {
             border: 1px solid var(--amber-dim);
-            padding: 5px 15px;
+            border-bottom: none;
+            padding: 6px 18px;
             cursor: pointer;
             background: transparent;
-            color: var(--amber);
-            font-family: 'VT323', monospace;
-            font-size: 1.1rem;
+            color: var(--amber-dim);
+            font-family: inherit;
+            font-size: 1rem;
             text-transform: uppercase;
+            letter-spacing: 1px;
+            transition: 0.15s;
         }
+
+        .platform-tab:hover { color: var(--amber); }
 
         .platform-tab.active {
             background: var(--amber);
-            color: var(--bg-color);
+            color: var(--bg-deep);
+            border-color: var(--amber);
             text-shadow: none;
         }
 
         .platform-content { display: none; }
-        .platform-content.active { display: block; }
+        .platform-content.active { display: block; animation: scan-fade-in 0.3s; }
 
-        .btn-group {
-            display: flex;
-            gap: 15px;
-            margin-top: 20px;
-            flex-wrap: wrap;
-        }
-
-        .btn {
-            border: 1px solid var(--amber);
-            padding: 10px 20px;
-            color: var(--amber);
-            text-decoration: none;
-            text-transform: uppercase;
-            transition: 0.2s;
-        }
-
-        .btn:hover {
-            background: var(--amber);
-            color: var(--bg-color);
-            text-shadow: none;
-        }
-
-        .cursor {
-            display: inline-block;
-            width: 10px;
-            height: 1.2rem;
-            background: var(--amber);
-            animation: blink 1s step-end infinite;
-            vertical-align: middle;
-        }
-
-        @keyframes blink {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0; }
-        }
-
-        ul { padding-left: 20px; }
-        li { margin-bottom: 8px; }
-
+        /* ============== TABLE ============== */
         .dl-table {
             width: 100%;
             border-collapse: collapse;
-            margin-top: 10px;
+            margin-top: 12px;
         }
         .dl-table th, .dl-table td {
             border: 1px solid var(--amber-dim);
-            padding: 8px 12px;
+            padding: 10px 14px;
             text-align: left;
         }
         .dl-table th {
-            background: rgba(255, 176, 0, 0.1);
+            background: rgba(255, 176, 0, 0.12);
             text-transform: uppercase;
+            letter-spacing: 2px;
+            color: var(--amber-bright);
+        }
+        .dl-table tr:nth-child(even) td {
+            background: rgba(255, 176, 0, 0.02);
+        }
+        .dl-table code {
+            color: var(--amber-bright);
         }
 
+        /* ============== ARCHITECTURE DIAGRAM ============== */
+        .arch {
+            border: 1px solid var(--amber-dim);
+            padding: 14px;
+            font-family: 'Share Tech Mono', monospace;
+            font-size: 0.95rem;
+            line-height: 1.4;
+            white-space: pre;
+            overflow-x: auto;
+            color: var(--amber);
+            background: rgba(0, 0, 0, 0.4);
+        }
+
+        /* ============== AGENT MODE BLOCK ============== */
+        .agent-block {
+            border: 1px solid var(--warn);
+            background: rgba(255, 96, 32, 0.04);
+            padding: 14px 18px;
+            margin: 14px 0;
+            position: relative;
+        }
+
+        .agent-block::before {
+            content: "▼ AGENT PROPOSAL — REVIEW";
+            position: absolute;
+            top: -10px;
+            left: 14px;
+            background: var(--bg-color);
+            padding: 0 8px;
+            color: var(--warn);
+            font-size: 0.85rem;
+            letter-spacing: 2px;
+        }
+
+        .agent-block code {
+            color: var(--amber-bright);
+        }
+
+        .agent-actions {
+            display: flex;
+            gap: 12px;
+            margin-top: 10px;
+        }
+
+        .agent-actions .apply {
+            color: #AACC00;
+            border-color: #AACC00;
+        }
+        .agent-actions .apply:hover {
+            background: #AACC00;
+            color: var(--bg-deep);
+        }
+        .agent-actions .reject {
+            color: var(--warn);
+            border-color: var(--warn);
+        }
+        .agent-actions .reject:hover {
+            background: var(--warn);
+            color: var(--bg-deep);
+        }
+
+        /* ============== FOOTER ============== */
+        footer {
+            margin-top: 50px;
+            border-top: 1px dashed var(--amber-dim);
+            padding-top: 16px;
+            color: var(--amber-dim);
+            font-size: 0.95rem;
+            text-align: center;
+        }
+
+        footer a { color: var(--amber); }
+
+        ul { padding-left: 20px; margin: 8px 0 0; }
+        li { margin-bottom: 6px; }
+
+        a { color: var(--amber-bright); }
+        a:hover { color: var(--amber); }
+
         @media (max-width: 600px) {
-            .feature-grid { grid-template-columns: 1fr; }
-            .sys-info { flex-direction: column; }
+            .hero { padding: 22px 18px 16px; }
+            .hero h1 { letter-spacing: 2px; }
+            .platform-tab { flex: 1 1 50%; }
+            h2 { font-size: 1.4rem; letter-spacing: 2px; }
         }
     </style>
 </head>
 <body>
 
 <div class="terminal-container">
-    <header>
-        <div class="sys-info">
-            <span>SYS.NODE: PRIMARY</span>
-            <span>SEC: SECCOMP_LOCKED</span>
-            <span>NET: AIR_GAPPED</span>
+
+    <!-- ============== TOP BAR ============== -->
+    <div class="topbar">
+        <span><span class="pulse"></span>SYS.NODE: PRIMARY · CRT-AMBER · 60 FPS</span>
+        <span>SEC: SECCOMP_ARMED &nbsp;|&nbsp; NET: AIR_GAPPED</span>
+    </div>
+
+    <!-- ============== HERO ============== -->
+    <header class="hero">
+        <h1>WASTELAND<span class="v">v0.5</span></h1>
+        <p class="tagline">// OFFLINE LLM TERMINAL · PURE C · NO TELEMETRY</p>
+
+        <p class="lead">
+            A local-first LLM chat client built from scratch in C11. Runs any GGUF model through
+            <strong>llama.cpp</strong>, wraps it in a vintage amber-on-black CRT interface, and
+            slams a <strong>seccomp lockdown</strong> on the process the moment a model is loaded —
+            physically preventing the binary from opening another network socket for the rest of its
+            lifetime.
+        </p>
+
+        <div class="badges">
+            <span class="badge">Pure C11</span>
+            <span class="badge">llama.cpp</span>
+            <span class="badge">Nuklear · SDL2 · OpenGL 2.1</span>
+            <span class="badge">Linux · macOS · Windows</span>
+            <span class="badge">amd64 · arm64</span>
+            <span class="badge">MIT</span>
         </div>
-        <h1>WASTELAND TERMINAL <span class="version-tag">v0.4</span></h1>
+
+        <div class="btn-row">
+            <a href="https://github.com/alexbeatnik/wasteland/releases/latest" class="btn primary">[ DOWNLOAD v0.5 ]</a>
+            <a href="https://github.com/alexbeatnik/wasteland" class="btn">[ SOURCE CODE ]</a>
+            <a href="#initialize" class="btn">[ BUILD FROM SOURCE ]</a>
+        </div>
     </header>
 
+    <!-- ============== BOOT LOG ============== -->
+    <div class="boot-log" aria-hidden="true">
+        <span class="line"><span class="ok">[OK]</span> SDL2 video subsystem online (OpenGL 2.1 compat profile)</span>
+        <span class="line"><span class="ok">[OK]</span> Embedded font: DejaVu Sans Mono · 343 KB · Latin / Cyrillic / U+25A0–U+25FF</span>
+        <span class="line"><span class="ok">[OK]</span> DPI scale: 2.00× (Retina)  ·  Window: 1280×800  ·  Drawable: 2560×1600</span>
+        <span class="line"><span class="ok">[OK]</span> Inference worker thread spawned · prompt_cond armed</span>
+        <span class="line"><span class="ok">[OK]</span> Update probe: api.github.com/.../releases/latest → v0.5 (current)</span>
+        <span class="line"><span class="dim">[..]</span> Awaiting model selection from local vault…</span>
+        <span class="line"><span class="ok">[OK]</span> Model loaded: Qwen2.5-1.5B-Instruct.Q4_K_M.gguf (1.0 GB)</span>
+        <span class="line"><span class="warn">[!!]</span> seccomp filter installed · AF_INET / AF_INET6 / AF_PACKET → SIGKILL</span>
+        <span class="line"><span class="ok">[OK]</span> NET: LOCKDOWN ACTIVE  ·  inference ready<span class="cursor"></span></span>
+    </div>
+
+    <!-- ============== STATS ============== -->
     <section>
-        <p>A highly secure, offline-first LLM chat application with a retro-futuristic TUI-like graphical interface. Built in pure C11 with a vintage PC-inspired amber-on-black CRT terminal aesthetic. All inference happens locally via llama.cpp. Once a model is loaded, Linux seccomp physically prevents the process from opening any new IP socket for the rest of its lifetime.</p>
+        <h2>VITALS</h2>
+        <div class="stats">
+            <div class="stat"><span class="num">100%</span><span class="label">Local Inference</span></div>
+            <div class="stat"><span class="num">0</span><span class="label">Telemetry Calls</span></div>
+            <div class="stat"><span class="num">3</span><span class="label">syscalls Killed</span></div>
+            <div class="stat"><span class="num">60</span><span class="label">FPS UI Loop</span></div>
+            <div class="stat"><span class="num">256k</span><span class="label">Max Context</span></div>
+            <div class="stat"><span class="num">3</span><span class="label">OSes Supported</span></div>
+            <div class="stat"><span class="num">87</span><span class="label">Unit Tests</span></div>
+        </div>
     </section>
 
+    <!-- ============== CORE PROTOCOLS ============== -->
     <section>
-        <h3>--- CORE PROTOCOLS ---</h3>
+        <h2>CORE PROTOCOLS</h2>
         <div class="feature-grid">
             <div class="feature-item">
-                <strong>Offline-first</strong>
-                All inference happens locally via llama.cpp. No cloud, no telemetry.
+                <strong><span class="icon">▣</span> Offline-First</strong>
+                Inference happens entirely on your machine through llama.cpp. No cloud relay, no API key,
+                no model phoning home.
+                <small>// llama.cpp · GGUF</small>
             </div>
             <div class="feature-item">
-                <strong>Hard Network Lockdown</strong>
-                Linux seccomp kills the process if it opens a new AF_INET / AF_INET6 / AF_PACKET socket after load.
+                <strong><span class="icon">⚠</span> Hard Network Lockdown</strong>
+                Linux seccomp-bpf installs <code>SCMP_ACT_KILL_PROCESS</code> on
+                <code>socket(AF_INET, …)</code>, <code>AF_INET6</code>, <code>AF_PACKET</code> the moment
+                a model is loaded. Cannot be undone for the lifetime of the process.
+                <small>// seccomp · Linux only</small>
             </div>
             <div class="feature-item">
-                <strong>Retro UI</strong>
-                Amber (#FFB000) monochrome CRT terminal aesthetic via Nuklear; threaded 60 FPS UI with background inference.
+                <strong><span class="icon">▶</span> Streaming UI · 60 FPS</strong>
+                Nuklear immediate-mode GUI on SDL2 + OpenGL. Background inference thread emits tokens
+                into a mutex-guarded ring buffer; UI drains it every frame.
+                <small>// Nuklear · SDL2 · pthreads</small>
             </div>
             <div class="feature-item">
-                <strong>Async Model Load</strong>
-                UI stays responsive during multi-second GGUF load; cancel in-flight downloads.
+                <strong><span class="icon">◈</span> Smart &lt;think&gt; Rendering</strong>
+                Reasoning blocks (Qwen3-style) auto-detected, dimmed, labeled
+                <em>▒ thinking</em>, and excluded from copy-to-clipboard. Line-start guard
+                prevents false positives from prose.
+                <small>// 7-byte carry buffer</small>
             </div>
             <div class="feature-item">
-                <strong>Smart Reasoning</strong>
-                Automatic &lt;think&gt; block detection with dimmed rendering; excluded from copy-to-clipboard.
+                <strong><span class="icon">∑</span> Context Compaction</strong>
+                Live <code>CTX: used / max</code> bar with colour-coded progress.
+                Auto-compact at 80%, pre-send compact at 75%, manual <code>[ COMPACT ]</code>
+                button drops oldest turn and persists the result.
+                <small>// probe-tokenisation, no allocation</small>
             </div>
             <div class="feature-item">
-                <strong>Context Compaction</strong>
-                Drop oldest turns, save compacted history to disk, and mirror into inference without reload.
+                <strong><span class="icon">⌬</span> Sandboxed Agent Mode</strong>
+                Tool-using ReAct loop: <code>read_file</code>, <code>list_dir</code>,
+                <code>write_file</code>, <code>apply_edit</code>. Every path resolved via
+                <code>realpath</code> and checked against a user-chosen workspace root —
+                no escape via symlinks or <code>..</code>.
+                <small>// 10-turn cap · approval gate</small>
             </div>
             <div class="feature-item">
-                <strong>Agent Mode (ReAct)</strong>
-                Built-in tool-using ReAct agent loop with sandboxed file system access (read_file, list_dir, write_file, apply_edit).
+                <strong><span class="icon">▤</span> Multi-Chat Persistence</strong>
+                Named, browsable chat sessions. Auto-named from your first message, then refined
+                by the model into a 3–5 word contextual title. Stored as RC4-obfuscated
+                <code>chats/*.txt</code> with a 4-byte <code>WSTL</code> magic header.
+                <small>// 64 chats · cross-launch</small>
             </div>
             <div class="feature-item">
-                <strong>Auto-Generated Chat Titles</strong>
-                First message names the chat; the model then generates a contextual 3–5 word title and the file is renamed automatically.
+                <strong><span class="icon">↻</span> One-Click Auto-Update</strong>
+                Background GitHub probe at startup (before lockdown). New release detected →
+                orange banner. Click <code>[ DOWNLOAD UPDATE ]</code> → <code>[ RESTART TO UPDATE ]</code>
+                → app exits, generated script replaces the binary (with pkexec / runas / osascript
+                elevation when needed) and relaunches.
+                <small>// 5 s timeout · curl</small>
             </div>
             <div class="feature-item">
-                <strong>One-Click Auto-Update</strong>
-                Background GitHub check on startup. Download + replace + restart with a single button press — UAC / pkexec handled automatically.
+                <strong><span class="icon">⌨</span> Cyrillic + HiDPI</strong>
+                DejaVu Sans Mono baked into the binary via <code>xxd -i</code> — covers Latin,
+                Cyrillic (Ukrainian U+0400–U+04FF), and Geometric Shapes (U+25A0–U+25FF).
+                Scales with display DPI on Retina, Windows 125%–200%, and Wayland fractional.
+                <small>// 343 KB · embedded</small>
             </div>
             <div class="feature-item">
-                <strong>Multi-Turn Memory</strong>
-                Create, load, and switch between named chat sessions. Persisted locally with RC4 obfuscation.
+                <strong><span class="icon">⏻</span> Fast Close</strong>
+                Click X → <code>SDL_HideWindow</code> instant feedback → worker stop signal →
+                1.5 s join timeout → fall back to <code>_Exit</code>. No "Not Responding" dialog
+                even mid-decode on a 35B model.
+                <small>// no pthread_cancel</small>
+            </div>
+            <div class="feature-item">
+                <strong><span class="icon">⚙</span> Tunable Sampler</strong>
+                <code>penalties → top_k → top_p → temp → dist</code>. Greedy is intentionally NOT
+                used — small models (≤2B) loop into repeated paragraphs without a repetition
+                penalty. Temperature live-tweakable between turns.
+                <small>// 64-token last_n window</small>
+            </div>
+            <div class="feature-item">
+                <strong><span class="icon">▦</span> Vintage CRT Aesthetic</strong>
+                Amber #FFB000 monochrome. Every Nuklear widget themed — buttons, edits, properties,
+                checkboxes, scrollbars, progress. No rounded corners. No gradients. Just terminal.
+                <small>// theme: ui_apply_amber_theme</small>
             </div>
         </div>
     </section>
 
+    <!-- ============== CHAT DEMO ============== -->
     <section>
-        <div class="think-block">
-            ▒ thinking: Analyzing environment... Seccomp filters active. AF_INET blocked. Local vault mounted. DejaVu Sans Mono embedded (Cyrillic + Geometric Shapes). Ready for inference.
+        <h2>SAMPLE EXCHANGE</h2>
+        <p>An example of how reasoning blocks, agent tool calls, and approval gates are rendered:</p>
+
+        <div class="chat-demo">
+            <span class="user">summarise main.c — what does this app actually do?</span>
+            <span class="think">
+                The user is asking about the structure of main.c.
+                I should describe the entry point, threading model, and shutdown sequence.
+                Keep it short — they can read the code themselves.
+            </span>
+            <span class="reply">
+                main.c is the entry point. It picks a writable per-user data directory
+                (so installs from /Applications or apt work without write-permission to /),
+                creates the SDL window, spawns the inference worker thread, and runs a
+                60 FPS event/render loop. On SDL_QUIT it hides the window instantly,
+                signals the worker, joins with a 1.5 s timeout, and falls back to _Exit if
+                the worker is mid-decode.
+            </span>
+        </div>
+
+        <div class="agent-block">
+            <code>apply_edit → src/main.c</code><br>
+            <small>// SEARCH:</small>
+            <pre style="margin: 6px 0; padding: 8px 12px; border-color: var(--warn);">SDL_HideWindow(win);</pre>
+            <small>// REPLACE:</small>
+            <pre style="margin: 6px 0; padding: 8px 12px; border-color: #AACC00;">SDL_HideWindow(win);
+fprintf(stderr, "[main] window hidden, draining worker\n");</pre>
+            <div class="agent-actions">
+                <a href="#" class="btn apply" onclick="event.preventDefault();">[ APPLY ]</a>
+                <a href="#" class="btn reject" onclick="event.preventDefault();">[ REJECT ]</a>
+            </div>
         </div>
     </section>
 
+    <!-- ============== ARCHITECTURE ============== -->
     <section>
-        <h3>--- SYSTEM SPECS ---</h3>
-        <ul>
-            <li><strong>Core Engine:</strong> Pure C11 via llama.h</li>
-            <li><strong>Interface:</strong> Nuklear Immediate-Mode GUI (SDL2 / OpenGL 2.1)</li>
-            <li><strong>Security:</strong> Linux seccomp-bpf (SCMP_ACT_KILL_PROCESS on new sockets)</li>
-            <li><strong>Networking:</strong> libcurl (download path only; strictly isolated in network.c)</li>
-            <li><strong>Font:</strong> Embedded DejaVu Sans Mono — no external font files needed</li>
-            <li><strong>Unicode:</strong> Basic Latin, Cyrillic (Ukrainian), Geometric Shapes (▶ ■)</li>
-            <li><strong>HiDPI:</strong> Auto-scales on Retina and Windows scaled displays</li>
-            <li><strong>Testing:</strong> Zero-dependency C test framework with CTest integration</li>
-        </ul>
+        <h2>ARCHITECTURE</h2>
+        <p>Three threads share state through fine-grained mutexes plus a few <code>volatile int</code> one-way flags:</p>
+        <div class="arch">
+   ┌─────────────────────────┐         ┌────────────────────────────┐
+   │   MAIN THREAD (UI)      │         │   INFERENCE WORKER         │
+   │  ─────────────────────  │  cond   │  ────────────────────────  │
+   │  · SDL event loop       │ ──────▶ │  pthread_cond_wait(prompt) │
+   │  · Nuklear @ 60 FPS     │         │  apply_chat_template       │
+   │  · drains output buffer │ ◀─────  │  llama_decode in n_batch   │
+   │  · status / scroll      │  bytes  │  sample loop · cancel poll │
+   │  · compact + persist    │         │  emit_filtered_piece()     │
+   └─────────────────────────┘         └────────────────────────────┘
+              │                                       ▲
+              │ load click                            │ load result
+              ▼                                       │
+   ┌─────────────────────────┐    ┌─────────────────────────────────┐
+   │   ASYNC LOAD THREAD     │    │   DOWNLOAD / UPDATE THREADS     │
+   │  ─────────────────────  │    │  ─────────────────────────────  │
+   │  llama_model_load_*     │    │  libcurl + GitHub Releases API  │
+   │  llama_init_from_model  │    │  HF API: /api/models/.../tree   │
+   │  publish load_result    │    │  detached · progress callback   │
+   └─────────────────────────┘    └─────────────────────────────────┘
+
+   chat_mutex   : state-&gt;chat_history (UI write, worker mirror read)
+   output_mutex : ring buffer, tag carry, generating flag
+   pending_mutex: agent approval gate (write_file / apply_edit)
+   settings_mutex: n_ctx, temperature (read at load / sampler build)
+        </div>
     </section>
 
-    <section>
-        <h3>--- INITIALIZATION SEQUENCE ---</h3>
+    <!-- ============== INSTALL ============== -->
+    <section id="initialize">
+        <h2>INITIALIZATION SEQUENCE</h2>
+        <p>The fastest path is to grab a prebuilt binary from the releases page. To build from source:</p>
+
         <div class="platform-tabs">
-            <button class="platform-tab active" onclick="showPlatform('linux')">Linux</button>
-            <button class="platform-tab" onclick="showPlatform('macos')">macOS</button>
-            <button class="platform-tab" onclick="showPlatform('win-mingw')">Windows (MSYS2)</button>
-            <button class="platform-tab" onclick="showPlatform('win-msvc')">Windows (MSVC)</button>
+            <button class="platform-tab active" data-target="linux">Linux</button>
+            <button class="platform-tab" data-target="macos">macOS</button>
+            <button class="platform-tab" data-target="win-mingw">Windows · MSYS2</button>
+            <button class="platform-tab" data-target="win-msvc">Windows · MSVC</button>
         </div>
 
         <div id="linux" class="platform-content active">
-            <div class="code-area"># Debian / Ubuntu
+<pre># Debian / Ubuntu
 sudo apt install cmake libsdl2-dev libcurl4-openssl-dev libseccomp-dev
 
 # Arch
 sudo pacman -S cmake sdl2 curl libseccomp
 
-# Build
-git clone https://github.com/alexbeatnik/wasteland.git
-cd wasteland && git submodule update --init --recursive
+git clone --recurse-submodules https://github.com/alexbeatnik/wasteland.git
+cd wasteland
 ./build.sh
-./build/Wasteland</div>
+./build/Wasteland</pre>
         </div>
 
         <div id="macos" class="platform-content">
-            <div class="code-area">brew install cmake sdl2 curl
-git clone https://github.com/alexbeatnik/wasteland.git
-cd wasteland && git submodule update --init --recursive
-mkdir build && cd build
-cmake ..
-make -j$(sysctl -n hw.ncpu)
-./Wasteland</div>
+<pre>brew install cmake sdl2 curl
+git clone --recurse-submodules https://github.com/alexbeatnik/wasteland.git
+cd wasteland
+mkdir build &amp;&amp; cd build
+cmake .. &amp;&amp; make -j$(sysctl -n hw.ncpu)
+./Wasteland</pre>
         </div>
 
         <div id="win-mingw" class="platform-content">
-            <div class="code-area">pacman -S mingw-w64-x86_64-cmake mingw-w64-x86_64-SDL2 mingw-w64-x86_64-curl
-git clone https://github.com/alexbeatnik/wasteland.git
-cd wasteland && git submodule update --init --recursive
-mkdir build && cd build
+<pre>pacman -S mingw-w64-x86_64-cmake mingw-w64-x86_64-SDL2 mingw-w64-x86_64-curl
+git clone --recurse-submodules https://github.com/alexbeatnik/wasteland.git
+cd wasteland &amp;&amp; mkdir build &amp;&amp; cd build
 cmake .. -G "MinGW Makefiles"
-mingw32-make -j$(nproc)</div>
+mingw32-make -j$(nproc)</pre>
         </div>
 
         <div id="win-msvc" class="platform-content">
-            <div class="code-area">vcpkg install sdl2:x64-windows curl:x64-windows
-git clone https://github.com/alexbeatnik/wasteland.git
-cd wasteland && git submodule update --init --recursive
-mkdir build && cd build
+<pre>vcpkg install sdl2:x64-windows curl:x64-windows pthreads:x64-windows
+git clone --recurse-submodules https://github.com/alexbeatnik/wasteland.git
+cd wasteland &amp;&amp; mkdir build &amp;&amp; cd build
 cmake .. -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake
-cmake --build . --config Release</div>
+cmake --build . --config Release</pre>
         </div>
     </section>
 
+    <!-- ============== PREBUILT ============== -->
     <section>
-        <h3>--- PREBUILT BINARIES ---</h3>
-        <p>GitHub Actions builds and releases for all platforms on every tag. Push a tag to trigger:</p>
-        <div class="code-area">git tag v0.4
-git push origin v0.4</div>
+        <h2>PREBUILT BINARIES</h2>
+        <p>GitHub Actions builds matrices for every tag. Push <code>v0.x</code> → all four artifacts publish to the releases page automatically:</p>
         <table class="dl-table">
             <thead>
-                <tr><th>Platform</th><th>Artifact</th></tr>
+                <tr><th>Platform</th><th>Architecture</th><th>Artifact</th></tr>
             </thead>
             <tbody>
-                <tr><td>Linux x86_64</td><td>wasteland_0.4_amd64.deb</td></tr>
-                <tr><td>Linux ARM64</td><td>wasteland_0.4_arm64.deb</td></tr>
-                <tr><td>macOS (universal)</td><td>Wasteland-macos.dmg</td></tr>
-                <tr><td>Windows</td><td>Wasteland-windows.exe</td></tr>
+                <tr><td>Linux (Debian / Ubuntu)</td><td>x86_64</td><td><code>wasteland_0.5_amd64.deb</code></td></tr>
+                <tr><td>Linux (Raspberry Pi 4/5, Ampere, …)</td><td>arm64</td><td><code>wasteland_0.5_arm64.deb</code></td></tr>
+                <tr><td>macOS (universal binary)</td><td>arm64 + x86_64</td><td><code>Wasteland-macos.dmg</code></td></tr>
+                <tr><td>Windows 10/11</td><td>x86_64</td><td><code>Wasteland-windows.exe</code></td></tr>
             </tbody>
         </table>
     </section>
 
+    <!-- ============== SECURITY ============== -->
     <section>
-        <h3>--- PROJECT STRUCTURE ---</h3>
-        <div class="code-area">Wasteland/
-├── CMakeLists.txt          # Cross-platform build + CTest
-├── build.sh                # One-shot build script (Linux)
-├── README.md / CLAUDE.md   # Docs & AI assistant context
-├── AGENTS.md / SKILLS.md   # Agent conventions & skill reference
-├── src/
-│   ├── main.c              # Entry point, SDL loop, updater launcher
-│   ├── ui.c / ui.h         # Nuklear layout, amber theme, chat boxes
-│   ├── inference.c / .h    # llama.cpp wrapper, title generation, sampler
-│   ├── network.c / .h      # libcurl downloader + auto-update check
-│   ├── agent.c / agent.h   # ReAct tool loop (read/list/write/edit)
-│   └── nuklear_impl.c      # Nuklear + SDL/GL2 backend
-├── tests/
-│   ├── test_framework.h    # Minimal assertion macros
-│   ├── test_agent.c        # Parser & sandbox tests
-│   ├── test_chat_history.c # History & system-prompt tests
-│   └── test_version.c      # Semver & updater filename tests
-├── docs/
-│   └── index.html          # This page
-├── include/                # nuklear.h
-├── third_party/
-│   └── llama.cpp/          # Git submodule
-└── models/                 # Local .gguf storage</div>
-    </section>
-
-    <section>
-        <h3>--- SECURITY MODEL ---</h3>
+        <h2>SECURITY MODEL</h2>
         <ol>
-            <li>App boots in offline-capable state with the network reachable so you can download models.</li>
-            <li>Nothing is loaded automatically. You pick a model via the UI.</li>
-            <li>When you click <strong>[ LOAD ]</strong> and the load succeeds, <code>lockdown_network()</code> runs:
+            <li>App boots with the network reachable — you need it to download models.</li>
+            <li><strong>Nothing is loaded automatically.</strong> You pick a model from the local vault.</li>
+            <li>On a successful <code>[ LOAD ]</code>, <code>lockdown_network()</code> runs:
                 <ul>
-                    <li><strong>Linux:</strong> seccomp-bpf filter kills the process on any new <code>socket(AF_INET, ...)</code>.</li>
+                    <li><strong>Linux:</strong> seccomp-bpf with <code>SCMP_ACT_KILL_PROCESS</code> on
+                        <code>socket(AF_INET|AF_INET6|AF_PACKET, …)</code>. Filters argument family
+                        only — Unix-domain sockets (X11/Wayland) keep working.</li>
                     <li><strong>macOS / Windows:</strong> no-op (platform limitation).</li>
                 </ul>
             </li>
-            <li>seccomp filters cannot be removed for the lifetime of the process. Unloading a model does not lift the lockdown — restart to download more models.</li>
-            <li>The download path is gated by <code>state-&gt;network_lockdown</code> in the UI, so the <strong>[ DOWNLOAD ]</strong> button hides the moment the lockdown is active.</li>
+            <li>seccomp filters cannot be removed for the lifetime of the process. Unloading a model
+                does <em>not</em> lift the lockdown — restart to download more.</li>
+            <li>Download / update code lives only in <code>network.c</code>. The UI hides the entire
+                HUB section the moment <code>state-&gt;network_lockdown</code> is true.</li>
         </ol>
     </section>
 
+    <!-- ============== TESTING ============== -->
     <section>
-        <h3>--- TESTING ---</h3>
-        <p>Wasteland ships with a zero-dependency C test framework. Run all suites via CTest:</p>
-        <div class="code-area">cd build
-ctest --output-on-failure</div>
-        <p>Current coverage:</p>
+        <h2>TESTING</h2>
+        <p>Zero-dependency C test framework — just macros and <code>stdio.h</code>. <strong>87 tests across 4 suites</strong>, all green on Linux / macOS / Windows CI runners. Run via CTest:</p>
+<pre>cd build
+ctest --output-on-failure</pre>
+
+        <table class="dl-table">
+            <thead><tr><th>Suite</th><th>Tests</th><th>What It Covers</th></tr></thead>
+            <tbody>
+                <tr>
+                    <td><code>test_agent</code></td>
+                    <td>35</td>
+                    <td>Tool-call parsing (incl. malformed <code>apply_edit</code>, multi-line SEARCH/REPLACE, non-tool fences, inline backticks) · sandbox path resolution · <strong>real executor round-trips</strong> against a scratch workspace (read / write / apply_edit / list_dir, ambiguous-match refusal, delete-via-empty-replace, escape-block) · system-prompt smoke test</td>
+                </tr>
+                <tr>
+                    <td><code>test_chat_history</code></td>
+                    <td>16</td>
+                    <td>Flat <code>&gt; prompt\nreply\n</code> → user/assistant splitting · CRLF (Windows) line endings · UTF-8 (Cyrillic) · <code>&gt; </code> inside reply does NOT split · trailing pending prompt discard · NULL system-prompt safety · base-then-user concatenation order</td>
+                </tr>
+                <tr>
+                    <td><code>test_version</code></td>
+                    <td>15</td>
+                    <td>Semver compare (<code>X.Y</code> vs <code>X.Y.Z</code>, optional <code>v</code> prefix, multi-digit minors so <code>0.10</code> &gt; <code>0.9</code>, empty / garbage prefix, release-tag-vs-runtime) · platform-specific update-filename matrix</td>
+                </tr>
+                <tr>
+                    <td><code>test_string_utils</code></td>
+                    <td>21</td>
+                    <td>RC4 chat cipher round-trip (ASCII, UTF-8, empty buffer, deterministic output) · HF <code>/blob/main/</code> → <code>/resolve/main/</code> URL rewrite (basic, idempotent, too-small-buffer refusal, false-substring guard) · chat-name sanitisation (punctuation, space-runs, trim, UTF-8 passthrough, 40-char cap) · <strong>tool-fence stripping</strong> (agent fences elided, plain code fences preserved, unclosed-fence tail drop, inline backticks kept, multi-fence chains)</td>
+                </tr>
+            </tbody>
+        </table>
+    </section>
+
+    <!-- ============== TECH STACK ============== -->
+    <section>
+        <h2>SYSTEM SPECS</h2>
         <ul>
-            <li><strong>test_agent</strong> — Tool-call markdown parsing + sandbox path resolution</li>
-            <li><strong>test_chat_history</strong> — Flat history → user/assistant pairs + system-prompt builder</li>
-            <li><strong>test_version</strong> — Semver comparison + platform-specific updater filenames</li>
+            <li><strong>Core engine:</strong> Pure C11 via <code>llama.h</code> (current API — no deprecated aliases)</li>
+            <li><strong>Interface:</strong> Nuklear immediate-mode GUI · SDL2 · OpenGL 2.1 compat profile</li>
+            <li><strong>Networking:</strong> libcurl easy API · gated to <code>network.c</code></li>
+            <li><strong>Security:</strong> Linux seccomp-bpf · <code>SCMP_ACT_KILL_PROCESS</code> on new IP sockets</li>
+            <li><strong>Font:</strong> Embedded DejaVu Sans Mono · Cyrillic + Geometric Shapes · DPI-aware</li>
+            <li><strong>Persistence:</strong> <code>system_prompt.txt</code> · <code>chats/*.txt</code> (RC4-obfuscated) · <code>wasteland.cfg</code> (settings)</li>
+            <li><strong>Auto-update:</strong> GitHub Releases API · platform-specific replace script · pkexec / runas / osascript elevation</li>
+            <li><strong>Build:</strong> CMake 3.16+ · cross-compiles to Windows from Linux via MinGW toolchain</li>
+            <li><strong>Tests:</strong> Zero-dependency C macros · CTest integration · CI on Linux amd64 / arm64 / macOS / Windows</li>
         </ul>
     </section>
 
-    <section>
-        <p>AWAITING DIRECTIVE<span class="cursor"></span></p>
-        <div class="btn-group">
-            <a href="https://github.com/alexbeatnik/wasteland" class="btn">[ ACCESS SOURCE CODE ]</a>
-            <a href="https://github.com/alexbeatnik/wasteland/releases" class="btn">[ DOWNLOAD BINARIES ]</a>
-        </div>
-    </section>
+    <!-- ============== FOOTER ============== -->
+    <footer>
+        <p>
+            <a href="https://github.com/alexbeatnik/wasteland">GitHub</a> ·
+            <a href="https://github.com/alexbeatnik/wasteland/releases">Releases</a> ·
+            <a href="https://github.com/alexbeatnik/wasteland/blob/main/LICENSE">License</a>
+        </p>
+        <p>WASTELAND TERMINAL · v0.5 · END OF TRANSMISSION<span class="cursor" style="display: inline-block; width: 9px; height: 1.1rem; background: var(--amber); vertical-align: middle; animation: blink 1s step-end infinite;"></span></p>
+    </footer>
+
 </div>
 
 <script>
-function showPlatform(id) {
-    document.querySelectorAll('.platform-content').forEach(el => el.classList.remove('active'));
-    document.querySelectorAll('.platform-tab').forEach(el => el.classList.remove('active'));
-    document.getElementById(id).classList.add('active');
-    event.target.classList.add('active');
-}
+    document.querySelectorAll('.platform-tab').forEach(tab => {
+        tab.addEventListener('click', () => {
+            const target = tab.dataset.target;
+            document.querySelectorAll('.platform-content').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.platform-tab').forEach(el => el.classList.remove('active'));
+            document.getElementById(target).classList.add('active');
+            tab.classList.add('active');
+        });
+    });
 </script>
 
 </body>

@@ -188,6 +188,10 @@ static int parse_chat_history(const char *history,
         const char *nl = memchr(p, '\n', (size_t)(end - p));
         const char *line_end = nl ? nl : end;
         size_t ulen = (size_t)(line_end - user_start);
+        /* Strip trailing CR so chat files saved on Windows (CRLF) parse the
+         * same as POSIX (LF). Assistant content does the same below. */
+        while (ulen > 0 && (user_start[ulen - 1] == '\r' ||
+                            user_start[ulen - 1] == '\n')) ulen--;
 
         char *uc = (char *)malloc(ulen + 1);
         if (!uc) break;

@@ -1,4 +1,4 @@
-# CLAUDE.md — Wasteland v0.4
+# CLAUDE.md — Wasteland v0.5
 
 ## Agent Context
 
@@ -183,6 +183,55 @@ The Linux lockdown is **deliberately narrow**: only `socket(AF_INET, …)`, `soc
 2. Gating `socket()` is sufficient: no new IP fd can be opened.
 3. Already-open file descriptors keep working unchanged.
 
+## Auto-Update
+
+The auto-update flow is split across three threads + a generated shell/batch script:
+
+1. **Startup probe (`update_check_thread` in `main.c`):** detached pthread launched **before** any model load (so seccomp lockdown can't kill it). Calls `network_check_update()` which hits `https://api.github.com/repos/alexbeatnik/wasteland/releases/latest` with a 5 s timeout. Parses `tag_name` via simple `strstr(...,"\"tag_name\":\"v")`. If `version_newer_than(latest, WASTELAND_VERSION)` returns true, writes `latest` into `state->update_version`. UI polls this every frame and renders an orange banner under the header when non-empty.
+2. **Download (`update_download_thread` in `main.c`):** spawned when the user clicks `[ DOWNLOAD UPDATE ]`. Computes the platform-appropriate artifact name via `build_update_filename()` (`Wasteland-windows.exe`, `Wasteland-macos.dmg`, `wasteland_<ver>_amd64.deb`, `wasteland_<ver>_arm64.deb`) and downloads it into `downloads/<file>` via `network_download_model`. Sets `state->update_state` to 1 on success, 2 on failure.
+3. **Restart (`launch_updater` in `main.c`):** when the user clicks `[ RESTART TO UPDATE ]`, this generates a small shell script (POSIX) or batch file (Windows) into `/tmp` / `%TEMP%`, then exits the app. The script polls until our PID is gone, then replaces the binary in place — using `pkexec`/`osascript`/`runas` to elevate when the install path isn't user-writable. After the install it relaunches the new binary and self-deletes.
+
+### Linux install path uses `dpkg`, NOT `cp`
+
+The Linux artefact is a Debian package archive (`wasteland_<ver>_<arch>.deb`), **not** an ELF binary. The naïve `cp $NEW $OLD` would replace the running executable with a tarball and brick the install. The script must invoke `dpkg -i $NEW` (with elevation), which extracts the .deb and lays the binary down at `/usr/bin/Wasteland` via the package manager. The script tries `pkexec` first (PolicyKit, ships on Ubuntu/Debian/Mint with a desktop), falls back to `gksudo` / `kdesu`, and surfaces a `notify-send` / `zenity` / `xmessage` notification with the manual install command on failure. The `.deb` is **kept** on disk if install failed, so the user can follow the notification's `sudo dpkg -i …` instruction.
+
+### Absolute-path resolution before script generation
+
+`pkexec` resets CWD to `/root`, `osascript with administrator privileges` to `/`, Windows ShellExecute to `%TEMP%` — none of them inherit the parent's CWD. A relative `downloads/wasteland_0.6_amd64.deb` passed verbatim into the generated script would not resolve. `launch_updater()` always pre-resolves `new_file` to an absolute path before writing the script: POSIX uses `realpath()` with a `getcwd()/relative` fallback; Windows uses `_fullpath()`. If you ever bypass this layer (e.g. a hot-patch that calls the script directly), make sure the path you pass in is already absolute.
+
+### Filename matrix (`build_update_filename`)
+
+| Platform | Artifact |
+|---|---|
+| Windows | `Wasteland-windows.exe` |
+| macOS | `Wasteland-macos.dmg` |
+| Linux x86_64 | `wasteland_<ver>_amd64.deb` |
+| Linux aarch64 | `wasteland_<ver>_arm64.deb` |
+
+`version_newer_than` accepts `X.Y` or `X.Y.Z` with optional leading `v`. Both the API tag (`v0.5`) and `WASTELAND_VERSION` (`0.5`) are normalised by skipping non-digit prefix chars before `sscanf`.
+
+## Chat Creation Lifecycle (lazy)
+
+`[ NEW CHAT ]` does **not** create an entry on disk. It saves the active chat (if any), clears `state->chat_history`, and sets `state->selected_chat = -1`. The chat is materialised lazily inside the prompt-submit handler when the user actually types something:
+
+1. User types and submits the first prompt.
+2. The submit handler observes `selected_chat == -1`, calls `generate_chat_name_from_prompt(input, ...)` which produces a filename like `Прочитай рідмі і скажи.txt` (word-boundary trim, UTF-8-safe, 60-byte cap).
+3. A new entry is appended to `state->chats[]`, `selected_chat` is set, an empty file is created, and `inference_set_needs_title(ictx, 1)` schedules the model-generated 3–5 word title pass after the assistant reply.
+
+Result: there is no permanent "New Chat" filename. Hitting `[ NEW CHAT ]` and then immediately switching to another chat creates nothing — no orphan files. The same code path handles both "first ever message" (selected_chat starts at -1) and "user clicked NEW CHAT" (selected_chat reset to -1).
+
+`generate_chat_name_from_prompt` cap is **60 bytes** (≈ 30 Cyrillic chars or 60 ASCII), with two safety passes: (a) if cap was hit, scan back to the last space within the trailing third of the buffer to avoid mid-word cuts; (b) `trim_partial_utf8()` drops any incomplete UTF-8 continuation/lead bytes left at the tail. Without (b), a Cyrillic char split across the cap would persist on disk as an invalid sequence and break some filesystems on import/export.
+
+## Tool-Fence Stripping in Chat View
+
+In agent mode the model emits markdown fences (` ```read_file `, ` ```list_dir `, ` ```write_file `, ` ```apply_edit `) which the worker also annotates with a `[ TOOL: name | path ]` line. The fence body adds 3–6 visual lines per call to the chat panel for information already conveyed by the TOOL marker.
+
+`strip_tool_fences(in, out, out_size)` in `ui.c` is a per-frame view-only transform that copies `raw_hist` → `local_hist`, eliding any line-anchored ` ``` ` fence whose header matches one of the four agent tool names. Everything else (prose, `-- THINK --` markers, `\n> ` user prompts, `[ TOOL: ... ]` markers) is preserved byte-for-byte. The chat file on disk is untouched — agent re-parsing on the next turn still sees the raw fences.
+
+Mid-stream behaviour: when the model has emitted the opening fence but no closing yet, the entire tail is skipped — the user sees the prose before the fence, then nothing new until the closing ` ``` ` is emitted, at which point the next visible byte is the `[ TOOL: ... ]` line. This is intentional — it spares the user a typewriter view of a fence body they're going to lose anyway.
+
+`is_tool_fence_header(p, hlen)` is the canonical recogniser; it matches exactly the four tool names with optional trailing spaces / `\r`. Plain code fences (` ```c `, ` ```json `, ` ```python `) pass through unchanged.
+
 ## Auto-Generated Chat Titles
 
 When the user sends the first message in a newly-created chat, the UI sets `inference_set_needs_title(ictx, 1)`. After the normal assistant reply finishes, the worker runs a short secondary inference pass (max 20 tokens) with a dedicated title-generation prompt:
@@ -202,6 +251,32 @@ User: Give this conversation a short 3-5 word title. Output ONLY the title text,
 - **Multi-turn history in agent mode:** the worker now calls `parse_chat_history` in the agent branch too, capped at `AGENT_HISTORY_SLOTS = 8` messages (4 turns) to leave room for tool-call turns. `AGENT_MAX_MSGS = 30` (was 23).
 - **Tool output in chat UI:** `read_file` and `list_dir` results are no longer echoed to the output buffer. The `[ TOOL: read_file | path ]` header is still emitted so the user can see what the model is doing. The file contents go only to `result_out` (the model's next-turn context).
 
+## Agent Pending-Approval Panel — Diff Palette
+
+When a `write_file` or `apply_edit` is awaiting user approval, `ui.c` renders a top-of-right-panel preview with a deliberate red/green diff palette mirroring [docs/index.html](docs/index.html)'s agent-proposal block:
+
+- **`rej_c = #FF6020`** — orange-red for SEARCH (delete side) and the `[ REJECT ]` button.
+- **`add_c = #AACC00`** — yellow-green for REPLACE (add side), `write_file` body, and the `[ APPLY ]` button.
+- **`warn = #FFB000`** — amber heading colour for `▼ AGENT PROPOSAL — REVIEW` and the `// SEARCH:` / `// REPLACE WITH:` labels.
+
+### Why `nk_edit_string`, not `nk_group` + `nk_label_colored_wrap`
+
+The first iteration tried bordered `nk_group` containers with `nk_label_colored_wrap` text inside. Result: the boxes rendered with the right colours but the text was invisible — `nk_label_colored_wrap` does its own layout allocation that doesn't compose with a fixed-height parent group (the wrapped lines were being clipped past the group's reserved height). The chat-history panel doesn't hit this because it uses `nk_edit_string` with `NK_EDIT_BOX | NK_EDIT_MULTILINE` and pre-computed row heights.
+
+Current implementation: each diff block IS an `nk_edit_string(NK_EDIT_BOX | NK_EDIT_MULTILINE, …)` writing into a static buffer that is repopulated from `p_search` / `p_replace` / `p_content` every frame (so any stray edits are clobbered immediately — read-only-ish). The buffer's text + border + cursor colours are tinted via a snapshot-and-restore on `nk->style.edit`:
+
+```c
+struct nk_style_edit saved_edit = nk->style.edit;
+nk->style.edit.border_color = rej_c;
+nk->style.edit.text_normal  = rej_c;
+/* ... render edit_string ... */
+nk->style.edit = saved_edit;
+```
+
+The action buttons use the same snapshot-and-restore pattern on `nk->style.button` (border / text / hover / active) per click target, so only those two buttons carry the diff palette — the global amber theme stays untouched. Hover state inverts text → black, background → tint, so buttons feel "armed" before the click commits.
+
+`pending_panel_h` is `230` for `write_file` (one green 130 px block) and `290` for `apply_edit` (two 80 px blocks: red SEARCH + green REPLACE). Chat area height is reduced by this amount so the input field and CTX bar never get pushed offscreen.
+
 ## Font & DPI
 
 - **Embedded font:** `src/font_dejavu.h` is a generated C byte array of DejaVu Sans Mono (343 KB). It is always available — no file-system lookup required. Covers Basic Latin, Cyrillic (Ukrainian U+0400–U+04FF), and Geometric Shapes (▶ ■ U+25A0–U+25FF).
@@ -216,9 +291,19 @@ User: Give this conversation a short 3-5 word title. Output ONLY the title text,
 - Tests live in `tests/` and use a **zero-dependency** macro framework (`tests/test_framework.h`). No external test library is required.
 - `ctest --output-on-failure` (or `make test`) runs all suites after the main build.
 - To test `static` functions without exposing them in public headers, use `#ifdef TESTING` to drop the `static` keyword and provide a forward-declaration header for the test file (e.g. `inference_test.h`).
-- Suites that depend on the filesystem (sandbox path resolution) must create their scratch directories inside `run_*` before calling `RUN_TEST`.
-- Suites that depend on SDL / llama.cpp should **not** link the whole application binary. Instead, copy the pure functions into a self-contained `tests/test_*.c` file (see `tests/test_chat_history.c` and `tests/test_version.c`).
+- Suites that depend on the filesystem (sandbox path resolution, agent executors, list_dir) must create their scratch directories inside `run_<suite>` *before* the first `RUN_TEST` call. The agent suite uses two separate trees (`wst_test_ws/` for resolver tests, `wst_test_exec_ws/` for read/write/edit/list executors) so failure artefacts can be inspected without polluting the resolver fixtures.
+- Suites that depend on SDL / llama.cpp / curl **must not** link the whole application binary. Instead, copy the pure functions into a self-contained `tests/test_*.c` file (see `tests/test_chat_history.c`, `tests/test_version.c`, `tests/test_string_utils.c`). Each copied block carries an "origin: src/*.c" reference so the duplicate can be hand-synced when the source is touched.
+- The agent suite **does** link `src/agent.c` directly (`add_executable(test_agent tests/test_agent.c src/agent.c)`) because it has no SDL / llama.cpp dependency — that lets us exercise the real `agent_exec_*` executors end-to-end against a scratch workspace.
 - All tests run automatically in CI via `cmake --build build && ctest --output-on-failure`.
+
+### Suite manifest (87 tests as of v0.5)
+
+| Suite | Tests | Targets |
+|---|---|---|
+| `test_agent` | 35 | `agent_parse_calls` (16 cases inc. malformed `apply_edit`, multi-line blocks, non-tool fences, inline backticks), `agent_resolve_path` (5 sandbox cases), `agent_exec_read_file/write_file/apply_edit/list_dir` (13 round-trip + escape-block cases), `agent_system_prompt` smoke test |
+| `test_chat_history` | 16 | `parse_chat_history` (LF, CRLF, UTF-8, leading newlines, trailing pending prompt, `> ` inside reply, three-turn pending-last) · `build_system_prompt` (with / without / NULL user prompt, base-then-user order) |
+| `test_version` | 15 | `version_newer_than` (X.Y vs X.Y.Z, `v` prefix mix, multi-digit minor, empty / garbage prefix, release-tag-vs-runtime) · `build_update_filename` (current platform + version-difference matrix) |
+| `test_string_utils` | 21 | RC4 chat cipher round-trip (ASCII, UTF-8, empty, determinism) · HF URL rewrite (`/blob/main/` → `/resolve/main/`, already-resolve, too-small-buffer, false-substring) · chat-name sanitisation (punctuation, space runs, trim, UTF-8 passthrough, 40-char cap) · **`strip_tool_fences`** (read_file / list_dir / apply_edit elided, plain code fences preserved, unclosed-fence tail dropped, inline backticks kept, multi-fence chains) |
 
 ## Build Notes
 
@@ -228,7 +313,7 @@ User: Give this conversation a short 3-5 word title. Output ONLY the title text,
 - llama.cpp lives in `third_party/llama.cpp/` (with a `vendor/llama.cpp` symlink) and is added as a CMake subdirectory with `LLAMA_BUILD_EXAMPLES=OFF`.
 - `seccomp` is optional (Linux only); CMake skips it gracefully on other platforms.
 - The application does **not** auto-load any model on boot.
-- Package version: **0.4** (`CPACK_PACKAGE_VERSION` in `CMakeLists.txt`).
+- Package version: **0.5** (`CPACK_PACKAGE_VERSION` in `CMakeLists.txt`).
 - MSVC: `nuklear_impl.c` is compiled with `/wd4701`; `ui.c` with `/wd5287`; `_CRT_SECURE_NO_WARNINGS` applied globally for MSVC builds.
 - Linux `.deb` architecture is detected at CMake configure time from `CMAKE_SYSTEM_PROCESSOR` (`x86_64` → `amd64`, `aarch64` → `arm64`). CI builds both via `ubuntu-22.04` and `ubuntu-22.04-arm` runners.
 
