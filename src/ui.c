@@ -1616,28 +1616,26 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
             }
             state->chat_last_len = chat_len;
 
-            /* Chat area: right-panel minus header/footer controls.
-             * Spacer(6)+label(18)+input(34)+status(18) ≈ 80px below the chat,
-             * plus Nuklear group padding (~20px) → reserve 200px total.
-             * Subtract pending-approval banner if present.
+            /* Right-panel split:
+             *   chat_h        — top scroll group (chat history sections)
+             *   input_h       — multi-line prompt input
+             *   166 px const  — CTX bar(18) + spacer(6) + ">" label(18) +
+             *                   status row(18) + group padding (~20)
+             *                   + outer reservation (~86 — header etc.)
              *
-             * When the user has expanded the prompt input (state->input_expanded),
-             * the chat group shrinks to a 60 px sliver so the multi-line
-             * input box can fill the rest of the right panel. The 200 px
-             * reservation needs to grow accordingly: input box height goes
-             * from 34 → (height - 220 - pending_panel_h). */
+             * Collapsed default is 100 px (≈5 visible rows of 18 px) so the
+             * user can compose a short paragraph without immediately needing
+             * to expand. Anything taller scrolls inside the box.
+             * Expanded mode: input fills the panel, chat shrinks to a 60 px
+             * sliver so the last assistant reply stays visible while
+             * composing the next prompt. */
             int input_h = state->input_expanded
-                            ? (height - 220 - pending_panel_h)
-                            : 34;
+                            ? (height - 226 - pending_panel_h)
+                            : 100;
             if (input_h < 80) input_h = 80;
 
-            int chat_h;
-            if (state->input_expanded) {
-                chat_h = 60; /* sliver so the user can still see the last reply */
-            } else {
-                chat_h = height - 200 - pending_panel_h;
-                if (chat_h < 60) chat_h = 60;
-            }
+            int chat_h = height - 166 - input_h - pending_panel_h;
+            if (chat_h < 60) chat_h = 60;
 
             {
                 /* Two-tier rendering for "thinking" highlighting:
@@ -1834,11 +1832,15 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
              * prompt and scroll within the box; the expand toggle blows
              * the input up to fill the right panel for long compositions.
              *
-             * Glyphs (UTF-8 byte sequences so the source file stays ASCII):
+             * Glyphs (UTF-8 byte sequences so the source file stays ASCII).
+             * All four are inside the Geometric Shapes block U+25A0..U+25FF
+             * which the embedded DejaVu Sans Mono atlas explicitly bakes —
+             * earlier ⤡ / ⤢ from Supplemental Arrows-B (U+2900+) rendered
+             * as `?` boxes because that range isn't in the font config:
              *   \xe2\x96\xb6 = U+25B6 BLACK RIGHT-POINTING TRIANGLE (▶) — send
              *   \xe2\x96\xa0 = U+25A0 BLACK SQUARE                  (■) — stop
-             *   \xe2\xa4\xa1 = U+2921 NORTH WEST AND SOUTH EAST ARROW (⤡) — expand
-             *   \xe2\xa4\xa2 = U+2922 NORTH EAST AND SOUTH WEST ARROW (⤢) — collapse
+             *   \xe2\x96\xb2 = U+25B2 BLACK UP-POINTING TRIANGLE    (▲) — expand
+             *   \xe2\x96\xbc = U+25BC BLACK DOWN-POINTING TRIANGLE  (▼) — collapse
              *
              * Submit policy: Enter inserts a newline (default NK_EDIT_BOX
              * behaviour) so multi-line composition Just Works. Click the
@@ -1859,8 +1861,8 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
 
             nk_layout_row_push(nk, 0.08f);
             if (nk_button_label(nk, state->input_expanded
-                                    ? "\xe2\xa4\xa2"
-                                    : "\xe2\xa4\xa1")) {
+                                    ? "\xe2\x96\xbc"   /* ▼ collapse */
+                                    : "\xe2\x96\xb2")) /* ▲ expand */ {
                 state->input_expanded = !state->input_expanded;
             }
 

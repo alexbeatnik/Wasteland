@@ -254,12 +254,18 @@ The bottom-of-right-panel prompt input is `nk_edit_string(NK_EDIT_BOX | NK_EDIT_
 
 ### `state->input_expanded` toggle
 
-A small `⤡` / `⤢` button next to `▶` flips the input between two layouts:
+A small `▲` / `▼` button next to `▶` flips the input between two layouts:
 
-- **Collapsed (default):** input height = `34` px, chat scroll group fills the rest of the right panel (`height - 200 - pending_panel_h`).
-- **Expanded:** input grows to `height - 220 - pending_panel_h` (with `80` px floor), chat shrinks to a `60` px sliver. Useful for composing or pasting long prompts where you need to see the whole thing before sending.
+- **Collapsed (default):** `input_h = 100` px (~5 visible rows of 18 px). Short paragraphs compose without needing to expand; longer content scrolls inside the box. Chat scroll group takes the rest of the right panel.
+- **Expanded:** `input_h = height - 226 - pending_panel_h` (with 80 px floor). Chat shrinks to a 60 px sliver so the last assistant reply stays visible while composing the follow-up.
 
-The 60 px chat sliver is intentional — keeps the last assistant reply visible so you can refer to it while composing the follow-up.
+Single formula covers both modes: `chat_h = height - 166 - input_h - pending_panel_h` (with 60 px floor). The 166 px constant accounts for the CTX bar, ">" label, status row, and Nuklear group padding/header.
+
+### Glyph compatibility — only Geometric Shapes are safe
+
+`nk_sdl_unicode_ranges[]` in `nuklear_sdl_gl2.h` bakes only Basic Latin, Latin-1 Supplement, Cyrillic, a General Punctuation subset, and Geometric Shapes (`0x25A0..0x25FF`). Any other range — Arrows (U+2190..U+21FF), Supplemental Arrows-A/B, Mathematical Operators, Miscellaneous Symbols — renders as a `?` box.
+
+The expand/collapse button initially used U+2921 (`⤡`) / U+2922 (`⤢`) from Supplemental Arrows-B and shipped as `?` boxes. Replaced with U+25B2 (`▲`) / U+25BC (`▼`) from Geometric Shapes — both confirmed inside the baked range. When picking new icon glyphs, stay inside `0x25A0..0x25FF` or extend the font config (atlas size cost: ~1 KB per 64 glyphs).
 
 ### Storage format: consecutive `> ` lines
 
