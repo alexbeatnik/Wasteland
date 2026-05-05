@@ -42,6 +42,8 @@
  * ============================================================================ */
 
 #include "agent.h"
+#include "fs_sandbox.h"
+#include "agent_protocol.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -49,6 +51,105 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <limits.h>
+
+#ifdef __linux__
+#  include <unistd.h>
+#  include <sys/socket.h>
+#  include <spawn.h>
+#  include <signal.h>
+#  include <sys/wait.h>
+#endif
+
+/* ---------------------------------------------------------------------------
+ * Optional Agent Executor subprocess (IPC backend)
+ * --------------------------------------------------------------------------- */
+static char g_executor_path[512] = "";
+static int  g_executor_fd = -1;
+#ifdef __linux__
+static pid_t g_executor_pid = -1;
+#endif
+
+void agent_configure_executor_path(const char *path)
+{
+    if (!path) {
+        g_executor_path[0] = '\0';
+        return;
+    }
+    snprintf(g_executor_path, sizeof(g_executor_path), "%s", path);
+}
+
+void agent_executor_shutdown(void)
+{
+    if (g_executor_fd >= 0) {
+        /* Graceful shutdown request. */
+        agent_ipc_send_request(g_executor_fd, AGENT_IPC_TOOL_SHUTDOWN, "", NULL, 0);
+        close(g_executor_fd);
+        g_executor_fd = -1;
+    }
+#  ifdef __linux__
+    if (g_executor_pid > 0) {
+        waitpid(g_executor_pid, NULL, WNOHANG);
+        g_executor_pid = -1;
+    }
+#  endif
+}
+
+#ifdef __linux__
+static int ensure_executor(const char *workspace)
+{
+    if (g_executor_fd >= 0) return 0;
+    if (!g_executor_path[0]) return -1;
+
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv) != 0)
+        return -1;
+
+    char *argv[] = { (char *)g_executor_path, (char *)workspace, NULL };
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_adddup2(&actions, sv[1], STDIN_FILENO);
+    posix_spawn_file_actions_adddup2(&actions, sv[1], STDOUT_FILENO);
+    posix_spawn_file_actions_addclose(&actions, sv[0]);
+    posix_spawn_file_actions_addclose(&actions, sv[1]);
+
+    extern char **environ;
+    pid_t pid;
+    if (posix_spawn(&pid, g_executor_path, &actions, NULL, argv, environ) != 0) {
+        posix_spawn_file_actions_destroy(&actions);
+        close(sv[0]);
+        close(sv[1]);
+        return -1;
+    }
+    posix_spawn_file_actions_destroy(&actions);
+    close(sv[1]);
+    g_executor_fd = sv[0];
+    g_executor_pid = pid;
+    return 0;
+}
+
+static int ipc_exec(const char *workspace, agent_ipc_tool_t tool,
+                    const char *path,
+                    const uint8_t *data, uint32_t data_len,
+                    char *out, size_t out_size)
+{
+    if (ensure_executor(workspace) != 0) return -1;
+    if (agent_ipc_send_request(g_executor_fd, tool, path, data, data_len) != 0)
+        return -1;
+    int32_t status;
+    uint8_t resp[AGENT_IPC_MAX_DATA + 1];
+    uint32_t resp_len;
+    if (agent_ipc_recv_response(g_executor_fd, &status, resp, &resp_len) != 0)
+        return -1;
+    size_t copy = resp_len < out_size - 1 ? resp_len : out_size - 1;
+    memcpy(out, resp, copy);
+    out[copy] = '\0';
+    return status == 0 ? 0 : -1;
+}
+#endif
+
+/* ---------------------------------------------------------------------------
+ * Tool executors
+ * --------------------------------------------------------------------------- */
 
 #ifdef _WIN32
 #  include <windows.h>
@@ -413,198 +514,88 @@ void agent_free_calls(agent_call_t *calls, int count)
 int agent_exec_read_file(const char *workspace, const char *path,
                          char *out, size_t out_size)
 {
-    if (!out || out_size == 0) return -1;
-    char real[PATH_MAX];
-    if (agent_resolve_path(workspace, path, real, sizeof(real)) != 0) {
-        snprintf(out, out_size, "ERROR: path '%s' is outside workspace", path);
+#ifdef __linux__
+    if (g_executor_path[0]) {
+        return ipc_exec(workspace, AGENT_IPC_TOOL_READ_FILE, path,
+                        NULL, 0, out, out_size);
+    }
+#endif
+    if (fs_sandbox_set_workspace(workspace) != 0) {
+        snprintf(out, out_size, "ERROR: invalid workspace '%s'", workspace);
         return -1;
     }
-    FILE *f = fopen(real, "rb");
-    if (!f) {
-        snprintf(out, out_size, "ERROR: cannot open '%s' (%s)", path, strerror(errno));
-        return -1;
-    }
-    size_t n = fread(out, 1, out_size - 1, f);
-    int truncated = !feof(f);
-    fclose(f);
-    out[n] = '\0';
-    if (truncated && out_size > 64) {
-        const char *suffix = "\n... [truncated, file too large] ...";
-        size_t slen = strlen(suffix);
-        if (n + slen < out_size) {
-            memcpy(out + n, suffix, slen);
-            out[n + slen] = '\0';
-        }
-    }
-    return 0;
+    return fs_sandbox_read_file(path, out, out_size);
 }
 
 int agent_exec_list_dir(const char *workspace, const char *path,
                         char *out, size_t out_size)
 {
-    if (!out || out_size == 0) return -1;
-    char real[PATH_MAX];
-    if (agent_resolve_path(workspace, path, real, sizeof(real)) != 0) {
-        snprintf(out, out_size, "ERROR: path '%s' is outside workspace", path);
-        return -1;
+#ifdef __linux__
+    if (g_executor_path[0]) {
+        return ipc_exec(workspace, AGENT_IPC_TOOL_LIST_DIR, path,
+                        NULL, 0, out, out_size);
     }
-    out[0] = '\0';
-    size_t off = 0;
-#ifdef _WIN32
-    char pat[PATH_MAX];
-    snprintf(pat, sizeof(pat), "%s\\*", real);
-    WIN32_FIND_DATAA fd;
-    HANDLE h = FindFirstFileA(pat, &fd);
-    if (h == INVALID_HANDLE_VALUE) {
-        snprintf(out, out_size, "ERROR: cannot list '%s'", path);
-        return -1;
-    }
-    do {
-        if (fd.cFileName[0] == '.' && (fd.cFileName[1] == '\0' ||
-            (fd.cFileName[1] == '.' && fd.cFileName[2] == '\0'))) continue;
-        const char *suffix = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? "/" : "";
-        int wrote = snprintf(out + off, out_size - off, "%s%s\n",
-                             fd.cFileName, suffix);
-        if (wrote < 0 || (size_t)wrote >= out_size - off) break;
-        off += (size_t)wrote;
-    } while (FindNextFileA(h, &fd));
-    FindClose(h);
-#else
-    DIR *d = opendir(real);
-    if (!d) {
-        snprintf(out, out_size, "ERROR: cannot list '%s' (%s)", path, strerror(errno));
-        return -1;
-    }
-    struct dirent *ent;
-    while ((ent = readdir(d)) != NULL) {
-        if (ent->d_name[0] == '.' && (ent->d_name[1] == '\0' ||
-            (ent->d_name[1] == '.' && ent->d_name[2] == '\0'))) continue;
-        struct stat st;
-        /* +258 = max d_name (255) + '/' + '\0' to placate gcc's
-         * format-truncation warning when real itself is PATH_MAX-sized. */
-        char full[PATH_MAX + 258];
-        snprintf(full, sizeof(full), "%s/%s", real, ent->d_name);
-        const char *suffix = "";
-        if (stat(full, &st) == 0 && S_ISDIR(st.st_mode)) suffix = "/";
-        int wrote = snprintf(out + off, out_size - off, "%s%s\n",
-                             ent->d_name, suffix);
-        if (wrote < 0 || (size_t)wrote >= out_size - off) break;
-        off += (size_t)wrote;
-    }
-    closedir(d);
 #endif
-    if (off == 0) snprintf(out, out_size, "(empty directory)\n");
-    return 0;
+    if (fs_sandbox_set_workspace(workspace) != 0) {
+        snprintf(out, out_size, "ERROR: invalid workspace '%s'", workspace);
+        return -1;
+    }
+    return fs_sandbox_list_dir(path, out, out_size);
 }
 
 int agent_exec_write_file(const char *workspace, const char *path,
                           const char *content,
                           char *err_out, size_t err_size)
 {
-    char real[PATH_MAX];
-    if (agent_resolve_path(workspace, path, real, sizeof(real)) != 0) {
+#ifdef __linux__
+    if (g_executor_path[0]) {
+        uint32_t data_len = content ? (uint32_t)strlen(content) : 0;
+        int rc = ipc_exec(workspace, AGENT_IPC_TOOL_WRITE_FILE, path,
+                          (const uint8_t *)content, data_len,
+                          err_out, err_size);
+        return rc;
+    }
+#endif
+    if (fs_sandbox_set_workspace(workspace) != 0) {
         if (err_out) snprintf(err_out, err_size,
-                              "path '%s' is outside workspace", path);
+                              "invalid workspace '%s'", workspace);
         return -1;
     }
-    FILE *f = fopen(real, "wb");
-    if (!f) {
-        if (err_out) snprintf(err_out, err_size,
-                              "cannot open '%s' for writing (%s)",
-                              path, strerror(errno));
-        return -1;
-    }
-    size_t clen = content ? strlen(content) : 0;
-    size_t w    = fwrite(content, 1, clen, f);
-    fclose(f);
-    if (w != clen) {
-        if (err_out) snprintf(err_out, err_size,
-                              "short write to '%s' (%zu/%zu)", path, w, clen);
-        return -1;
-    }
-    return 0;
+    return fs_sandbox_write_file(path, content, err_out, err_size);
 }
 
 int agent_exec_apply_edit(const char *workspace, const char *path,
                           const char *search, const char *replace,
                           char *err_out, size_t err_size)
 {
-    if (!search || !*search) {
-        if (err_out) snprintf(err_out, err_size, "empty SEARCH block");
-        return -1;
+#ifdef __linux__
+    if (g_executor_path[0]) {
+        /* Pack search\0replace into one data buffer. */
+        size_t slen = search ? strlen(search) : 0;
+        size_t rlen = replace ? strlen(replace) : 0;
+        uint8_t *data = NULL;
+        uint32_t data_len = 0;
+        if (slen + rlen + 1 <= AGENT_IPC_MAX_DATA) {
+            data = (uint8_t *)malloc(slen + rlen + 2);
+            if (data) {
+                memcpy(data, search, slen);
+                data[slen] = '\0';
+                memcpy(data + slen + 1, replace, rlen);
+                data_len = (uint32_t)(slen + rlen + 1);
+            }
+        }
+        int rc = ipc_exec(workspace, AGENT_IPC_TOOL_APPLY_EDIT, path,
+                          data, data_len, err_out, err_size);
+        free(data);
+        return rc;
     }
-    char real[PATH_MAX];
-    if (agent_resolve_path(workspace, path, real, sizeof(real)) != 0) {
+#endif
+    if (fs_sandbox_set_workspace(workspace) != 0) {
         if (err_out) snprintf(err_out, err_size,
-                              "path '%s' is outside workspace", path);
+                              "invalid workspace '%s'", workspace);
         return -1;
     }
-
-    FILE *f = fopen(real, "rb");
-    if (!f) {
-        if (err_out) snprintf(err_out, err_size,
-                              "cannot open '%s' (%s)", path, strerror(errno));
-        return -1;
-    }
-    fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (sz < 0) { fclose(f); return -1; }
-    char *buf = (char *)malloc((size_t)sz + 1);
-    if (!buf) { fclose(f); return -1; }
-    size_t rd = fread(buf, 1, (size_t)sz, f);
-    fclose(f);
-    buf[rd] = '\0';
-
-    /* Find the search target; refuse if it appears 0 or 2+ times so the
-     * edit is unambiguous (Aider convention). */
-    char *first  = strstr(buf, search);
-    if (!first) {
-        free(buf);
-        if (err_out) snprintf(err_out, err_size,
-                              "SEARCH block not found in '%s'", path);
-        return -1;
-    }
-    char *second = strstr(first + 1, search);
-    if (second) {
-        free(buf);
-        if (err_out) snprintf(err_out, err_size,
-                              "SEARCH block matches multiple times in '%s'; "
-                              "narrow it down with more context", path);
-        return -1;
-    }
-
-    size_t slen = strlen(search);
-    size_t rlen = replace ? strlen(replace) : 0;
-    size_t prefix_len = (size_t)(first - buf);
-    size_t suffix_len = rd - prefix_len - slen;
-    size_t new_len    = prefix_len + rlen + suffix_len;
-
-    char *out_buf = (char *)malloc(new_len + 1);
-    if (!out_buf) { free(buf); return -1; }
-    memcpy(out_buf,                              buf,                      prefix_len);
-    if (replace) memcpy(out_buf + prefix_len,    replace,                  rlen);
-    memcpy(out_buf + prefix_len + rlen,          buf + prefix_len + slen,  suffix_len);
-    out_buf[new_len] = '\0';
-    free(buf);
-
-    f = fopen(real, "wb");
-    if (!f) {
-        free(out_buf);
-        if (err_out) snprintf(err_out, err_size,
-                              "cannot reopen '%s' for write (%s)",
-                              path, strerror(errno));
-        return -1;
-    }
-    size_t w = fwrite(out_buf, 1, new_len, f);
-    fclose(f);
-    free(out_buf);
-    if (w != new_len) {
-        if (err_out) snprintf(err_out, err_size,
-                              "short write applying edit to '%s'", path);
-        return -1;
-    }
-    return 0;
+    return fs_sandbox_apply_edit(path, search, replace, err_out, err_size);
 }
 
 /* ---------------------------------------------------------------------------

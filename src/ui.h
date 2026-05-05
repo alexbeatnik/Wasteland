@@ -28,7 +28,7 @@
 #define WASTELAND_MAX_CHATS        64
 #define WASTELAND_CHAT_NAME_LEN    256
 
-#define WASTELAND_VERSION          "0.6"
+#define WASTELAND_VERSION          "0.7"
 
 /* Agent-mode UI buffer sizes (mirrored from agent.h to avoid the include
  * chain dragging agent internals into every UI compilation unit). */
@@ -96,6 +96,8 @@ typedef struct {
      *   3. User clicks → UI sets agent_approval = +1 (apply) or -1 (reject).
      *   4. Worker observes, executes (or skips), clears pending, continues. */
     int  agent_mode;                       /* 0=off, 1=on */
+    int  capability_preset;                /* cap_preset_t when agent_mode==1 */
+    int  capability_custom_bits;           /* bitmask for CAP_PRESET_CUSTOM */
     char agent_workspace[1024];            /* user-set sandbox root */
 
     volatile int   agent_pending;          /* 0=none, 1=write_file, 2=apply_edit */
@@ -131,6 +133,12 @@ typedef struct {
     int          update_state;          /* 0=idle, 1=downloaded, 2=failed */
     char         update_file[512];      /* path to downloaded installer */
 
+    /* Model verification state (SHA-256 checksum) */
+    volatile int verify_progress;       /* 0-100 hash progress */
+    volatile int verify_active;         /* 1 while hashing */
+    int          verify_result;         /* 0=idle, 1=ok, 2=fail */
+    char         verify_path[512];      /* file being verified */
+
     volatile int running;
 } app_state_t;
 
@@ -146,6 +154,10 @@ void load_chat_history(const char *chat_name, char *history, size_t max_len);
 
 /* Apply the retro amber-on-black vintage PC terminal aesthetic. */
 void ui_apply_amber_theme(struct nk_context *nk);
+
+/* Launch a detached background thread to SHA-256-verify a model file.
+ * Defined in main.c; declared here so ui.c can trigger it from the vault. */
+void start_verify(const char *path, app_state_t *state);
 
 /* Render one complete frame of the UI. Called from the main thread. */
 void ui_render(struct nk_context *nk, app_state_t *state, int width, int height);

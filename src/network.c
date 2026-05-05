@@ -8,16 +8,11 @@
  * ============================================================================ */
 
 #include "network.h"
+#include "platform_sandbox.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <curl/curl.h>
-
-#ifdef __linux__
-#  include <seccomp.h>
-#  include <sys/syscall.h>
-#  include <sys/socket.h>
-#endif
 
 /* ---------------------------------------------------------------------------
  * In-memory curl buffer (used by HuggingFace API discovery)
@@ -318,52 +313,9 @@ int network_check_update(char *out_version, size_t out_size)
 }
 
 /* ---------------------------------------------------------------------------
- * seccomp network lockdown (Linux only)
+ * seccomp network lockdown (delegated to platform_sandbox.c)
  * --------------------------------------------------------------------------- */
 int lockdown_network(void)
 {
-#ifdef __linux__
-    scmp_filter_ctx ctx = seccomp_init(SCMP_ACT_ALLOW);
-    if (ctx == NULL) {
-        perror("[seccomp] seccomp_init");
-        return -1;
-    }
-
-    /* Block creation of new IP sockets only. Filtering on address-family
-     * args lets the X11 / Wayland Unix-domain socket keep working — those
-     * are already open and use AF_UNIX, while we only want to deny new
-     * outbound IPv4/IPv6/raw network endpoints.
-     *
-     * We can't filter connect/bind/sendto by sockaddr family because
-     * seccomp cannot dereference user-space pointers; gating socket()
-     * itself is sufficient since no new INET fd can be obtained. */
-    int rc = 0;
-    rc |= seccomp_rule_add(ctx, SCMP_ACT_KILL, SCMP_SYS(socket), 1,
-                           SCMP_A0(SCMP_CMP_EQ, AF_INET));
-    rc |= seccomp_rule_add(ctx, SCMP_ACT_KILL, SCMP_SYS(socket), 1,
-                           SCMP_A0(SCMP_CMP_EQ, AF_INET6));
-    rc |= seccomp_rule_add(ctx, SCMP_ACT_KILL, SCMP_SYS(socket), 1,
-                           SCMP_A0(SCMP_CMP_EQ, AF_PACKET));
-
-    if (rc != 0) {
-        fprintf(stderr, "[seccomp] Failed to add kill rules\n");
-        seccomp_release(ctx);
-        return -1;
-    }
-
-    rc = seccomp_load(ctx);
-    seccomp_release(ctx);
-
-    if (rc != 0) {
-        perror("[seccomp] seccomp_load");
-        return -1;
-    }
-
-    fprintf(stderr, "[seccomp] Network lockdown active. "
-           "New AF_INET/AF_INET6/AF_PACKET sockets will SIGKILL.\n");
-    return 0;
-#else
-    fprintf(stderr, "[seccomp] Network lockdown not available on this platform.\n");
-    return 0; /* no-op on macOS / Windows */
-#endif
+    return platform_sandbox_apply(SANDBOX_CAP_NETWORK_LOCKDOWN);
 }

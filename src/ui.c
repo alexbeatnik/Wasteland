@@ -4,6 +4,9 @@
 
 #include "ui.h"
 #include "network.h"
+#include "crypto_engine.h"
+#include "platform_sandbox.h"
+#include "capability.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -142,42 +145,25 @@ int scan_local_chats(char chats_list[][WASTELAND_CHAT_NAME_LEN], int max_chats)
 }
 
 /* ---------------------------------------------------------------------------
- * Simple RC4 stream cipher for chat file encryption.
- * Protects chats from casual inspection in a file manager / text editor.
+ * Authenticated encryption for chat file persistence.
+ *
+ * Replaces the old RC4 obfuscation with XChaCha20-Poly1305 (Monocypher).
+ * Format on disk:
+ *   "WST2"   (4 bytes magic)
+ *   nonce    (24 bytes)
+ *   tag      (16 bytes)
+ *   ciphertext (same length as plaintext)
+ *
+ * The key is a compile-time pepper; threat model is casual file-manager
+ * snooping, not nation-state adversaries.  Authentication detects accidental
+ * corruption or manual tampering.
  * --------------------------------------------------------------------------- */
-static const unsigned char chat_key[] = {
+static const unsigned char chat_key[WASTELAND_CRYPTO_KEY_SIZE] = {
     0x7a, 0x13, 0x4f, 0x9e, 0x2b, 0x81, 0xcc, 0x55,
     0x3d, 0x67, 0x10, 0xf8, 0x99, 0x44, 0xae, 0x2e,
     0x5c, 0x77, 0x18, 0xd3, 0xb6, 0x91, 0x0a, 0xe4,
     0xcf, 0x28, 0x83, 0xfb, 0x41, 0x6d, 0x35, 0x1c
 };
-
-static void rc4_crypt_buffer(unsigned char *data, size_t len)
-{
-    unsigned char s[256];
-    int i, j;
-    for (i = 0; i < 256; i++) s[i] = (unsigned char)i;
-    j = 0;
-    size_t key_len = sizeof(chat_key);
-    for (i = 0; i < 256; i++) {
-        j = (j + s[i] + chat_key[i % key_len]) & 255;
-        unsigned char tmp = s[i]; s[i] = s[j]; s[j] = tmp;
-    }
-    i = j = 0;
-    /* RC4-drop256: discard the first 256 keystream bytes to mitigate
-     * known biases in the initial output of the RC4 PRGA. */
-    for (int drop = 0; drop < 256; drop++) {
-        i = (i + 1) & 255;
-        j = (j + s[i]) & 255;
-        unsigned char tmp = s[i]; s[i] = s[j]; s[j] = tmp;
-    }
-    for (size_t k = 0; k < len; k++) {
-        i = (i + 1) & 255;
-        j = (j + s[i]) & 255;
-        unsigned char tmp = s[i]; s[i] = s[j]; s[j] = tmp;
-        data[k] ^= s[(s[i] + s[j]) & 255];
-    }
-}
 
 void save_chat_history(const char *chat_name, const char *history)
 {
@@ -185,22 +171,30 @@ void save_chat_history(const char *chat_name, const char *history)
     char path[512];
     snprintf(path, sizeof(path), "chats/%s", chat_name);
     FILE *f = fopen(path, "wb");
-    if (f) {
-        size_t len = strlen(history);
-        if (len > 0) {
-            unsigned char *buf = (unsigned char *)malloc(len);
-            if (buf) {
-                memcpy(buf, history, len);
-                rc4_crypt_buffer(buf, len);
-                fwrite("WSTL", 1, 4, f);
-                fwrite(buf, 1, len, f);
-                free(buf);
+    if (!f) return;
+
+    size_t len = strlen(history);
+    if (len > 0) {
+        uint8_t *cipher = (uint8_t *)malloc(len);
+        uint8_t *plain  = (uint8_t *)malloc(len);
+        if (cipher && plain) {
+            memcpy(plain, history, len);
+            uint8_t nonce[WASTELAND_CRYPTO_NONCE_SIZE];
+            uint8_t tag[WASTELAND_CRYPTO_TAG_SIZE];
+            crypto_random_bytes(nonce, sizeof(nonce));
+            if (crypto_seal(chat_key, nonce, plain, len, cipher, tag) == 0) {
+                fwrite(WASTELAND_CRYPTO_MAGIC, 1, 4, f);
+                fwrite(nonce, 1, sizeof(nonce), f);
+                fwrite(tag,   1, sizeof(tag),   f);
+                fwrite(cipher, 1, len, f);
             }
-        } else {
-            fwrite("WSTL", 1, 4, f);
         }
-        fclose(f);
+        free(cipher);
+        free(plain);
+    } else {
+        fwrite(WASTELAND_CRYPTO_MAGIC, 1, 4, f);
     }
+    fclose(f);
 }
 
 void load_chat_history(const char *chat_name, char *history, size_t max_len)
@@ -210,23 +204,52 @@ void load_chat_history(const char *chat_name, char *history, size_t max_len)
     char path[512];
     snprintf(path, sizeof(path), "chats/%s", chat_name);
     FILE *f = fopen(path, "rb");
-    if (f) {
-        char magic[4];
-        if (fread(magic, 1, 4, f) == 4 && memcmp(magic, "WSTL", 4) == 0) {
-            size_t n = fread(history, 1, max_len - 1, f);
-            if (n > 0) {
-                rc4_crypt_buffer((unsigned char *)history, n);
-                history[n] = '\0';
-            } else {
-                history[0] = '\0';
+    if (!f) return;
+
+    char magic[4];
+    if (fread(magic, 1, 4, f) == 4 && memcmp(magic, WASTELAND_CRYPTO_MAGIC, 4) == 0) {
+        uint8_t nonce[WASTELAND_CRYPTO_NONCE_SIZE];
+        uint8_t tag[WASTELAND_CRYPTO_TAG_SIZE];
+        if (fread(nonce, 1, sizeof(nonce), f) == sizeof(nonce) &&
+            fread(tag,   1, sizeof(tag),   f) == sizeof(tag)) {
+            size_t cipher_len = 0;
+            uint8_t *cipher = NULL;
+            uint8_t *plain  = NULL;
+
+            /* Determine ciphertext length. */
+            long pos = ftell(f);
+            fseek(f, 0, SEEK_END);
+            long end = ftell(f);
+            fseek(f, pos, SEEK_SET);
+            if (end > pos) cipher_len = (size_t)(end - pos);
+
+            if (cipher_len > 0 && cipher_len < max_len) {
+                cipher = (uint8_t *)malloc(cipher_len);
+                plain  = (uint8_t *)malloc(cipher_len + 1);
+                if (cipher && plain) {
+                    size_t n = fread(cipher, 1, cipher_len, f);
+                    if (n == cipher_len &&
+                        crypto_open(chat_key, nonce, cipher, cipher_len,
+                                    tag, plain) == 0) {
+                        plain[cipher_len] = '\0';
+                        memcpy(history, plain, cipher_len + 1);
+                    } else {
+                        history[0] = '\0';
+                        fprintf(stderr, "[ui] Chat '%s' failed auth or read\n",
+                                chat_name);
+                    }
+                }
             }
-        } else {
-            rewind(f);
-            size_t n = fread(history, 1, max_len - 1, f);
-            history[n] = '\0';
+            free(cipher);
+            free(plain);
         }
-        fclose(f);
+    } else {
+        /* Legacy plaintext (no magic) — read as-is. */
+        rewind(f);
+        size_t n = fread(history, 1, max_len - 1, f);
+        history[n] = '\0';
     }
+    fclose(f);
 }
 
 /* Trim `base` (length *blen) so it doesn't end mid-UTF-8-codepoint. UTF-8
@@ -1208,8 +1231,8 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                     const char *slash = strrchr(state->models[i], '/');
                     const char *basename = slash ? slash + 1 : state->models[i];
 
-                    /* Row with LOAD button + DELETE button */
-                    nk_layout_row_begin(nk, NK_DYNAMIC, 26, 2);
+                    /* Row with LOAD + VERIFY + DELETE buttons */
+                    nk_layout_row_begin(nk, NK_DYNAMIC, 26, 3);
 
                     struct stat fst;
                     char sz_str[32] = "?";
@@ -1233,7 +1256,7 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
 
                     int load_busy = (state->loading_model_index >= 0);
                     int gen_busy  = inference_is_generating(state->inference);
-                    nk_layout_row_push(nk, 0.92f);
+                    nk_layout_row_push(nk, 0.84f);
                     if (nk_button_label(nk, btn_label) && !load_busy && !gen_busy) {
                         if (is_loaded) {
                             inference_unload_model(state->inference);
@@ -1255,6 +1278,13 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                                          basename);
                             }
                         }
+                    }
+
+                    nk_layout_row_push(nk, 0.08f);
+                    if (nk_button_label(nk, "\xe2\x9c\x93") && !load_busy && !gen_busy) {
+                        start_verify(state->models[i], state);
+                        snprintf(state->status_msg, sizeof(state->status_msg),
+                                 "Verifying %s...", basename);
                     }
 
                     nk_layout_row_push(nk, 0.08f);
@@ -1289,6 +1319,27 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
             nk_layout_row_dynamic(nk, 10, 1);
             nk_spacing(nk, 1);
 
+            /* ===== SANDBOX STATUS ===== */
+            {
+                int caps = platform_sandbox_query_caps();
+                char sb_desc[128];
+                platform_sandbox_describe(caps, sb_desc, sizeof(sb_desc));
+                const char *col = platform_sandbox_status_colour(caps);
+                struct nk_color sb_col;
+                if (strcmp(col, "green") == 0)
+                    sb_col = nk_rgb(0x66, 0xCC, 0x66); /* dim green for amber theme */
+                else if (strcmp(col, "amber") == 0)
+                    sb_col = amber;
+                else
+                    sb_col = nk_rgb(0xCC, 0x33, 0x00); /* red */
+                nk_layout_row_dynamic(nk, 18, 1);
+                nk_label_colored(nk, sb_desc, NK_TEXT_LEFT, sb_col);
+            }
+
+            /* Spacer */
+            nk_layout_row_dynamic(nk, 6, 1);
+            nk_spacing(nk, 1);
+
             /* ===== AGENT MODE ===== */
             nk_layout_row_dynamic(nk, 20, 1);
             nk_label_colored(nk, "AGENT MODE", NK_TEXT_LEFT, amber);
@@ -1302,6 +1353,41 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                               &state->agent_mode);
 
             if (state->agent_mode) {
+                /* Capability preset selector */
+                nk_layout_row_dynamic(nk, 18, 1);
+                nk_label_colored(nk, "Capability preset:", NK_TEXT_LEFT, amber);
+                nk_layout_row_dynamic(nk, 24, 4);
+                static const char *preset_labels[] = {"OFF", "READ", "RW", "CUST"};
+                for (int p = 0; p < 4; p++) {
+                    int active = (state->capability_preset == p);
+                    if (active) {
+                        struct nk_color saved = nk->style.button.normal.data.color;
+                        nk->style.button.normal.data.color = amber;
+                        if (nk_button_label(nk, preset_labels[p]))
+                            state->capability_preset = p;
+                        nk->style.button.normal.data.color = saved;
+                    } else {
+                        if (nk_button_label(nk, preset_labels[p]))
+                            state->capability_preset = p;
+                    }
+                }
+                if (state->capability_preset == CAP_PRESET_CUSTOM) {
+                    nk_layout_row_dynamic(nk, 20, 2);
+                    int rf = (state->capability_custom_bits & (1 << AGENT_TOOL_READ_FILE)) != 0;
+                    int ld = (state->capability_custom_bits & (1 << AGENT_TOOL_LIST_DIR)) != 0;
+                    int wf = (state->capability_custom_bits & (1 << AGENT_TOOL_WRITE_FILE)) != 0;
+                    int ae = (state->capability_custom_bits & (1 << AGENT_TOOL_APPLY_EDIT)) != 0;
+                    nk_checkbox_label(nk, "read_file", &rf);
+                    nk_checkbox_label(nk, "list_dir", &ld);
+                    nk_checkbox_label(nk, "write_file", &wf);
+                    nk_checkbox_label(nk, "apply_edit", &ae);
+                    state->capability_custom_bits =
+                        (rf ? (1 << AGENT_TOOL_READ_FILE) : 0) |
+                        (ld ? (1 << AGENT_TOOL_LIST_DIR)  : 0) |
+                        (wf ? (1 << AGENT_TOOL_WRITE_FILE): 0) |
+                        (ae ? (1 << AGENT_TOOL_APPLY_EDIT): 0);
+                }
+                capability_custom_set(state->capability_custom_bits);
                 nk_layout_row_dynamic(nk, 18, 1);
                 nk_label_colored(nk, "Workspace (sandbox root):",
                                  NK_TEXT_LEFT, amber);
@@ -1966,6 +2052,23 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                 }
             }
             nk_layout_row_end(nk);
+
+            /* Verify progress indicator */
+            if (state->verify_active) {
+                nk_layout_row_dynamic(nk, 18, 1);
+                char vbuf[256];
+                snprintf(vbuf, sizeof(vbuf), "Verifying %.100s: %d%%",
+                         state->verify_path, state->verify_progress);
+                nk_label_colored(nk, vbuf, NK_TEXT_CENTERED, amber);
+            } else if (state->verify_result == 1) {
+                nk_layout_row_dynamic(nk, 18, 1);
+                nk_label_colored(nk, "Verification OK", NK_TEXT_CENTERED,
+                                 nk_rgb(0x66, 0xCC, 0x66));
+            } else if (state->verify_result == 2) {
+                nk_layout_row_dynamic(nk, 18, 1);
+                nk_label_colored(nk, "Verification FAILED", NK_TEXT_CENTERED,
+                                 nk_rgb(0xCC, 0x33, 0x00));
+            }
 
             /* Status message row */
             if (state->status_msg[0]) {

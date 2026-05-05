@@ -11,90 +11,87 @@
 #include <string.h>
 
 /* =========================================================================
- * RC4 stream cipher — chat-file obfuscation (origin: src/ui.c).
+ * Authenticated chat cipher — XChaCha20-Poly1305 via crypto_engine.c
+ * (origin: src/ui.c → save_chat_history / load_chat_history).
  * ========================================================================= */
-static const unsigned char chat_key[] = {
+#include "crypto_engine.h"
+
+static const unsigned char test_key[WASTELAND_CRYPTO_KEY_SIZE] = {
     0x7a, 0x13, 0x4f, 0x9e, 0x2b, 0x81, 0xcc, 0x55,
     0x3d, 0x67, 0x10, 0xf8, 0x99, 0x44, 0xae, 0x2e,
     0x5c, 0x77, 0x18, 0xd3, 0xb6, 0x91, 0x0a, 0xe4,
     0xcf, 0x28, 0x83, 0xfb, 0x41, 0x6d, 0x35, 0x1c
 };
 
-static void rc4_crypt_buffer(unsigned char *data, size_t len)
-{
-    unsigned char s[256];
-    int i, j;
-    for (i = 0; i < 256; i++) s[i] = (unsigned char)i;
-    j = 0;
-    size_t key_len = sizeof(chat_key);
-    for (i = 0; i < 256; i++) {
-        j = (j + s[i] + chat_key[i % key_len]) & 255;
-        unsigned char tmp = s[i]; s[i] = s[j]; s[j] = tmp;
-    }
-    i = j = 0;
-    for (int drop = 0; drop < 256; drop++) {
-        i = (i + 1) & 255;
-        j = (j + s[i]) & 255;
-        unsigned char tmp = s[i]; s[i] = s[j]; s[j] = tmp;
-    }
-    for (size_t k = 0; k < len; k++) {
-        i = (i + 1) & 255;
-        j = (j + s[i]) & 255;
-        unsigned char tmp = s[i]; s[i] = s[j]; s[j] = tmp;
-        data[k] ^= s[(s[i] + s[j]) & 255];
-    }
-}
-
-/* RC4 is symmetric: encrypt + encrypt = identity. Round-trip a chat
- * snapshot and confirm we get the exact bytes back. */
-static void test_rc4_round_trip_ascii(void) {
+static void test_crypto_round_trip_ascii(void) {
     const char *plain = "> hello\nHi there!\n";
     size_t n = strlen(plain);
-    unsigned char buf[64];
-    memcpy(buf, plain, n);
+    uint8_t cipher[64];
+    uint8_t opened[64];
+    uint8_t nonce[WASTELAND_CRYPTO_NONCE_SIZE] = {0};
+    uint8_t tag[WASTELAND_CRYPTO_TAG_SIZE];
 
-    rc4_crypt_buffer(buf, n);              /* encrypt */
-    /* Ciphertext should differ from plaintext (otherwise something is wrong). */
-    ASSERT_FALSE(memcmp(buf, plain, n) == 0);
+    /* Deterministic nonce for the test (real code uses crypto_random_bytes). */
+    memset(nonce, 0xAB, sizeof(nonce));
 
-    rc4_crypt_buffer(buf, n);              /* decrypt */
-    ASSERT_TRUE(memcmp(buf, plain, n) == 0);
+    ASSERT_EQ_INT(0, crypto_seal(test_key, nonce,
+                                 (const uint8_t *)plain, n,
+                                 cipher, tag));
+    /* Ciphertext must differ from plaintext (catches NOP cipher). */
+    ASSERT_FALSE(memcmp(cipher, plain, n) == 0);
+
+    ASSERT_EQ_INT(0, crypto_open(test_key, nonce,
+                                 cipher, n, tag, opened));
+    opened[n] = '\0';
+    ASSERT_TRUE(memcmp(opened, plain, n) == 0);
 }
 
-/* Round-trip with multibyte UTF-8 (Cyrillic) — RC4 is byte-oriented so this
- * must work identically to ASCII. */
-static void test_rc4_round_trip_utf8(void) {
+static void test_crypto_round_trip_utf8(void) {
     const char *plain = "> Привіт\nЯк справи?\n";
     size_t n = strlen(plain);
-    unsigned char buf[128];
-    memcpy(buf, plain, n);
+    uint8_t cipher[128];
+    uint8_t opened[128];
+    uint8_t nonce[WASTELAND_CRYPTO_NONCE_SIZE] = {0};
+    uint8_t tag[WASTELAND_CRYPTO_TAG_SIZE];
+    memset(nonce, 0xCD, sizeof(nonce));
 
-    rc4_crypt_buffer(buf, n);
-    rc4_crypt_buffer(buf, n);
-    ASSERT_TRUE(memcmp(buf, plain, n) == 0);
+    ASSERT_EQ_INT(0, crypto_seal(test_key, nonce,
+                                 (const uint8_t *)plain, n,
+                                 cipher, tag));
+    ASSERT_EQ_INT(0, crypto_open(test_key, nonce,
+                                 cipher, n, tag, opened));
+    opened[n] = '\0';
+    ASSERT_TRUE(memcmp(opened, plain, n) == 0);
 }
 
-/* Round-trip an empty buffer. Must not crash and the keystream init must
- * still complete (otherwise next call leaks state). */
-static void test_rc4_empty_buffer(void) {
-    unsigned char buf[1] = { 0 };
-    rc4_crypt_buffer(buf, 0); /* no-op; just must return */
-    rc4_crypt_buffer(buf, 0);
-    ASSERT_EQ_INT(0, buf[0]);
-}
-
-/* The same key produces the same ciphertext every time — confirms determinism
- * (no time-based seed leaking in). Two encryptions of the same plaintext must
- * be byte-identical. */
-static void test_rc4_deterministic(void) {
-    const char *plain = "deterministic check 123";
+static void test_crypto_auth_failure(void) {
+    /* Tamper with one ciphertext byte — open must fail. */
+    const char *plain = "sensitive chat data";
     size_t n = strlen(plain);
-    unsigned char a[64], b[64];
-    memcpy(a, plain, n);
-    memcpy(b, plain, n);
-    rc4_crypt_buffer(a, n);
-    rc4_crypt_buffer(b, n);
-    ASSERT_TRUE(memcmp(a, b, n) == 0);
+    uint8_t cipher[64];
+    uint8_t opened[64];
+    uint8_t nonce[WASTELAND_CRYPTO_NONCE_SIZE] = {0};
+    uint8_t tag[WASTELAND_CRYPTO_TAG_SIZE];
+    memset(nonce, 0xEF, sizeof(nonce));
+
+    ASSERT_EQ_INT(0, crypto_seal(test_key, nonce,
+                                 (const uint8_t *)plain, n,
+                                 cipher, tag));
+    cipher[0] ^= 0xFF;
+    ASSERT_EQ_INT(-1, crypto_open(test_key, nonce,
+                                  cipher, n, tag, opened));
+}
+
+static void test_crypto_empty_buffer(void) {
+    uint8_t cipher[1];
+    uint8_t opened[1];
+    uint8_t nonce[WASTELAND_CRYPTO_NONCE_SIZE] = {0};
+    uint8_t tag[WASTELAND_CRYPTO_TAG_SIZE];
+    memset(nonce, 0x01, sizeof(nonce));
+
+    /* Zero-length plaintext still produces a valid tag. */
+    ASSERT_EQ_INT(0, crypto_seal(test_key, nonce, NULL, 0, cipher, tag));
+    ASSERT_EQ_INT(0, crypto_open(test_key, nonce, NULL, 0, tag, opened));
 }
 
 /* =========================================================================
@@ -388,14 +385,57 @@ static void test_strip_multiple_fences(void) {
 }
 
 /* =========================================================================
+ * SHA-256 — incremental and single-shot (origin: src/vendor/sha256/sha256.c).
+ * ========================================================================= */
+#include "vendor/sha256/sha256.h"
+
+static void test_sha256_empty(void) {
+    uint8_t digest[WASTELAND_SHA256_DIGEST_SIZE];
+    wasteland_sha256((const uint8_t *)"", 0, digest);
+    /* Known SHA-256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 */
+    const char *expected = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    char hex[65];
+    wasteland_sha256_hex(digest, hex, sizeof(hex));
+    ASSERT_EQ_STR(expected, hex);
+}
+
+static void test_sha256_abc(void) {
+    uint8_t digest[WASTELAND_SHA256_DIGEST_SIZE];
+    wasteland_sha256((const uint8_t *)"abc", 3, digest);
+    const char *expected = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    char hex[65];
+    wasteland_sha256_hex(digest, hex, sizeof(hex));
+    ASSERT_EQ_STR(expected, hex);
+}
+
+static void test_sha256_incremental(void) {
+    wasteland_sha256_ctx_t ctx;
+    wasteland_sha256_init(&ctx);
+    wasteland_sha256_update(&ctx, (const uint8_t *)"a", 1);
+    wasteland_sha256_update(&ctx, (const uint8_t *)"b", 1);
+    wasteland_sha256_update(&ctx, (const uint8_t *)"c", 1);
+    uint8_t digest[WASTELAND_SHA256_DIGEST_SIZE];
+    wasteland_sha256_final(&ctx, digest);
+    const char *expected = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    char hex[65];
+    wasteland_sha256_hex(digest, hex, sizeof(hex));
+    ASSERT_EQ_STR(expected, hex);
+}
+
+/* =========================================================================
  * Suite runner
  * ========================================================================= */
 void run_string_utils(void) {
-    printf("rc4_crypt_buffer\n");
-    RUN_TEST(test_rc4_round_trip_ascii);
-    RUN_TEST(test_rc4_round_trip_utf8);
-    RUN_TEST(test_rc4_empty_buffer);
-    RUN_TEST(test_rc4_deterministic);
+    printf("crypto_engine (XChaCha20-Poly1305)\n");
+    RUN_TEST(test_crypto_round_trip_ascii);
+    RUN_TEST(test_crypto_round_trip_utf8);
+    RUN_TEST(test_crypto_auth_failure);
+    RUN_TEST(test_crypto_empty_buffer);
+
+    printf("\nsha256\n");
+    RUN_TEST(test_sha256_empty);
+    RUN_TEST(test_sha256_abc);
+    RUN_TEST(test_sha256_incremental);
 
     printf("\nhf_rewrite_url\n");
     RUN_TEST(test_url_rewrite_basic);

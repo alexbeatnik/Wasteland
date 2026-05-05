@@ -32,6 +32,11 @@ add_subdirectory(third_party/llama.cpp)
 # Source files
 # ---------------------------------------------------------------------------
 file(GLOB SOURCES CONFIGURE_DEPENDS src/*.c)
+list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/agent_executor_main.c")
+list(APPEND SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/monocypher/monocypher.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/sha256/sha256.c"
+)
 
 # On Windows, embed src/wasteland.rc → Wasteland.exe carries the icon for
 # Explorer / taskbar / Alt-Tab. MSVC and MinGW both accept .rc directly when
@@ -55,11 +60,30 @@ else()
     add_executable(Wasteland ${SOURCES})
 endif()
 
+# Agent Executor subprocess — spawned by the main binary for sandboxed
+# filesystem operations.  Links the same pure-C modules but no SDL/llama.cpp.
+set(AGENT_EXEC_SOURCES
+    src/agent_executor_main.c
+    src/agent_protocol.c
+    src/fs_sandbox.c
+    src/platform_sandbox.c
+)
+add_executable(wasteland-agent-executor ${AGENT_EXEC_SOURCES})
+target_include_directories(wasteland-agent-executor PRIVATE src include)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_compile_definitions(wasteland-agent-executor PRIVATE _GNU_SOURCE)
+endif()
+if(SECCOMP_LIBRARY)
+    target_link_libraries(wasteland-agent-executor PRIVATE ${SECCOMP_LIBRARY})
+    target_compile_definitions(wasteland-agent-executor PRIVATE WASTELAND_HAS_SECCOMP=1)
+endif()
+
 # ---------------------------------------------------------------------------
 # Include directories
 # ---------------------------------------------------------------------------
 target_include_directories(Wasteland PRIVATE
     include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor/llama.cpp/include
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor/llama.cpp/ggml/include
 )
@@ -242,7 +266,7 @@ endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(CPACK_PACKAGE_NAME            "wasteland")
-    set(CPACK_PACKAGE_VERSION         "0.6")
+    set(CPACK_PACKAGE_VERSION         "0.7")
     set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
         "Offline-first amber-CRT LLM chat client built on llama.cpp")
     set(CPACK_PACKAGE_CONTACT         "Wasteland Maintainers")
@@ -295,7 +319,7 @@ endif()
 enable_testing()
 
 # Agent tests
-add_executable(test_agent tests/test_agent.c src/agent.c)
+add_executable(test_agent tests/test_agent.c src/agent.c src/fs_sandbox.c src/agent_protocol.c)
 target_compile_definitions(test_agent PRIVATE TESTING)
 target_include_directories(test_agent PRIVATE src include)
 add_test(NAME agent COMMAND test_agent)
@@ -312,10 +336,15 @@ target_compile_definitions(test_version PRIVATE TESTING)
 target_include_directories(test_version PRIVATE src include)
 add_test(NAME version COMMAND test_version)
 
-# String utility tests — RC4 chat cipher round-trip, HF URL rewrite,
-# chat-name sanitisation. Pure functions copied out of ui.c / network.c
-# so the suite stays SDL/curl-free.
-add_executable(test_string_utils tests/test_string_utils.c)
+# String utility tests — authenticated chat cipher round-trip, HF URL rewrite,
+# chat-name sanitisation, SHA-256. Pure functions copied out of ui.c / network.c
+# so the suite stays SDL/curl-free.  crypto_engine.c and its Monocypher/sha256
+# dependencies are linked directly so the cipher tests exercise the real code.
+add_executable(test_string_utils
+    tests/test_string_utils.c
+    src/crypto_engine.c
+    src/vendor/monocypher/monocypher.c
+    src/vendor/sha256/sha256.c)
 target_compile_definitions(test_string_utils PRIVATE TESTING)
 target_include_directories(test_string_utils PRIVATE src include)
 add_test(NAME string_utils COMMAND test_string_utils)

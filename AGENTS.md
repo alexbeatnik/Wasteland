@@ -1,4 +1,4 @@
-# AGENTS.md — Wasteland v0.6
+# AGENTS.md — Wasteland v0.7
 
 ## Agent Instructions
 
@@ -44,6 +44,25 @@ Anything that can take >100 ms must not run on the UI thread. The UI thread is t
 - The `hub_models[]` array must contain real, public, reachable HF GGUF repos — fictional IDs fail at HF API resolution time with HTTP 404. When adding a new entry, click DOWNLOAD on it once before merging. Current set: `Qwen/Qwen2.5-0.5B-Instruct-GGUF`, `ggml-org/gemma-3-1b-it-GGUF`, `Qwen/Qwen2.5-1.5B-Instruct-GGUF`, `ggml-org/SmolLM2-1.7B-Instruct-GGUF`, `unsloth/Qwen3.6-35B-A3B-GGUF`.
 - The `/blob/main/` → `/resolve/main/` URL rewrite in `network_download_model` must `memmove` the tail right by 3 bytes **before** the `memcpy` overwrite — the obvious order corrupts the first 3 bytes of the filename.
 
+## Platform Sandbox (`src/platform_sandbox.c`)
+
+- `platform_sandbox_query_caps()` returns a bitmask of available capabilities. On Linux this includes `SANDBOX_CAP_NETWORK_LOCKDOWN` (seccomp) and `SANDBOX_CAP_FS_RESTRICT` (Landlock, runtime-probed). On macOS/Windows only `SANDBOX_CAP_PROCESS_ISOLATE` is reported.
+- `platform_sandbox_apply()` installs seccomp-bpf network lockdown; `platform_sandbox_restrict_fs_to()` installs Landlock ruleset restricting the process to a single workspace directory. Both are no-ops on non-Linux platforms.
+- The UI renders a persistent sandbox status indicator (green/amber/red) driven by `platform_sandbox_query_caps()` — never falsely claim security.
+
+## Filesystem Sandbox (`src/fs_sandbox.c`)
+
+- **Linux:** `openat()`-based traversal with `O_NOFOLLOW` at every step. Explicit `".."` is rejected. After opening, `/proc/self/fd/<n>` is verified via `readlink` to still lie under the workspace root. This mitigates symlink traversal, TOCTOU races, and path-escape attempts.
+- **macOS/Windows:** `realpath()` + `path_is_inside()` fallback — honest about weaker guarantees.
+- `fs_sandbox.c` is the **only** place where agent tool I/O (`read_file`, `list_dir`, `write_file`, `apply_edit`) touches the filesystem. `agent.c` delegates to it; do not re-add direct `fopen` paths in agent executors.
+
+## Agent Executor Subprocess (`src/agent_executor_main.c`)
+
+- A separate binary `wasteland-agent-executor` is spawned via `posix_spawn` (Linux) and communicates with the main process over a framed IPC protocol (`src/agent_protocol.c`).
+- The executor applies `platform_sandbox_apply()` + `platform_sandbox_restrict_fs_to()` **before** entering the service loop, so even if the main process is compromised the filesystem surface is minimised.
+- On non-Linux platforms the IPC path is disabled and agent tools fall back to in-process `fs_sandbox.c` calls.
+- **Do not** call `pthread_cancel` on the executor — use `AGENT_IPC_TOOL_SHUTDOWN` for graceful termination.
+
 ## Auto-Update Rules
 
 - **Linux artefact is a `.deb`, not an ELF.** `launch_updater()` MUST install it with `dpkg -i`, not `cp` — copying a Debian package archive over the running binary bricks the install. The script tries `pkexec` → `gksudo` → `kdesu` for elevation; on failure, it surfaces a `notify-send` / `zenity` / `xmessage` notification with the manual `sudo dpkg -i $NEW` command. The `.deb` is **kept on disk** when install fails so the user can follow that instruction; only `rm -f` it after `RC == 0`.
@@ -55,7 +74,7 @@ Anything that can take >100 ms must not run on the UI thread. The UI thread is t
 
 ## CI Release Workflow Rules
 
-- **`release` job MUST list `extract-version` in its `needs:`.** Without it, `needs.extract-version.outputs.version` evaluates to null on a main-branch push, the `||` fallback drops to `github.ref_name` which IS the literal string `main`, and `softprops/action-gh-release` then creates a release AND a tag named `main` at the current commit — silently bypassing the `v0.6` tag that `create-tag` just published.
+- **`release` job MUST list `extract-version` in its `needs:`.** Without it, `needs.extract-version.outputs.version` evaluates to null on a main-branch push, the `||` fallback drops to `github.ref_name` which IS the literal string `main`, and `softprops/action-gh-release` then creates a release AND a tag named `main` at the current commit — silently bypassing the `v0.7` tag that `create-tag` just published.
 - **Resolve the release tag in a dedicated step, not inline in `tag_name:`.** A `bash` step with priority `inputs.version → extract-version.outputs.version → github.ref_name (only if ref_type == tag)` plus a `^v[0-9]+\.[0-9]+(\.[0-9]+)?$` regex validation makes the resolution explicit and fails loudly when nothing matches. Don't rewrite this back into a single-line YAML expression — silent fallthrough to a branch name is exactly the bug we're guarding against.
 - **`release` is gated by `tag_exists == 'false'` on main-push.** Cosmetic pushes to `main` (README tweak, doc fix, anything that doesn't bump `WASTELAND_VERSION` in `src/ui.h`) must NOT regenerate the published release — that would overwrite the `.deb`/`.dmg`/`.exe` artefacts and wipe hand-edited release notes from the GitHub UI. The `extract-version` job probes `git ls-remote --tags` and writes `tag_exists`; the release job's `if:` consults it. `workflow_dispatch` and direct tag-pushes still publish unconditionally.
 - **`GITHUB_TOKEN`-pushed tags do NOT trigger workflow runs.** GitHub safety against recursive events. So the build + release MUST happen in the same workflow run as `create-tag` — don't refactor to "wait for the tag-push event" expecting a second run, because that second run never fires.
@@ -135,10 +154,12 @@ penalties(last_n=64, repeat=1.1) → top_k(40) → top_p(0.95) → temp(ictx->te
 
 ## Settings Persistence
 
-Runtime tunables (N\_CTX, Temperature) are stored in `wasteland.cfg` alongside agent settings:
+Runtime tunables (N\_CTX, Temperature, Capability Preset) are stored in `wasteland.cfg` alongside agent settings:
 
 ```
 agent_mode=0
+capability_preset=2
+capability_custom_bits=0
 agent_workspace=/path/to/ws
 n_ctx=8192
 temperature=0.800
@@ -147,6 +168,7 @@ temperature=0.800
 - Load on startup in `main.c`; push to `inference_set_n_ctx` / `inference_set_temperature` immediately.
 - Persist on every change (compare to `last_*` shadow variables in the main loop).
 - Valid ranges: `n_ctx` 512–262 144, `temperature` 0.01–5.0.
+- Capability presets: `0=OFF`, `1=READ_ONLY`, `2=READ_WRITE`, `3=CUSTOM`. When preset is `CUSTOM`, `capability_custom_bits` stores the per-tool bitmask (bits 1..4 correspond to `read_file`, `list_dir`, `write_file`, `apply_edit`).
 
 ## Testing Protocol
 
@@ -169,10 +191,10 @@ Before declaring a task complete:
 15. Auto-update banner must appear when `state->update_version` is non-empty (can be tested by temporarily hardcoding a different version string).
 16. A new chat's file must be renamed by the model-generated title after the first assistant reply completes (check `chats/` directory).
 17. ARM64 `.deb` built in CI must run on Raspberry Pi 4/5 without `Illegal instruction`.
-18. All CTest suites pass (`ctest --output-on-failure`) — currently **81 tests** across 4 suites (`agent`, `chat_history`, `version`, `string_utils`).
+18. All CTest suites pass (`ctest --output-on-failure`) — currently **92 tests** across 4 suites (`agent` 35, `chat_history` 18, `version` 15, `string_utils` 24).
 19. New logic must have a matching `tests/test_*.c` suite if it is testable without SDL/llama.cpp (pure string / file / math functions). Filesystem-touching tests use `/tmp`-style scratch directories created in `run_<suite>()` *before* `RUN_TEST` calls.
 20. Existing tests must not be broken by the change — run `ctest` before every commit.
-21. **Test parity rule:** when a function lives in `src/*.c` and has been copy-extracted into `tests/test_*.c` (e.g. `parse_chat_history`, `version_newer_than`, `rc4_crypt_buffer`, the HF URL rewrite), edits to the production version MUST be mirrored into the test copy. The duplication is intentional — it lets the test binaries link without SDL2 / llama.cpp / curl — but you have to keep both halves in lockstep or the tests start passing the wrong code.
+21. **Test parity rule:** when a function lives in `src/*.c` and has been copy-extracted into `tests/test_*.c` (e.g. `parse_chat_history`, `version_newer_than`, `crypto_seal` / `crypto_open`, the HF URL rewrite), edits to the production version MUST be mirrored into the test copy. The duplication is intentional — it lets the test binaries link without SDL2 / llama.cpp / curl — but you have to keep both halves in lockstep or the tests start passing the wrong code.
 
 ## Font & DPI Rules
 
@@ -183,4 +205,4 @@ Before declaring a task complete:
 
 ## Version
 
-Current version: **0.6**
+Current version: **0.7**

@@ -3,9 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Wasteland Terminal v0.6 — Offline LLM Chat in pure C</title>
+    <title>Wasteland Terminal v0.7 — Offline LLM Chat in pure C</title>
     <meta name="description" content="A highly secure, offline-first LLM chat client with a vintage amber-on-black CRT aesthetic. Pure C, llama.cpp, Linux seccomp lockdown, sandboxed agent mode.">
-    <meta property="og:title" content="Wasteland Terminal v0.6">
+    <meta property="og:title" content="Wasteland Terminal v0.7">
     <meta property="og:description" content="Offline-first LLM chat in pure C — amber CRT UI, hard network lockdown, sandboxed agent mode.">
     <meta name="theme-color" content="#FFB000">
     <style>
@@ -594,7 +594,7 @@
 
     <!-- ============== HERO ============== -->
     <header class="hero">
-        <h1>WASTELAND<span class="v">v0.6</span></h1>
+        <h1>WASTELAND<span class="v">v0.7</span></h1>
         <p class="tagline">// OFFLINE LLM TERMINAL · PURE C · NO TELEMETRY</p>
 
         <p class="lead">
@@ -615,7 +615,7 @@
         </div>
 
         <div class="btn-row">
-            <a href="https://github.com/alexbeatnik/wasteland/releases/latest" class="btn primary">[ DOWNLOAD v0.6 ]</a>
+            <a href="https://github.com/alexbeatnik/wasteland/releases/latest" class="btn primary">[ DOWNLOAD v0.7 ]</a>
             <a href="https://github.com/alexbeatnik/wasteland" class="btn">[ SOURCE CODE ]</a>
             <a href="#initialize" class="btn">[ BUILD FROM SOURCE ]</a>
         </div>
@@ -627,7 +627,7 @@
         <span class="line"><span class="ok">[OK]</span> Embedded font: DejaVu Sans Mono · 343 KB · Latin / Cyrillic / U+25A0–U+25FF</span>
         <span class="line"><span class="ok">[OK]</span> DPI scale: 2.00× (Retina)  ·  Window: 1280×800  ·  Drawable: 2560×1600</span>
         <span class="line"><span class="ok">[OK]</span> Inference worker thread spawned · prompt_cond armed</span>
-        <span class="line"><span class="ok">[OK]</span> Update probe: api.github.com/.../releases/latest → v0.6 (current)</span>
+        <span class="line"><span class="ok">[OK]</span> Update probe: api.github.com/.../releases/latest → v0.7 (current)</span>
         <span class="line"><span class="dim">[..]</span> Awaiting model selection from local vault…</span>
         <span class="line"><span class="ok">[OK]</span> Model loaded: Qwen2.5-1.5B-Instruct.Q4_K_M.gguf (1.0 GB)</span>
         <span class="line"><span class="warn">[!!]</span> seccomp filter installed · AF_INET / AF_INET6 / AF_PACKET → SIGKILL</span>
@@ -644,7 +644,7 @@
             <div class="stat"><span class="num">60</span><span class="label">FPS UI Loop</span></div>
             <div class="stat"><span class="num">256k</span><span class="label">Max Context</span></div>
             <div class="stat"><span class="num">3</span><span class="label">OSes Supported</span></div>
-            <div class="stat"><span class="num">89</span><span class="label">Unit Tests</span></div>
+            <div class="stat"><span class="num">92</span><span class="label">Unit Tests</span></div>
         </div>
     </section>
 
@@ -688,17 +688,33 @@
             <div class="feature-item">
                 <strong><span class="icon">⌬</span> Sandboxed Agent Mode</strong>
                 Tool-using ReAct loop: <code>read_file</code>, <code>list_dir</code>,
-                <code>write_file</code>, <code>apply_edit</code>. Every path resolved via
-                <code>realpath</code> and checked against a user-chosen workspace root —
-                no escape via symlinks or <code>..</code>.
-                <small>// 10-turn cap · approval gate</small>
+                <code>write_file</code>, <code>apply_edit</code>. Capability presets
+                (OFF / READ_ONLY / READ_WRITE / CUSTOM) gate which tools are available.
+                On Linux, a separate <code>wasteland-agent-executor</code> subprocess
+                applies seccomp + Landlock before touching the filesystem.
+                <small>// 10-turn cap · approval gate · IPC executor</small>
             </div>
             <div class="feature-item">
                 <strong><span class="icon">▤</span> Multi-Chat Persistence</strong>
                 Named, browsable chat sessions. Auto-named from your first message, then refined
-                by the model into a 3–5 word contextual title. Stored as RC4-obfuscated
-                <code>chats/*.txt</code> with a 4-byte <code>WSTL</code> magic header.
-                <small>// 64 chats · cross-launch</small>
+                by the model into a 3–5 word contextual title. Stored with authenticated
+                XChaCha20-Poly1305 encryption (<code>WST2</code> header) via Monocypher —
+                detects tampering, not just obfuscation.
+                <small>// 64 chats · cross-launch · authenticated</small>
+            </div>
+            <div class="feature-item">
+                <strong><span class="icon">✓</span> Model Verification</strong>
+                Background SHA-256 of any <code>.gguf</code> in the local vault. One click
+                on the <code>✓</code> button runs an incremental hash in a detached thread;
+                progress bar and green/red result confirm file integrity.
+                <small>// sha256 · incremental · background</small>
+            </div>
+            <div class="feature-item">
+                <strong><span class="icon">☰</span> Platform Sandbox Status</strong>
+                Persistent UI indicator shows available sandbox capabilities in real time:
+                green when seccomp + Landlock are active, amber for partial, red for none.
+                Never falsely claims security.
+                <small>// seccomp · Landlock · runtime-probed</small>
             </div>
             <div class="feature-item">
                 <strong><span class="icon">↻</span> One-Click Auto-Update</strong>
@@ -746,7 +762,7 @@
             </div>
             <div class="feature-item">
                 <strong><span class="icon">↔</span> Drag-to-Sweep Sliders</strong>
-                <code>N_CTX</code> (512 → 256 K) and <code>TEMP</code> (0.10 → 2.00) each pair a
+                <code>N_CTX</code> (512 → 256 K) and <code>TEMP</code> (0.01 → 5.0) each pair a
                 drag-able slider with a numeric property widget. Slider for fast coarse sweep
                 (4 K → 256 K is one motion, not 250 clicks); property for click-to-step or
                 type-exact-value precision. Both bind to the same field — whichever you touch
@@ -816,10 +832,15 @@ fprintf(stderr, "[main] window hidden, draining worker\n");</pre>
    │  llama_init_from_model  │    │  HF API: /api/models/.../tree   │
    │  publish load_result    │    │  detached · progress callback   │
    └─────────────────────────┘    └─────────────────────────────────┘
+   ┌─────────────────────────┐
+   │  AGENT EXECUTOR (Linux) │
+   │  posix_spawn + IPC      │
+   │  seccomp + Landlock     │
+   └─────────────────────────┘
 
-   chat_mutex   : state-&gt;chat_history (UI write, worker mirror read)
-   output_mutex : ring buffer, tag carry, generating flag
-   pending_mutex: agent approval gate (write_file / apply_edit)
+   chat_mutex    : state-&gt;chat_history (UI write, worker mirror read)
+   output_mutex  : ring buffer, tag carry, generating flag
+   pending_mutex : agent approval gate (write_file / apply_edit)
    settings_mutex: n_ctx, temperature (read at load / sampler build)
         </div>
     </section>
@@ -884,8 +905,8 @@ cmake --build . --config Release</pre>
                 <tr><th>Platform</th><th>Architecture</th><th>Artifact</th></tr>
             </thead>
             <tbody>
-                <tr><td>Linux (Debian / Ubuntu)</td><td>x86_64</td><td><code>wasteland_0.6_amd64.deb</code></td></tr>
-                <tr><td>Linux (Raspberry Pi 4/5, Ampere, …)</td><td>arm64</td><td><code>wasteland_0.6_arm64.deb</code></td></tr>
+                <tr><td>Linux (Debian / Ubuntu)</td><td>x86_64</td><td><code>wasteland_0.7_amd64.deb</code></td></tr>
+                <tr><td>Linux (Raspberry Pi 4/5, Ampere, …)</td><td>arm64</td><td><code>wasteland_0.7_arm64.deb</code></td></tr>
                 <tr><td>macOS (universal binary)</td><td>arm64 + x86_64</td><td><code>Wasteland-macos.dmg</code></td></tr>
                 <tr><td>Windows 10/11</td><td>x86_64</td><td><code>Wasteland-windows.exe</code></td></tr>
             </tbody>
@@ -902,7 +923,8 @@ cmake --build . --config Release</pre>
                 <ul>
                     <li><strong>Linux:</strong> seccomp-bpf with <code>SCMP_ACT_KILL_PROCESS</code> on
                         <code>socket(AF_INET|AF_INET6|AF_PACKET, …)</code>. Filters argument family
-                        only — Unix-domain sockets (X11/Wayland) keep working.</li>
+                        only — Unix-domain sockets (X11/Wayland) keep working. A Landlock ruleset
+                        further restricts filesystem access to the workspace directory.</li>
                     <li><strong>macOS / Windows:</strong> no-op (platform limitation).</li>
                 </ul>
             </li>
@@ -910,13 +932,16 @@ cmake --build . --config Release</pre>
                 does <em>not</em> lift the lockdown — restart to download more.</li>
             <li>Download / update code lives only in <code>network.c</code>. The UI hides the entire
                 HUB section the moment <code>state-&gt;network_lockdown</code> is true.</li>
+            <li>Agent tools on Linux run inside a separate <code>wasteland-agent-executor</code>
+                subprocess that applies both sandboxes before entering its service loop, minimising
+                filesystem surface even if the main process is compromised.</li>
         </ol>
     </section>
 
     <!-- ============== TESTING ============== -->
     <section>
         <h2>TESTING</h2>
-        <p>Zero-dependency C test framework — just macros and <code>stdio.h</code>. <strong>89 tests across 4 suites</strong>, all green on Linux / macOS / Windows CI runners. Run via CTest:</p>
+        <p>Zero-dependency C test framework — just macros and <code>stdio.h</code>. <strong>92 tests across 4 suites</strong>, all green on Linux / macOS / Windows CI runners. Run via CTest:</p>
 <pre>cd build
 ctest --output-on-failure</pre>
 
@@ -940,8 +965,8 @@ ctest --output-on-failure</pre>
                 </tr>
                 <tr>
                     <td><code>test_string_utils</code></td>
-                    <td>21</td>
-                    <td>RC4 chat cipher round-trip (ASCII, UTF-8, empty buffer, deterministic output) · HF <code>/blob/main/</code> → <code>/resolve/main/</code> URL rewrite (basic, idempotent, too-small-buffer refusal, false-substring guard) · chat-name sanitisation (punctuation, space-runs, trim, UTF-8 passthrough, 40-char cap) · <strong>tool-fence stripping</strong> (agent fences elided, plain code fences preserved, unclosed-fence tail drop, inline backticks kept, multi-fence chains)</td>
+                    <td>24</td>
+                    <td>XChaCha20-Poly1305 chat cipher round-trip (ASCII, UTF-8, empty buffer, auth failure) · SHA-256 incremental and single-shot · HF <code>/blob/main/</code> → <code>/resolve/main/</code> URL rewrite (basic, idempotent, too-small-buffer refusal, false-substring guard) · chat-name sanitisation (punctuation, space-runs, trim, UTF-8 passthrough, 40-char cap) · <strong>tool-fence stripping</strong> (agent fences elided, plain code fences preserved, unclosed-fence tail drop, inline backticks kept, multi-fence chains)</td>
                 </tr>
             </tbody>
         </table>
@@ -954,9 +979,9 @@ ctest --output-on-failure</pre>
             <li><strong>Core engine:</strong> Pure C11 via <code>llama.h</code> (current API — no deprecated aliases)</li>
             <li><strong>Interface:</strong> Nuklear immediate-mode GUI · SDL2 · OpenGL 2.1 compat profile</li>
             <li><strong>Networking:</strong> libcurl easy API · gated to <code>network.c</code></li>
-            <li><strong>Security:</strong> Linux seccomp-bpf · <code>SCMP_ACT_KILL_PROCESS</code> on new IP sockets</li>
+            <li><strong>Security:</strong> Linux seccomp-bpf + Landlock · <code>SCMP_ACT_KILL_PROCESS</code> on new IP sockets · filesystem sandbox via <code>openat()</code> / <code>O_NOFOLLOW</code></li>
             <li><strong>Font:</strong> Embedded DejaVu Sans Mono · Cyrillic + Geometric Shapes · DPI-aware</li>
-            <li><strong>Persistence:</strong> <code>system_prompt.txt</code> · <code>chats/*.txt</code> (RC4-obfuscated) · <code>wasteland.cfg</code> (settings)</li>
+            <li><strong>Persistence:</strong> <code>system_prompt.txt</code> · <code>chats/*.txt</code> (XChaCha20-Poly1305 authenticated) · <code>wasteland.cfg</code> (settings + capability preset)</li>
             <li><strong>Auto-update:</strong> GitHub Releases API · platform-specific replace script · pkexec / runas / osascript elevation</li>
             <li><strong>Build:</strong> CMake 3.16+ · cross-compiles to Windows from Linux via MinGW toolchain</li>
             <li><strong>Tests:</strong> Zero-dependency C macros · CTest integration · CI on Linux amd64 / arm64 / macOS / Windows</li>
@@ -970,7 +995,7 @@ ctest --output-on-failure</pre>
             <a href="https://github.com/alexbeatnik/wasteland/releases">Releases</a> ·
             <a href="https://github.com/alexbeatnik/wasteland/blob/main/LICENSE">License</a>
         </p>
-        <p>WASTELAND TERMINAL · v0.6 · END OF TRANSMISSION<span class="cursor" style="display: inline-block; width: 9px; height: 1.1rem; background: var(--amber); vertical-align: middle; animation: blink 1s step-end infinite;"></span></p>
+        <p>WASTELAND TERMINAL · v0.7 · END OF TRANSMISSION<span class="cursor" style="display: inline-block; width: 9px; height: 1.1rem; background: var(--amber); vertical-align: middle; animation: blink 1s step-end infinite;"></span></p>
     </footer>
 
 </div>

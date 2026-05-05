@@ -89,4 +89,23 @@ int  agent_exec_apply_edit(const char *workspace, const char *path,
  */
 const char* agent_system_prompt(void);
 
+/* ---------------------------------------------------------------------------
+ * Agent Executor subprocess (optional IPC backend).
+ *
+ * When an executor path is configured, agent_exec_* calls are forwarded to
+ * a sandboxed subprocess instead of running in-process.  If the path is not
+ * set (empty string), the legacy in-process fs_sandbox backend is used.
+ * --------------------------------------------------------------------------- */
+
+/**
+ * @brief Set the absolute or relative path to the `wasteland-agent-executor`
+ *        binary.  Call once from main() after argv[0] is known.
+ */
+void agent_configure_executor_path(const char *path);
+
+/**
+ * @brief Terminate the executor subprocess if one is running.
+ */
+void agent_executor_shutdown(void);
+
 #endif /* WASTELAND_AGENT_H */

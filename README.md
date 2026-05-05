@@ -1,4 +1,4 @@
-# Wasteland Terminal v0.6
+# Wasteland Terminal v0.7
 
 ![Wasteland Terminal](assets/icon-512.png)
 
@@ -20,9 +20,9 @@ Wasteland is a local LLM inference client built in pure C with a vintage PC-insp
 - **Chat template** — Uses each model's built-in template (`llama_chat_apply_template`) so instruction-tuned models behave correctly
 - **Multi-turn memory** — Full conversation history is fed to the model on every turn so it remembers previous exchanges; context is managed automatically
 - **Context management** — CTX bar shows live token usage. `[ COMPACT ]` drops the oldest turn, saves the compacted history to disk, and mirrors the result into the inference thread immediately. Auto-compact triggers when usage exceeds 80 % after a generation
-- **Configurable inference settings** — N\_CTX (512–262 144) and Temperature (0.10–2.00) are adjustable from the left panel and persist across sessions; N\_CTX takes effect on the next model load, Temperature applies from the next prompt
+- **Configurable inference settings** — N\_CTX (512–262 144) and Temperature (0.01–5.0) are adjustable from the left panel and persist across sessions; N\_CTX takes effect on the next model load, Temperature applies from the next prompt
 - **Repetition-penalty sampler** — Replaces the old greedy sampler with a stacked penalties → top\_k → top\_p → temperature → distribution chain that prevents small models from looping into repeated paragraphs
-- **Multiple Chats** — Create, load, and switch between named chat sessions; auto-named from the first user message and then refined by the model into a contextual 3–5 word title; persisted to `chats/*.txt` with simple RC4 obfuscation
+- **Multiple Chats** — Create, load, and switch between named chat sessions; auto-named from the first user message and then refined by the model into a contextual 3–5 word title; persisted to `chats/*.txt` with authenticated XChaCha20-Poly1305 encryption
 - **Built-in behaviour rules** — A base system prompt is always active: instructs the model to output plain text (no markdown), be concise, match the user's language, and understand it is running offline. The user-configurable system prompt is appended on top
 - **System Prompt** — Configure and persist an additional system prompt to further guide model behaviour (`system_prompt.txt`)
 - **Smart Reasoning** — `<think>` reasoning blocks are displayed dimmed in the UI (with a "▒ thinking" label) and automatically excluded from the `◈` copy-to-clipboard text; each turn is rendered in its own box so user prompts never appear inside assistant reply blocks; false-positive detection (e.g. `` `<think>` `` in prose) is suppressed via line-start guard
@@ -123,16 +123,16 @@ GitHub Actions automatically builds and releases for all platforms on every tag:
 
 | Platform | Artifact |
 |----------|----------|
-| Linux x86\_64 (Ubuntu/Debian) | `wasteland_0.6_amd64.deb` — install with `sudo apt install ./wasteland_0.6_amd64.deb` |
-| Linux ARM64 (Raspberry Pi 5, Ampere, etc.) | `wasteland_0.6_arm64.deb` — install with `sudo apt install ./wasteland_0.6_arm64.deb` |
+| Linux x86\_64 (Ubuntu/Debian) | `wasteland_0.7_amd64.deb` — install with `sudo apt install ./wasteland_0.7_amd64.deb` |
+| Linux ARM64 (Raspberry Pi 5, Ampere, etc.) | `wasteland_0.7_arm64.deb` — install with `sudo apt install ./wasteland_0.7_arm64.deb` |
 | macOS (universal) | `Wasteland-macos.dmg` — one .app that runs natively on both Apple Silicon and Intel (deployment target 11.0+) |
 | Windows | `Wasteland-windows.exe` — single self-contained binary (SDL2/curl statically linked) |
 
 Push a tag to trigger a release:
 
 ```bash
-git tag v0.6
-git push origin v0.6
+git tag v0.7
+git push origin v0.7
 ```
 
 ## Running
@@ -167,7 +167,14 @@ Wasteland/
 │   ├── ui.c / ui.h         # Nuklear layout, full amber theme, per-turn chat boxes, compact pipeline
 │   ├── inference.c / .h    # llama.cpp wrapper, async load, worker thread, <think> filter, sampler stack, tunables
 │   ├── network.c / .h      # libcurl downloader & seccomp lockdown
-│   ├── agent.c / agent.h   # Tool-using ReAct agent loop (read_file, list_dir, write_file, apply_edit)
+│   ├── agent.c / agent.h       # Tool-using ReAct agent loop (read_file, list_dir, write_file, apply_edit)
+│   ├── agent_executor_main.c   # Sandboxed agent tool subprocess (Linux IPC)
+│   ├── agent_protocol.c / .h   # Framed IPC protocol between main process and executor
+│   ├── fs_sandbox.c / .h       # Filesystem sandbox (openat / O_NOFOLLOW on Linux, realpath fallback)
+│   ├── platform_sandbox.c / .h # Platform sandbox query + apply (seccomp-bpf + Landlock on Linux)
+│   ├── crypto_engine.c / .h    # XChaCha20-Poly1305 + SHA-256 wrappers
+│   ├── verify.c / .h           # Background SHA-256 model verification
+│   ├── capability.c / .h       # Agent capability preset definitions
 │   ├── nuklear_impl.c      # Nuklear + SDL/GL2 backend impl
 │   └── nuklear_sdl_gl2.h   # Nuklear SDL2/OpenGL2 backend
 ├── tests/
@@ -175,12 +182,14 @@ Wasteland/
 │   ├── test_agent.c         # Tool-call parser, sandbox, real executor round-trips
 │   ├── test_chat_history.c  # History parser (LF / CRLF / UTF-8) + system-prompt builder
 │   ├── test_version.c       # Semver comparison + updater filename matrix
-│   └── test_string_utils.c  # RC4 cipher, HF URL rewrite, chat-name sanitisation
+│       └── test_string_utils.c  # Authenticated cipher, SHA-256, HF URL rewrite, chat-name sanitisation
 ├── include/                # nuklear.h
 ├── third_party/
 │   └── llama.cpp/          # Git submodule (vendored llama.cpp)
 ├── vendor/
-│   └── llama.cpp -> ../third_party/llama.cpp  # symlink the CMake build uses
+│   ├── llama.cpp -> ../third_party/llama.cpp  # symlink the CMake build uses
+│   ├── monocypher/         # XChaCha20-Poly1305 (embedded, no external dep)
+│   └── sha256/             # Incremental SHA-256 for model verification
 └── models/                 # Local .gguf storage (gitignored)
 ```
 
@@ -199,7 +208,7 @@ Or run individual test binaries directly:
 ./test_agent         # agent_parse_calls + agent_resolve_path + tool executors
 ./test_chat_history  # parse_chat_history + build_system_prompt
 ./test_version       # version_newer_than + build_update_filename
-./test_string_utils  # RC4 round-trip + HF URL rewrite + chat-name sanitisation
+./test_string_utils  # Authenticated cipher + SHA-256 + HF URL rewrite + chat-name sanitisation
 ```
 
 Tests are compiled automatically by CMake when you configure the project. To add a new test suite:
@@ -211,14 +220,14 @@ Tests are compiled automatically by CMake when you configure the project. To add
 
 ### Current coverage
 
-Four suites, **89 tests** total — all green on Linux / macOS / Windows CI runners. Filesystem-touching cases use `/tmp` scratch directories created at suite startup.
+Four suites, **92 tests** total — all green on Linux / macOS / Windows CI runners. Filesystem-touching cases use `/tmp` scratch directories created at suite startup.
 
 | Suite | What it tests |
 |---|---|
-| `test_agent` (35) | Tool-call markdown parsing (`read_file`, `list_dir`, `write_file`, `apply_edit`) including malformed `apply_edit`, multi-line SEARCH/REPLACE blocks, empty `write_file` body, non-tool fences, inline backticks · sandbox path resolution (escape attempts, absolute paths, new files, `./` prefix) · **executor round-trips:** real read / write / apply_edit / list_dir against a scratch workspace, ambiguous-match refusal, delete-via-empty-replace, escape-blocked attempts · `agent_system_prompt` describes every tool |
+| `test_agent` (35) | Tool-call markdown parsing (`read_file`, `list_dir`, `write_file`, `apply_edit`) including malformed `apply_edit`, multi-line SEARCH/REPLACE blocks, empty `write_file` body, non-tool fences, inline backticks · sandbox path resolution (escape attempts, absolute paths, new files, `./` prefix) · **executor round-trips:** real read / write / apply_edit / list_dir against a scratch workspace via IPC or in-process fs_sandbox, ambiguous-match refusal, delete-via-empty-replace, escape-blocked attempts · `agent_system_prompt` describes every tool |
 | `test_chat_history` (18) | Flat `> prompt\nreply\n` → user/assistant message splitting · trailing-user discard · max-msg cap · CRLF (Windows) line-ending normalisation · UTF-8 (Cyrillic) round-trip · `> ` inside an assistant reply does NOT split a turn · **multi-line user prompts** (consecutive `> ` lines glued back into one user message) · NULL user-prompt for `build_system_prompt` · base-then-user concatenation order |
 | `test_version` (15) | Semver comparison (`X.Y.Z` with optional `v` prefix) including release-tag-vs-runtime, two-component versions, multi-digit minors (`0.10` > `0.9`), empty / garbage-prefix inputs · platform-specific update-filename generation · version-different filenames differ on Linux but not on macOS / Windows |
-| `test_string_utils` (21) | RC4 chat cipher round-trip (ASCII, UTF-8, empty buffer, deterministic output) · HuggingFace `/blob/main/` → `/resolve/main/` URL rewrite (basic, already-resolve, too-small-buffer, false-substring matches) · chat-name sanitisation (punctuation strip, space-run collapse, leading/trailing trim, UTF-8 passthrough, 40-char cap) · **`strip_tool_fences`** (read_file / list_dir / apply_edit elided, plain `` ```c `` / `` ```json `` preserved, unclosed-fence tail dropped, inline backticks kept, multi-fence chains) |
+| `test_string_utils` (24) | XChaCha20-Poly1305 chat cipher round-trip (ASCII, UTF-8, empty buffer, auth failure) · SHA-256 incremental and single-shot · HuggingFace `/blob/main/` → `/resolve/main/` URL rewrite (basic, already-resolve, too-small-buffer, false-substring matches) · chat-name sanitisation (punctuation strip, space-run collapse, leading/trailing trim, UTF-8 passthrough, 40-char cap) · **`strip_tool_fences`** (read_file / list_dir / apply_edit elided, plain `` ```c `` / `` ```json `` preserved, unclosed-fence tail dropped, inline backticks kept, multi-fence chains) |
 
 ## UI Guide
 
@@ -232,18 +241,20 @@ Four suites, **89 tests** total — all green on Linux / macOS / Windows CI runn
   - `[ LOAD: name | size ]` — start async load (UI stays responsive)
   - `[ LOADING: name | size ... ]` — in flight; other LOAD/DELETE buttons are disabled
   - `[ UNLOAD: name | size ]` — currently loaded model; click to free it
+  - `[ ✓ ]` — SHA-256 verify the file in a background thread
   - `[ DELETE ]` — remove the file from disk (disabled while a load is in flight or generation is running)
   - `[ REFRESH ]` — re-scan `models/`
 - **Inference Settings** — Controls visible at all times; values persist in `wasteland.cfg`. Each control pairs a **drag-able slider** (left, fast coarse adjust) with a numeric **property widget** (right, click-to-step / type-exact-value). Both bind to the same field, so you can swipe across the full range in one motion or land on `4096` exactly:
   - **N\_CTX** (512–262 144, step 1024) — context window size; change takes effect on the next model load
-  - **TEMP** (0.10–2.00, step 0.05) — sampling temperature; change takes effect immediately on the next prompt
+  - **TEMP** (0.01–5.0, step 0.05) — sampling temperature; change takes effect immediately on the next prompt
 - **System Prompt** — Multi-line input for system instructions, saved between sessions
-- **Agent Mode** — Toggle tool-using ReAct loop; set a workspace directory for sandboxed file access
+- **Agent Mode** — Toggle tool-using ReAct loop with capability presets (OFF / READ_ONLY / READ_WRITE / CUSTOM); set a workspace directory for sandboxed file access
 - **Chats** — Manage multiple persistent chat sessions:
   - `[ NEW CHAT ]` — Reset to an empty buffer. The chat is **created lazily on the first message**, named from the prompt itself (UTF-8-safe, word-boundary truncation at 60 bytes), then refined into a contextual 3–5 word model-generated title after the first assistant reply. If you click `[ NEW CHAT ]` and then switch to another chat without typing, nothing is created — no orphan "New Chat" files.
   - `[ LOAD ]` / `[ ACTIVE ]` — Switch between chat sessions
   - `[ DEL ]` — Delete a chat session
 - **Status footer** — "NET: LOCKDOWN ACTIVE" once a model is loaded; otherwise "NET: DISCONNECTED (READY)"
+- **Sandbox status indicator** — Persistent green/amber/red badge showing available platform sandbox capabilities (seccomp, Landlock, process isolation)
 - **Update banner** — If a newer release exists on GitHub, an orange banner appears under the app header with the available version. The check runs once at startup in a background thread before any network lockdown.
 
 ### Right Panel (Collapsible)
