@@ -110,23 +110,33 @@ else()
         /W4
     )
     # Silence MSVC deprecation warnings for standard C string functions
-    # (strcpy, strncpy, strerror, etc.). All uses in our code are bounded
-    # and safe — the MSVC _s variants add no correctness benefit here.
-    target_compile_definitions(Wasteland PRIVATE _CRT_SECURE_NO_WARNINGS)
+    # (strcpy, strncpy, strerror, etc.) and POSIX names (strdup, stricmp).
+    # All uses in our code are bounded and safe — the MSVC _s variants add
+    # no correctness benefit here.
+    target_compile_definitions(Wasteland PRIVATE _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_DEPRECATE)
     # nuklear.h is a single-header library compiled inside nuklear_impl.c.
-    # MSVC C4701 ("potentially uninitialized variable") fires inside nuklear.h's
-    # own code at /W4 level and is a known false-positive in that codebase.
-    # Suppress it only for that translation unit to keep our own code clean.
+    # Suppress MSVC warnings that fire inside nuklear.h's own code at /W4:
+    # C4701 potentially uninitialized variable (known false-positive)
+    # C4127 conditional expression is constant
+    # C4116 unnamed type definition in parentheses
     set_source_files_properties(
         "${CMAKE_CURRENT_SOURCE_DIR}/src/nuklear_impl.c"
-        PROPERTIES COMPILE_OPTIONS "/wd4701"
+        PROPERTIES COMPILE_OPTIONS "/wd4701;/wd4127;/wd4116"
     )
     # nuklear.h ORs together enum values from different enum types
     # (nk_edit_types | nk_edit_flags, nk_panel_set | nk_panel_type, etc.)
     # triggering C5287 in every TU that includes the header for API calls.
-    # Suppress it only for the affected translation unit.
+    # Suppress it only for the affected translation units.
     set_source_files_properties(
         "${CMAKE_CURRENT_SOURCE_DIR}/src/ui.c"
+        PROPERTIES COMPILE_OPTIONS "/wd5287"
+    )
+    set_source_files_properties(
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/inference.c"
+        PROPERTIES COMPILE_OPTIONS "/wd5287"
+    )
+    set_source_files_properties(
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/main.c"
         PROPERTIES COMPILE_OPTIONS "/wd5287"
     )
 endif()

@@ -398,6 +398,7 @@ void build_update_filename(const char *version, char *fname, size_t fsize)
 static void build_update_filename(const char *version, char *fname, size_t fsize)
 #endif
 {
+    (void)version;
 #ifdef _WIN32
     snprintf(fname, fsize, "Wasteland-windows.exe");
 #elif defined(__APPLE__)

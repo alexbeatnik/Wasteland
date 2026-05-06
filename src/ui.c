@@ -26,6 +26,10 @@
  * lives in nuklear_impl.c so the header-guarded NK_IMPLEMENTATION is only
  * compiled once. */
 
+/* Forward declarations for update functions defined in main.c. */
+extern void launch_updater(const char *new_file);
+extern void *update_download_thread(void *arg);
+
 /* ---------------------------------------------------------------------------
  * Predefined Hub Models (HuggingFace repo IDs)
  * These are resolved via the HF API to find the first .gguf file.
@@ -1155,14 +1159,12 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
             } else if (state->update_state == 1) {
                 nk_layout_row_dynamic(nk, 24, 1);
                 if (nk_button_label(nk, "[ RESTART TO UPDATE ]")) {
-                    extern void launch_updater(const char *);
                     launch_updater(state->update_file);
                     state->running = 0;
                 }
             } else if (state->update_state == 0) {
                 nk_layout_row_dynamic(nk, 24, 1);
                 if (nk_button_label(nk, "[ DOWNLOAD UPDATE ]")) {
-                    extern void* update_download_thread(void *);
                     pthread_t dl;
                     if (pthread_create(&dl, NULL,
                                        update_download_thread, state) == 0) {
