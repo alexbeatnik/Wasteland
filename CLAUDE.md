@@ -252,7 +252,7 @@ Pure greedy is not used — it causes repetition loops on small models.
 
 ## Hub Models & URL Rewrite
 
-- `hub_models[]` in `ui.c` is a fixed-size array (`WASTELAND_MAX_HUB_MODELS = 5`) of HF repo IDs. Entries must be real public GGUF repos. Current set: `Qwen/Qwen2.5-0.5B-Instruct-GGUF`, `ggml-org/gemma-3-1b-it-GGUF`, `Qwen/Qwen2.5-1.5B-Instruct-GGUF`, `ggml-org/SmolLM2-1.7B-Instruct-GGUF`, `unsloth/Qwen3.6-35B-A3B-GGUF`.
+- `hub_models[]` in `ui.c` is now an array of `hub_model_t { repo_id, description }` structs, sized `WASTELAND_MAX_HUB_MODELS = 11`. Each entry MUST be a real public GGUF repo (the HF API resolves it to the first `.gguf` file in the tree); the description is a one-liner ≤ 64 chars rendered in dim amber under the radio button so users know what they're picking before they download. Current set, sorted by parameter count: `Qwen/Qwen2.5-0.5B-Instruct-GGUF`, `ggml-org/gemma-3-1b-it-GGUF`, `Qwen/Qwen2.5-1.5B-Instruct-GGUF`, `ggml-org/SmolLM2-1.7B-Instruct-GGUF`, `bartowski/google_gemma-4-E4B-it-GGUF`, `Qwen/Qwen2.5-7B-Instruct-GGUF`, `bartowski/Qwen2.5.1-Coder-7B-Instruct-GGUF`, `bartowski/OLMo-2-1124-7B-Instruct-GGUF`, `bartowski/Meta-Llama-3.1-8B-Instruct-GGUF`, `bartowski/google_gemma-4-31B-it-GGUF`, `unsloth/Qwen3.6-35B-A3B-GGUF`. The 7B Qwen2.5 entry is the recommended default for usable quality on consumer hardware (~4.4 GB Q4_K_M); the tinies are smoke-test grade — leaving them as the only options is a UX trap because users blame the app for the model's small-size dumbness.
 - `/blob/main/<file>` → `/resolve/main/<file>` rewrite is `+3` bytes: `memmove` tail right by 3 *before* `memcpy`.
 
 ## seccomp Filter Scope

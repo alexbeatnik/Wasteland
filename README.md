@@ -233,7 +233,20 @@ Four suites, **98 tests** total — all green on Linux / macOS / Windows CI runn
 
 ### Left Panel
 
-- **Hub Models** — 5 predefined HuggingFace repos with radio buttons (small, real, public instruction-tuned GGUFs — Qwen 2.5 0.5B/1.5B, Gemma 3 1B IT, SmolLM2 1.7B Instruct, Qwen3.6 35B A3B). The list is defined in `ui.c` and resolved live via the HF API
+- **Hub Models** — 11 predefined HuggingFace repos with radio buttons, sorted by parameter count. Each entry shows a one-line dim description under the radio so the trade-offs are visible before download:
+  - `Qwen/Qwen2.5-0.5B-Instruct-GGUF` — tiny, smoke-test on weak hardware
+  - `ggml-org/gemma-3-1b-it-GGUF` — 1B Google Gemma 3, ~0.8 GB Q4
+  - `Qwen/Qwen2.5-1.5B-Instruct-GGUF` — improved tiny tier, ~1.0 GB Q4
+  - `ggml-org/SmolLM2-1.7B-Instruct-GGUF` — HuggingFace SmolLM2 small generalist
+  - `bartowski/google_gemma-4-E4B-it-GGUF` — compact Gemma 4 expert variant, ~2-3 GB
+  - **`Qwen/Qwen2.5-7B-Instruct-GGUF`** — recommended default, ~4.4 GB Q4_K_M, the smallest entry that gives usable conversation quality
+  - `bartowski/Qwen2.5.1-Coder-7B-Instruct-GGUF` — code specialist (Python / JS / C++)
+  - `bartowski/OLMo-2-1124-7B-Instruct-GGUF` — Allen AI fully-open weights + training data
+  - `bartowski/Meta-Llama-3.1-8B-Instruct-GGUF` — Meta Llama 3.1, strong general chat, ~4.9 GB
+  - `bartowski/google_gemma-4-31B-it-GGUF` — flagship dense Gemma 4, needs 32+ GB RAM
+  - `unsloth/Qwen3.6-35B-A3B-GGUF` — 35B MoE with only 3B active per token; laptop-friendly despite the ~18 GB on-disk size
+  
+  The list is defined in `ui.c` (struct `hub_model_t { repo_id, description }`) and resolved live via the HF API.
 - **Custom ID or URL** — Enter any HF repo ID or full `/blob/main/` URL (the downloader auto-rewrites `/blob/main/` → `/resolve/main/`)
 - **Target** — Shows resolved download target before clicking `[ DOWNLOAD ]`
 - **Progress** — Filename + percent during download, with `[ CANCEL ]` button

@@ -29,15 +29,45 @@
 /* ---------------------------------------------------------------------------
  * Predefined Hub Models (HuggingFace repo IDs)
  * These are resolved via the HF API to find the first .gguf file.
- * Sorted by parameter count (ascending). All four are real, public,
+ * Sorted by parameter count (ascending). All entries are real, public,
  * instruction-tuned GGUF repos with a working chat template.
+ *
+ * Tiers: tiny (0.5–1.7B) for fast smoke-tests on weak hardware, mid (7-8B)
+ * for usable conversation quality on consumer hardware, large (31-35B) for
+ * the strongest answers when the user has the disk and RAM for the full
+ * GGUF. The MoE entry (Qwen3.6-35B-A3B) only activates 3B params per token
+ * so it runs on a laptop despite the ~18 GB on-disk size.
  * --------------------------------------------------------------------------- */
-static const char *hub_models[WASTELAND_MAX_HUB_MODELS] = {
-    "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
-    "ggml-org/gemma-3-1b-it-GGUF",
-    "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
-    "ggml-org/SmolLM2-1.7B-Instruct-GGUF",
-    "unsloth/Qwen3.6-35B-A3B-GGUF"
+typedef struct {
+    const char *repo_id;       /* full HF org/repo for the API call */
+    const char *description;   /* one-line, ≤ 64 chars; rendered dim under
+                                  the radio button so the user knows what
+                                  they're picking before they download */
+} hub_model_t;
+
+static const hub_model_t hub_models[WASTELAND_MAX_HUB_MODELS] = {
+    {"Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+     "0.5B Qwen2.5 - tiny, smoke-test on weak hardware"},
+    {"ggml-org/gemma-3-1b-it-GGUF",
+     "1B Google Gemma 3 - small instruct, ~0.8 GB Q4"},
+    {"Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+     "1.5B Qwen2.5 - improved tiny tier, ~1.0 GB Q4"},
+    {"ggml-org/SmolLM2-1.7B-Instruct-GGUF",
+     "1.7B HuggingFace SmolLM2 - small generalist"},
+    {"bartowski/google_gemma-4-E4B-it-GGUF",
+     "Gemma 4 E4B - compact expert variant, ~2-3 GB"},
+    {"Qwen/Qwen2.5-7B-Instruct-GGUF",
+     "7B Qwen2.5 - recommended default, ~4.4 GB Q4"},
+    {"bartowski/Qwen2.5.1-Coder-7B-Instruct-GGUF",
+     "7B Qwen2.5.1 Coder - code specialist (Py/JS/C++)"},
+    {"bartowski/OLMo-2-1124-7B-Instruct-GGUF",
+     "7B OLMo-2 - Allen AI fully-open weights+data"},
+    {"bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
+     "8B Meta Llama 3.1 - strong general chat, ~4.9 GB"},
+    {"bartowski/google_gemma-4-31B-it-GGUF",
+     "31B Google Gemma 4 - flagship dense, needs 32+ GB RAM"},
+    {"unsloth/Qwen3.6-35B-A3B-GGUF",
+     "35B Qwen3.6 MoE - only 3B active, laptop-friendly"}
 };
 
 /* ---------------------------------------------------------------------------
@@ -1291,30 +1321,49 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
             nk_button_color(nk, amber); /* horizontal rule */
 
             if (!state->network_lockdown) {
-                /* --- Predefined hub models (radio buttons) --- */
+                /* --- Predefined hub models (radio buttons) ---
+                 * `nk_option_label` returns the option's *current* selected
+                 * state, not a click event — so we have to compare
+                 * before/after to detect the actual click edge. Without this
+                 * the body re-fires every frame and would clobber the
+                 * Custom ID buffer continuously. */
+                struct nk_color amber_dim = nk_rgb(0xB0, 0x78, 0x00);
                 for (int i = 0; i < WASTELAND_MAX_HUB_MODELS; i++) {
                     nk_layout_row_dynamic(nk, 22, 1);
-                    if (nk_option_label(nk, hub_models[i],
-                                        state->selected_hub_model == i)) {
+                    int was_sel = (state->selected_hub_model == i);
+                    int is_sel  = nk_option_label(nk, hub_models[i].repo_id,
+                                                  was_sel);
+                    if (is_sel && !was_sel) {
                         state->selected_hub_model = i;
                         state->custom_hf_id[0] = '\0';
-                        strncpy(state->hf_model_id, hub_models[i],
+                        strncpy(state->hf_model_id, hub_models[i].repo_id,
                                 sizeof(state->hf_model_id) - 1);
                         state->hf_model_id[sizeof(state->hf_model_id)-1] = '\0';
                     }
+                    /* Description row — dim, slightly indented, smaller. */
+                    nk_layout_row_begin(nk, NK_DYNAMIC, 14, 2);
+                    nk_layout_row_push(nk, 0.05f);
+                    nk_spacing(nk, 1);
+                    nk_layout_row_push(nk, 0.95f);
+                    nk_label_colored(nk, hub_models[i].description,
+                                     NK_TEXT_LEFT, amber_dim);
+                    nk_layout_row_end(nk);
                 }
 
                 /* --- Custom ID input --- */
                 nk_layout_row_dynamic(nk, 22, 1);
                 nk_label_colored(nk, "Custom ID or URL:", NK_TEXT_LEFT, amber);
                 nk_layout_row_dynamic(nk, 28, 1);
-                int custom_len = (int)strlen(state->custom_hf_id);
                 nk_edit_string_zero_terminated(nk, NK_EDIT_FIELD,
                     state->custom_hf_id,
                     sizeof(state->custom_hf_id),
                     nk_filter_default);
-                /* If user types into custom field, drop hub selection */
-                if (custom_len > 0 && state->selected_hub_model >= 0) {
+                /* If the user has anything in the custom field, drop the hub
+                 * selection so the radio buttons go back to "no choice".
+                 * Measured AFTER the edit so the very first character the
+                 * user types switches the source-of-truth immediately. */
+                if (state->custom_hf_id[0] != '\0' &&
+                    state->selected_hub_model >= 0) {
                     state->selected_hub_model = -1;
                     state->hf_model_id[0] = '\0';
                 }
@@ -1322,7 +1371,7 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                 /* --- Resolve download target --- */
                 const char *target_id = NULL;
                 if (state->selected_hub_model >= 0) {
-                    target_id = hub_models[state->selected_hub_model];
+                    target_id = hub_models[state->selected_hub_model].repo_id;
                 } else if (state->custom_hf_id[0]) {
                     target_id = state->custom_hf_id;
                 }
