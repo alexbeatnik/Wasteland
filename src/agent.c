@@ -54,8 +54,10 @@
 #include <sys/stat.h>
 #include <limits.h>
 
-#ifdef __linux__
+#ifndef _WIN32
 #  include <unistd.h>
+#endif
+#ifdef __linux__
 #  include <sys/socket.h>
 #  include <spawn.h>
 #  include <signal.h>
@@ -85,7 +87,11 @@ void agent_executor_shutdown(void)
     if (g_executor_fd >= 0) {
         /* Graceful shutdown request. */
         agent_ipc_send_request(g_executor_fd, AGENT_IPC_TOOL_SHUTDOWN, "", NULL, 0);
+#ifndef _WIN32
         close(g_executor_fd);
+#else
+        _close(g_executor_fd);
+#endif
         g_executor_fd = -1;
     }
 #  ifdef __linux__

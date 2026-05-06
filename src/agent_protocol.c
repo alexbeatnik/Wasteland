@@ -3,10 +3,12 @@
  * ============================================================================ */
 
 #include "agent_protocol.h"
-#include <unistd.h>
-#include <errno.h>
 #include <string.h>
 #include <stdio.h>
+
+#ifdef __linux__
+#  include <unistd.h>
+#  include <errno.h>
 
 int agent_ipc_read_all(int fd, uint8_t *buf, size_t n)
 {
@@ -86,3 +88,16 @@ int agent_ipc_recv_response(int fd,
     *out_len    = hdr.data_len;
     return 0;
 }
+#else
+/* IPC executor is Linux-only; provide no-op stubs for other platforms. */
+int agent_ipc_read_all(int fd, uint8_t *buf, size_t n) { (void)fd; (void)buf; (void)n; return -1; }
+int agent_ipc_write_all(int fd, const uint8_t *buf, size_t n) { (void)fd; (void)buf; (void)n; return -1; }
+int agent_ipc_send_request(int fd, agent_ipc_tool_t tool,
+                           const char *path,
+                           const uint8_t *data, uint32_t data_len)
+{ (void)fd; (void)tool; (void)path; (void)data; (void)data_len; return -1; }
+int agent_ipc_recv_response(int fd,
+                            int32_t *out_status,
+                            uint8_t *out_data, uint32_t *out_len)
+{ (void)fd; (void)out_status; (void)out_data; (void)out_len; return -1; }
+#endif

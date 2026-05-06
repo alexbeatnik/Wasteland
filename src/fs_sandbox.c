@@ -95,17 +95,6 @@ static int path_is_inside(const char *child, const char *parent)
     return child[plen] == '\0' || child[plen] == '/' || child[plen] == '\\';
 }
 
-/* ---------------------------------------------------------------------------
- * Linux openat() backend
- * --------------------------------------------------------------------------- */
-#  ifdef __linux__
-
-static int openat_beneath(int dirfd, const char *name, int flags, mode_t mode)
-{
-    int fd = openat(dirfd, name, flags | O_NOFOLLOW | O_CLOEXEC, mode);
-    return fd;
-}
-
 /* Reject absolute paths and any component that is "..".  We also reject
  * embedded ".." because openat-beneath already forbids them, but catching
  * them early lets us emit a clear "outside workspace" error message. */
@@ -124,6 +113,17 @@ static int path_is_suspicious(const char *rel_path)
         if (*p) p++;
     }
     return 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * Linux openat() backend
+ * --------------------------------------------------------------------------- */
+#  ifdef __linux__
+
+static int openat_beneath(int dirfd, const char *name, int flags, mode_t mode)
+{
+    int fd = openat(dirfd, name, flags | O_NOFOLLOW | O_CLOEXEC, mode);
+    return fd;
 }
 
 static int resolve_and_open(const char *rel_path, int flags, mode_t mode,

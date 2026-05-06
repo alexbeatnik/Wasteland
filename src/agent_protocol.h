@@ -26,17 +26,21 @@ typedef enum {
     AGENT_IPC_TOOL_SHUTDOWN  = 99
 } agent_ipc_tool_t;
 
+#pragma pack(push, 1)
+
 typedef struct {
     uint8_t  version;    /* AGENT_IPC_VERSION */
     uint8_t  tool;       /* agent_ipc_tool_t */
     uint16_t path_len;   /* <= AGENT_IPC_MAX_PATH */
     uint32_t data_len;   /* <= AGENT_IPC_MAX_DATA */
-} __attribute__((packed)) agent_ipc_req_hdr_t;
+} agent_ipc_req_hdr_t;
 
 typedef struct {
     int32_t  status;     /* 0 = success, negative = errno or custom error */
     uint32_t data_len;   /* <= AGENT_IPC_MAX_DATA */
-} __attribute__((packed)) agent_ipc_resp_hdr_t;
+} agent_ipc_resp_hdr_t;
+
+#pragma pack(pop)
 
 /**
  * @brief Send a complete request (header + path + optional data) over `fd`.
