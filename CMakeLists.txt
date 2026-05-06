@@ -62,20 +62,22 @@ endif()
 
 # Agent Executor subprocess — spawned by the main binary for sandboxed
 # filesystem operations.  Links the same pure-C modules but no SDL/llama.cpp.
-set(AGENT_EXEC_SOURCES
-    src/agent_executor_main.c
-    src/agent_protocol.c
-    src/fs_sandbox.c
-    src/platform_sandbox.c
-)
-add_executable(wasteland-agent-executor ${AGENT_EXEC_SOURCES})
-target_include_directories(wasteland-agent-executor PRIVATE src include)
+# The IPC executor is Linux-only; on other platforms agent tools fall back to
+# in-process fs_sandbox.c calls.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(AGENT_EXEC_SOURCES
+        src/agent_executor_main.c
+        src/agent_protocol.c
+        src/fs_sandbox.c
+        src/platform_sandbox.c
+    )
+    add_executable(wasteland-agent-executor ${AGENT_EXEC_SOURCES})
+    target_include_directories(wasteland-agent-executor PRIVATE src include)
     target_compile_definitions(wasteland-agent-executor PRIVATE _GNU_SOURCE)
-endif()
-if(SECCOMP_LIBRARY)
-    target_link_libraries(wasteland-agent-executor PRIVATE ${SECCOMP_LIBRARY})
-    target_compile_definitions(wasteland-agent-executor PRIVATE WASTELAND_HAS_SECCOMP=1)
+    if(SECCOMP_LIBRARY)
+        target_link_libraries(wasteland-agent-executor PRIVATE ${SECCOMP_LIBRARY})
+        target_compile_definitions(wasteland-agent-executor PRIVATE WASTELAND_HAS_SECCOMP=1)
+    endif()
 endif()
 
 # ---------------------------------------------------------------------------
@@ -121,7 +123,7 @@ else()
     # C4116 unnamed type definition in parentheses
     set_source_files_properties(
         "${CMAKE_CURRENT_SOURCE_DIR}/src/nuklear_impl.c"
-        PROPERTIES COMPILE_OPTIONS "/wd4701;/wd4127;/wd4116"
+        PROPERTIES COMPILE_OPTIONS "/wd4701;/wd4127;/wd4116;/wd5287"
     )
     # nuklear.h ORs together enum values from different enum types
     # (nk_edit_types | nk_edit_flags, nk_panel_set | nk_panel_type, etc.)
