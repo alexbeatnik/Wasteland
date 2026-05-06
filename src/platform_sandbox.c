@@ -74,17 +74,22 @@ static int install_landlock(const char *workspace)
 {
     if (!workspace || !workspace[0]) return -1;
 
-    /* Hand-pick the rights the agent executor legitimately needs. */
+    /* Hand-pick the rights the agent executor legitimately needs.
+     * Some flags are missing on older kernel headers — degrade gracefully. */
     __u64 access_fs =
         LANDLOCK_ACCESS_FS_READ_FILE  |
         LANDLOCK_ACCESS_FS_READ_DIR   |
         LANDLOCK_ACCESS_FS_WRITE_FILE |
-        LANDLOCK_ACCESS_FS_TRUNCATE   |
         LANDLOCK_ACCESS_FS_MAKE_REG   |
         LANDLOCK_ACCESS_FS_MAKE_DIR   |
         LANDLOCK_ACCESS_FS_REMOVE_FILE|
-        LANDLOCK_ACCESS_FS_REMOVE_DIR |
-        LANDLOCK_ACCESS_FS_REFER;
+        LANDLOCK_ACCESS_FS_REMOVE_DIR;
+#ifdef LANDLOCK_ACCESS_FS_TRUNCATE
+    access_fs |= LANDLOCK_ACCESS_FS_TRUNCATE;
+#endif
+#ifdef LANDLOCK_ACCESS_FS_REFER
+    access_fs |= LANDLOCK_ACCESS_FS_REFER;
+#endif
 
     struct landlock_ruleset_attr ruleset_attr = {
         .handled_access_fs = access_fs,
