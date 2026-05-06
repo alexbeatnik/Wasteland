@@ -1392,7 +1392,13 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                     }
 
                     nk_layout_row_push(nk, 0.08f);
-                    if (nk_button_label(nk, "\xe2\x9c\x93") && !load_busy && !gen_busy) {
+                    /* \xe2\x96\xa6 = U+25A6 ▦ SQUARE WITH ORTHOGONAL CROSSHATCH
+                     * FILL. From Geometric Shapes (U+25A0..U+25FF), the only
+                     * symbol range baked into the embedded DejaVu Sans Mono
+                     * atlas. The previous \xe2\x9c\x93 ✓ (U+2713) was in
+                     * Dingbats and rendered as `?`. The crosshatch hints at
+                     * "checksum / hash grid", which fits the verify action. */
+                    if (nk_button_label(nk, "\xe2\x96\xa6") && !load_busy && !gen_busy) {
                         start_verify(state->models[i], state);
                         snprintf(state->status_msg, sizeof(state->status_msg),
                                  "Verifying %s...", basename);
@@ -1842,7 +1848,11 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                                  NK_TEXT_LEFT, warn);
 
                 char title[640];
-                snprintf(title, sizeof(title), "%s \xe2\x86\x92 %s",
+                /* "->" is ASCII because U+2192 RIGHTWARDS ARROW lives in the
+                 * Arrows block (U+2190..U+21FF) which is NOT baked into the
+                 * embedded font atlas — would render as `?`. The baked
+                 * General Punctuation subset is U+2010..U+2027 only. */
+                snprintf(title, sizeof(title), "%s -> %s",
                          pending == 1 ? "WRITE_FILE" : "APPLY_EDIT",
                          p_path ? p_path : "");
                 nk_layout_row_dynamic(nk, 16, 1);
