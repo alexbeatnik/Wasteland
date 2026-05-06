@@ -679,11 +679,16 @@
                 <small>// 7-byte carry buffer</small>
             </div>
             <div class="feature-item">
-                <strong><span class="icon">∑</span> Context Compaction</strong>
+                <strong><span class="icon">∑</span> Summarising Compact</strong>
                 Live <code>CTX: used / max</code> bar with colour-coded progress.
-                Auto-compact at 80%, pre-send compact at 75%, manual <code>[ COMPACT ]</code>
-                button drops oldest turn and persists the result.
-                <small>// probe-tokenisation, no allocation</small>
+                <code>[ COMPACT ]</code> doesn't drop the oldest turn —
+                it asks the model to write a 3–6 sentence note that preserves
+                names, numbers, paths, decisions and open questions, then rewrites
+                history as <code>[SUMMARY]…[/SUMMARY]</code> + the last 2 turns
+                verbatim. Each subsequent compact re-summarises (existing summary +
+                newly-aged turns), so the prefix stays bounded no matter how long
+                the conversation runs.
+                <small>// async · re-summarisation · ~600 chars</small>
             </div>
             <div class="feature-item">
                 <strong><span class="icon">⌬</span> Sandboxed Agent Mode</strong>
@@ -699,10 +704,12 @@
             </div>
             <div class="feature-item">
                 <strong><span class="icon">▤</span> Multi-Chat Persistence</strong>
-                Named, browsable chat sessions. Auto-named from your first message, then refined
-                by the model into a 3–5 word contextual title. Stored with authenticated
-                XChaCha20-Poly1305 encryption (<code>WST2</code> header) via Monocypher —
-                detects tampering, not just obfuscation.
+                Named, browsable chat sessions. Auto-named from your first message, then
+                refined by the model into a 3–5 word contextual title — the title prompt
+                tells the model the budget (≤ 40 chars, language-matched, no markdown)
+                so it doesn't run on. Stored with authenticated XChaCha20-Poly1305
+                encryption (<code>WST2</code> header) via Monocypher — detects tampering,
+                not just obfuscation.
                 <small>// 64 chats · cross-launch · authenticated</small>
             </div>
             <div class="feature-item">
@@ -944,7 +951,7 @@ cmake --build . --config Release</pre>
     <!-- ============== TESTING ============== -->
     <section>
         <h2>TESTING</h2>
-        <p>Zero-dependency C test framework — just macros and <code>stdio.h</code>. <strong>92 tests across 4 suites</strong>, all green on Linux / macOS / Windows CI runners. Run via CTest:</p>
+        <p>Zero-dependency C test framework — just macros and <code>stdio.h</code>. <strong>98 tests across 4 suites</strong>, all green on Linux / macOS / Windows CI runners. Run via CTest:</p>
 <pre>cd build
 ctest --output-on-failure</pre>
 
@@ -958,8 +965,8 @@ ctest --output-on-failure</pre>
                 </tr>
                 <tr>
                     <td><code>test_chat_history</code></td>
-                    <td>18</td>
-                    <td>Flat <code>&gt; prompt\nreply\n</code> → user/assistant splitting · CRLF (Windows) line endings · UTF-8 (Cyrillic) · <code>&gt; </code> inside reply does NOT split · trailing pending prompt discard · <strong>multi-line user prompts</strong> (consecutive <code>&gt; </code> lines glued back into one user message) · NULL system-prompt safety · base-then-user concatenation order</td>
+                    <td>24</td>
+                    <td>Flat <code>&gt; prompt\nreply\n</code> → user/assistant splitting · CRLF (Windows) line endings · UTF-8 (Cyrillic) · <code>&gt; </code> inside reply does NOT split · trailing pending prompt discard · <strong>multi-line user prompts</strong> (consecutive <code>&gt; </code> lines glued back into one user message) · NULL system-prompt safety · base-then-user concatenation order · <strong>compact-summary prefix extraction</strong> (no-prefix passthrough, basic <code>[SUMMARY]…[/SUMMARY]</code> round-trip, multi-line body preserves numbers/paths, malformed missing-close fallback, in-body marker ignored unless line-anchored, fixed-buffer truncation still returns correct skip offset)</td>
                 </tr>
                 <tr>
                     <td><code>test_version</code></td>

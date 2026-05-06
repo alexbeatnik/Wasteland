@@ -32,6 +32,7 @@ All mutable cross-thread state is in `app_state_t` (defined in `ui.h`):
 - `system_prompt` stores user instructions and persists to `system_prompt.txt`.
 - `chats` (2D array sized `WASTELAND_MAX_CHATS × WASTELAND_CHAT_NAME_LEN`), `chat_count`, `selected_chat` manage multi-session functionality, saving state to `chats/*.txt` (4-byte `WST2` magic + 24-byte XChaCha20 nonce + 16-byte Poly1305 tag + ciphertext via `crypto_engine.c`; files without `WST2` are read as legacy plaintext, including the older `WSTL` RC4 format from v0.6).
 - `verify_progress` / `verify_active` / `verify_result` / `verify_path` — drive the SHA-256 model-checksum overlay. Set by the detached verify thread in `main.c::start_verify()` (computes `verify_compute_sha256()` from `verify.c`); the main loop watches `verify_progress >= 100` to flush the result into `status_msg`.
+- `compact_pending` / `compact_chat_index` / `compact_summarised_turns` / `compact_keep_tail` — drive the async summarisation compact. `compact_keep_tail` is heap-owned; freed by `ui_finalize_compact` once the inference summary lands and is spliced back into `chat_history`. While `compact_pending == 1`, the SEND button is gated and the COMPACT button refuses to start a second pass.
 - `capability_preset` (`cap_preset_t` from `capability.h`) and `capability_custom_bits` — agent capability tier (OFF / READ-ONLY / READ+WRITE / CUSTOM). The CUSTOM bitmask is per-tool. Persisted to `wasteland.cfg`. The legacy `agent_mode` flag still gates the whole subsystem; the preset selects which tools are allowed once it's on.
 - `left_panel_collapsed` controls UI layout state.
 - `settings_n_ctx` / `settings_temperature` — UI-side copies of the tunables, pushed to `inference_set_n_ctx` / `inference_set_temperature` every frame and persisted to `wasteland.cfg`.
@@ -185,11 +186,43 @@ The right panel chat group iterates `local_hist` (a per-frame snapshot of `state
 
 ## Context Management
 
-- `inference_get_context_stats()` formats the full conversation through the chat template, then probe-tokenises (NULL buf, 0 max → negated count) to measure usage without allocating. Returns 0 on success, -1 if no model is loaded.
+- `inference_get_context_stats()` formats the full conversation through the chat template, then probe-tokenises (NULL buf, 0 max → negated count) to measure usage without allocating. Returns 0 on success, -1 if no model is loaded. It also strips any `[SUMMARY]...[/SUMMARY]` prefix and counts a synthetic `system: Summary: ...` message in its place — same shape the worker sees, so the CTX bar matches reality post-compact.
 - CTX display: `CTX: used / max (pct%)`. Colour: amber < 75 %, orange 75–90 %, red > 90 %.
-- Auto-compact: triggered after generation when usage > 80 %. Uses `ui_compact_chat_history()`.
-- Pre-send compact: triggered before submitting a prompt when usage > 75 %. Uses `compact_chat_history()` directly (simpler, mirrors happen in the subsequent `ui_set_chat_history()` call).
-- Manual compact: `[ COMPACT ]` button calls `ui_compact_chat_history(state, 1)`. Refuses during generation.
+- Manual compact: `[ COMPACT ]` button calls `ui_compact_chat_history(state, 1)`. Refuses during generation, when a model isn't loaded, when fewer than 3 turns exist, or when a compact is already in flight.
+- Auto-compact: triggered after generation when usage > 80 %.
+- Pre-send compact: triggered before submitting a prompt when usage > 75 %; the SEND click is dropped that frame — the user clicks again after the summary lands. The send button is also gated by `state->compact_pending` so it can't fire mid-compact.
+
+### Summary-based compact (v0.7+)
+
+The compact pipeline is **summarisation**, not tail-drop. There are three stages, all async:
+
+1. **Snapshot phase** (UI thread, in `ui_compact_chat_history`):
+   - Lock `chat_mutex`, copy `chat_history` into a local buffer, unlock.
+   - `skip_summary_prefix()` / `copy_summary_prefix()` peel off any existing `[SUMMARY]...[/SUMMARY]\n` block at the head and stash the body.
+   - `count_turns()` (boundary = `\n> ` whose previous line is NOT `> `, so multi-line user prompts count as one turn) decides whether there's enough to compact (`>= COMPACT_MIN_TURNS = 3`).
+   - `find_nth_turn_start(turns, total - COMPACT_KEEP_RECENT_TURNS)` (default keeps the last 2 turns verbatim) gives the cut point.
+   - The "older" portion (existing summary preface + raw older turns) is concatenated into a static `src_text[]` buffer.
+   - The "to keep" tail is `strdup`'d into `state->compact_keep_tail`.
+   - `inference_request_summary(ictx, src_text)` queues the work; `state->compact_pending = 1`.
+   - Status message: `Compacting N older turn(s) into a summary...`.
+
+2. **Generation phase** (inference worker, top of every loop iteration):
+   - The worker now waits on `(has_prompt || needs_summary)`. On wakeup it services a queued summary BEFORE any prompt — so a user clicking SEND immediately after COMPACT is gated by `compact_pending` in the UI; if it weren't, the prompt would still see the old history because mirroring happens in `ui_finalize_compact`.
+   - The summary system prompt enforces 3–6 short sentences, max 600 chars, plain text, language-matched, "preserve names, numbers, file paths, decisions, open questions; drop greetings and filler".
+   - `summary_mode = 1` redirects `output_append_locked` into `summary_buffer` (`WASTELAND_SUMMARY_MAX = 4096`) instead of the chat output ring. Pure inference reuses the same `run_one_turn` codepath; the chat `output_buffer` is never touched.
+   - On completion, leading/trailing whitespace is trimmed and `summary_ready = 1` is published under `summary_mutex`.
+
+3. **Splice phase** (UI thread, `ui_finalize_compact`, called from main loop each frame):
+   - `inference_take_summary()` returns 0 if not ready — main loop skips.
+   - When ready, build `[SUMMARY]\n<text>\n[/SUMMARY]\n<tail>` (where `<tail>` is the snapshotted verbatim portion) into `state->chat_history` under `chat_mutex`, mirror via `inference_set_chat_history`, save to disk if the user is still on the same chat (`compact_chat_index == selected_chat`), update CTX stats, free the tail snapshot, clear `compact_pending`.
+
+The worker side reads the summary back during normal prompt processing: `extract_summary_prefix(local_history, hist_summary, ...)` strips the block before passing to `parse_chat_history`, and the body is appended to the system message as `\n\nPrevious conversation summary (older turns compacted from this chat):\n<text>`. Both the chat branch and the agent ReAct branch do this. The UI does NOT render the summary block in the chat view yet — `[SUMMARY]...[/SUMMARY]` lines pass through the rendering loop as plain text inside one box (good enough for v1; can be hidden later).
+
+Tunables to keep in sync if you change either: `COMPACT_KEEP_RECENT_TURNS` and `COMPACT_MIN_TURNS` in `ui.c`, and `WASTELAND_SUMMARY_MAX` in `inference.h` (also bumps `combined_sys_plain` size in the worker — currently `MAX_PROMPT_LEN + 2048 + WASTELAND_SUMMARY_MAX`).
+
+## Title Prompt
+
+The chat-title generator (`needs_title` + `inference_take_title`) tells the model an explicit budget so the produced title fits the on-disk filename. System message: `"Reply with ONLY the title text — 3 to 5 words, no quotes, no markdown, no punctuation, no emoji. Title MUST fit in 40 characters total. Use the same language as the user message."`. User message: `"Give this conversation a short 3-5 word title (max 40 chars) based on the user message below. Match the user's language. Output ONLY the title text, nothing else.\n\nUser: <prompt>"`. Output is capped at 20 sample tokens. The on-disk filename byte cap remains 60 in `generate_chat_name_from_prompt()` — leaves headroom for Cyrillic (≈2 bytes per char) so a 30-Ukrainian-char title still fits.
 
 ## Sampler Stack
 
@@ -290,7 +323,7 @@ extract-version  →  create-tag        ┐
 
 - **`extract-version`** runs only on `push` to `main`. It reads `WASTELAND_VERSION` from `src/ui.h` and emits two outputs: `version=v0.7` (the tag string) and `tag_exists=true|false` (a probe of `git ls-remote --tags`). `tag_exists` is the gate that prevents cosmetic main-pushes from regenerating an already-published release.
 - **`create-tag`** pushes `v0.7` to origin if it doesn't already exist. Runs on main pushes and `workflow_dispatch`. Note: tags pushed via `GITHUB_TOKEN` do NOT trigger a new workflow run (GitHub safety against recursive events) — so the same workflow run must continue to build + release.
-- **`test`** is unconditional — every event runs the four-suite (92-case) ctest run before anything else proceeds.
+- **`test`** is unconditional — every event runs the four-suite (98-case) ctest run before anything else proceeds.
 - **`build`** is the 4-platform matrix (Linux amd64, Linux arm64, macOS universal, Windows). Depends on `test` + `create-tag`.
 - **`release`** depends on **both** `build` AND `extract-version` — the `extract-version` dependency is critical because that's the only path through which the resolved tag reaches the release step on a main-branch push.
 
@@ -438,12 +471,12 @@ The action buttons use the same snapshot-and-restore pattern on `nk->style.butto
 - The agent suite **does** link `src/agent.c` directly (`add_executable(test_agent tests/test_agent.c src/agent.c)`) because it has no SDL / llama.cpp dependency — that lets us exercise the real `agent_exec_*` executors end-to-end against a scratch workspace.
 - All tests run automatically in CI via `cmake --build build && ctest --output-on-failure`.
 
-### Suite manifest (92 tests as of v0.7)
+### Suite manifest (98 tests as of v0.7)
 
 | Suite | Tests | Targets |
 |---|---|---|
 | `test_agent` | 35 | `agent_parse_calls` (16 cases inc. malformed `apply_edit`, multi-line blocks, non-tool fences, inline backticks), `agent_resolve_path` (5 sandbox cases), `agent_exec_read_file/write_file/apply_edit/list_dir` (13 round-trip + escape-block cases), `agent_system_prompt` smoke test |
-| `test_chat_history` | 18 | `parse_chat_history` (LF, CRLF, UTF-8, leading newlines, trailing pending prompt, `> ` inside reply, three-turn pending-last, **multi-line user prompt**, **two consecutive multi-line turns**) · `build_system_prompt` (with / without / NULL user prompt, base-then-user order) |
+| `test_chat_history` | 24 | `parse_chat_history` (LF, CRLF, UTF-8, leading newlines, trailing pending prompt, `> ` inside reply, three-turn pending-last, **multi-line user prompt**, **two consecutive multi-line turns**) · `build_system_prompt` (with / without / NULL user prompt, base-then-user order) · **`extract_summary_prefix`** (no-prefix passthrough, basic round-trip, multiline body with numbers/paths preserved, malformed missing-close fallback, in-body `[/SUMMARY]` ignored when not at line start, fixed-buffer truncation still returns correct skip offset) |
 | `test_version` | 15 | `version_newer_than` (X.Y vs X.Y.Z, `v` prefix mix, multi-digit minor, empty / garbage prefix, release-tag-vs-runtime) · `build_update_filename` (current platform + version-difference matrix) |
 | `test_string_utils` | 24 | **XChaCha20-Poly1305 chat cipher** round-trip (ASCII, UTF-8, empty buffer, **auth-failure detection** when the tag is mutated) · **SHA-256** (empty input, "abc" KAT, incremental update == single-shot) · HF URL rewrite (`/blob/main/` → `/resolve/main/`, already-resolve, too-small-buffer, false-substring) · chat-name sanitisation (punctuation, space runs, trim, UTF-8 passthrough, 40-char cap) · `strip_tool_fences` (read_file / list_dir / apply_edit elided, plain code fences preserved, unclosed-fence tail dropped, inline backticks kept, multi-fence chains) |
 

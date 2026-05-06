@@ -79,6 +79,32 @@ void   inference_set_needs_title(inference_ctx_t *ctx, int needs);
  */
 int    inference_take_title(inference_ctx_t *ctx, char *buf, size_t size);
 
+/* Summary generation ------------------------------------------------------ */
+/* Used by the COMPACT pipeline. The worker reads `src_text` (a snapshot of
+ * the older portion of the chat — pre-existing summary plus aged-out turns),
+ * runs a short summarisation pass, and publishes the result. The UI polls
+ * inference_take_summary() every frame and finalises compact when ready. */
+
+#define WASTELAND_SUMMARY_MAX 4096
+
+/**
+ * Request the worker to summarise `src_text`. Spawns one secondary inference
+ * pass on the next worker tick. Returns 0 if accepted, -1 if a summary is
+ * already in flight or the model is mid-generation.
+ */
+int    inference_request_summary(inference_ctx_t *ctx, const char *src_text);
+
+/**
+ * 1 if a summary request is queued or being computed.
+ */
+int    inference_is_summarizing(inference_ctx_t *ctx);
+
+/**
+ * 0 if no summary is ready; otherwise copies the summary into buf (up to
+ * size bytes) and returns its length. Taking the summary clears the slot.
+ */
+int    inference_take_summary(inference_ctx_t *ctx, char *buf, size_t size);
+
 /* Agent mode -------------------------------------------------------------- */
 
 /**

@@ -62,3 +62,9 @@ vgcore.*
 *.temp
 *.log
 *.bak
+
+# Test scratch directories (created by ctest suites; should live under build/
+# but appear at repo root when tests are run from there by mistake)
+/wst_test_ws/
+/wst_test_exec_ws/
+/Testing/

@@ -669,27 +669,123 @@ static void strip_tool_fences(const char *in, char *out, size_t out_size)
 }
 
 /* ---------------------------------------------------------------------------
- * compact_chat_history
+ * Compact (summary-based)
  *
- * Remove the oldest N user/assistant pairs from the flat history string.
- * Returns the number of pairs actually removed (may be < requested if the
- * history has fewer turns). Caller must already hold state->chat_mutex.
+ * v0.7+ behaviour: instead of dropping the oldest user/assistant pair the
+ * compact pipeline asks the inference worker for a short context summary of
+ * everything older than the last KEEP_RECENT turns and prepends the result
+ * as a [SUMMARY] block. Each subsequent compact re-summarises (existing
+ * summary + newly-aged turns) so the summary stays ~600 chars long no
+ * matter how long the conversation runs.
+ *
+ * The pipeline is async: ui_compact_chat_history() snapshots the tail to
+ * keep, kicks off the summary, sets compact_pending; ui_finalize_compact()
+ * polls inference each frame and splices the result back in.
  * --------------------------------------------------------------------------- */
-static int compact_chat_history(app_state_t *state, int pairs)
+#define COMPACT_KEEP_RECENT_TURNS 2  /* turns kept verbatim after compact */
+#define COMPACT_MIN_TURNS         3  /* refuse compact below this many */
+
+/* Return offset of the "[/SUMMARY]\n" terminator in `hist` if it begins
+ * with a summary block, else 0. Mirrors inference.c::extract_summary_prefix
+ * — kept duplicated because ui.c can't pull in the inference internals. */
+static size_t skip_summary_prefix(const char *hist)
 {
-    int removed = 0;
-    for (int i = 0; i < pairs; i++) {
-        char *next = strstr(state->chat_history, "\n> ");
-        if (!next) {
-            /* Only one message left — can't compact further. */
-            break;
-        }
-        size_t len = strlen(next + 1);
-        memmove(state->chat_history, next + 1, len + 1);
-        removed++;
+    if (!hist || strncmp(hist, "[SUMMARY]", 9) != 0) return 0;
+    const char *p = hist + 9;
+    if (*p == '\r') p++;
+    if (*p != '\n') return 0;
+    p++;
+    const char *body = p;
+    const char *end = strstr(p, "[/SUMMARY]");
+    while (end) {
+        if (end == body || end[-1] == '\n') break;
+        end = strstr(end + 1, "[/SUMMARY]");
     }
-    state->chat_last_len = strlen(state->chat_history);
-    return removed;
+    if (!end) return 0;
+    const char *after = end + 10;
+    if (*after == '\r') after++;
+    if (*after == '\n') after++;
+    return (size_t)(after - hist);
+}
+
+/* Extract summary body into `out` (NUL-terminated). Empty if no prefix. */
+static void copy_summary_prefix(const char *hist, char *out, size_t out_size)
+{
+    if (out && out_size) out[0] = '\0';
+    if (!hist || !out || out_size == 0) return;
+    if (strncmp(hist, "[SUMMARY]", 9) != 0) return;
+    const char *p = hist + 9;
+    if (*p == '\r') p++;
+    if (*p != '\n') return;
+    p++;
+    const char *body = p;
+    const char *end = strstr(p, "[/SUMMARY]");
+    while (end) {
+        if (end == body || end[-1] == '\n') break;
+        end = strstr(end + 1, "[/SUMMARY]");
+    }
+    if (!end) return;
+    size_t body_len = (size_t)(end - body);
+    if (body_len > 0 && body[body_len - 1] == '\n') body_len--;
+    if (body_len > 0 && body[body_len - 1] == '\r') body_len--;
+    size_t n = body_len < out_size - 1 ? body_len : out_size - 1;
+    memcpy(out, body, n);
+    out[n] = '\0';
+}
+
+/* Count turn boundaries in the turns-only portion of history.
+ * A turn starts at offset 0 (if it is a `> ` line) or at any `\n> `
+ * whose previous line was NOT itself a `> ` line (so multi-line user
+ * prompts — consecutive `> ` lines glued by the parser — count as a
+ * single turn). */
+static int count_turns(const char *hist)
+{
+    if (!hist || !hist[0]) return 0;
+    int turns = 0;
+    size_t len = strlen(hist);
+    if (len >= 2 && hist[0] == '>' && hist[1] == ' ') turns = 1;
+    for (size_t i = 0; i + 2 < len; i++) {
+        if (hist[i] != '\n') continue;
+        if (hist[i + 1] != '>' || hist[i + 2] != ' ') continue;
+        size_t prev_start = 0;
+        for (size_t j = i; j > 0; j--) {
+            if (hist[j - 1] == '\n') { prev_start = j; break; }
+        }
+        int prev_is_user = (prev_start + 1 < len &&
+                            hist[prev_start] == '>' &&
+                            hist[prev_start + 1] == ' ');
+        if (prev_is_user) continue;
+        turns++;
+    }
+    return turns;
+}
+
+/* Find the byte offset where the N-th turn starts (0-indexed). Same boundary
+ * rule as count_turns. Returns strlen(hist) if fewer than N+1 turns exist. */
+static size_t find_nth_turn_start(const char *hist, int n)
+{
+    if (!hist || !hist[0]) return 0;
+    int idx = -1;
+    size_t len = strlen(hist);
+    if (len >= 2 && hist[0] == '>' && hist[1] == ' ') {
+        idx = 0;
+        if (idx == n) return 0;
+    }
+    for (size_t i = 0; i + 2 < len; i++) {
+        if (hist[i] != '\n') continue;
+        if (hist[i + 1] != '>' || hist[i + 2] != ' ') continue;
+        size_t prev_start = 0;
+        for (size_t j = i; j > 0; j--) {
+            if (hist[j - 1] == '\n') { prev_start = j; break; }
+        }
+        int prev_is_user = (prev_start + 1 < len &&
+                            hist[prev_start] == '>' &&
+                            hist[prev_start + 1] == ' ');
+        if (prev_is_user) continue;
+        idx++;
+        if (idx == n) return i + 1;
+    }
+    return len;
 }
 
 /* ---------------------------------------------------------------------------
@@ -722,34 +818,135 @@ static void ui_set_chat_history(app_state_t *state)
     inference_set_chat_history(state->inference, hist_copy);
 }
 
-/* Full compact pipeline: refuse mid-generation, drop the oldest `pairs` turns
- * under the chat lock, mirror the new history into the inference module so
- * the next prompt sees it, persist the active chat to disk so a chat-switch
- * doesn't restore the old version, and write a status message so the user
- * gets feedback even when nothing was removed. */
+/* Kick off an async compact: snapshot the tail to keep, ask the inference
+ * worker for a summary of everything older, set compact_pending. The result
+ * is spliced back in by ui_finalize_compact() once the worker publishes it.
+ *
+ * `pairs` is currently informational — kept in the signature so existing
+ * call sites (manual button, auto-compact, pre-send compact) compile. The
+ * actual cut point is COMPACT_KEEP_RECENT_TURNS turns from the end. */
 static void ui_compact_chat_history(app_state_t *state, int pairs)
 {
+    (void)pairs;
+
     if (state->is_generating) {
         snprintf(state->status_msg, sizeof(state->status_msg),
                  "Cannot compact while generating.");
         return;
     }
-
-    pthread_mutex_lock(&state->chat_mutex);
-    int removed = compact_chat_history(state, pairs);
-    pthread_mutex_unlock(&state->chat_mutex);
-
-    if (removed == 0) {
+    if (state->compact_pending || inference_is_summarizing(state->inference)) {
         snprintf(state->status_msg, sizeof(state->status_msg),
-                 "Nothing to compact (need >=2 turns).");
+                 "Already compacting...");
         return;
     }
+    if (!inference_is_model_loaded(state->inference)) {
+        snprintf(state->status_msg, sizeof(state->status_msg),
+                 "Compact needs a loaded model.");
+        return;
+    }
+
+    /* Snapshot history under the lock. */
+    char hist_copy[WASTELAND_MAX_CHAT_HISTORY];
+    pthread_mutex_lock(&state->chat_mutex);
+    strncpy(hist_copy, state->chat_history, sizeof(hist_copy) - 1);
+    hist_copy[sizeof(hist_copy) - 1] = '\0';
+    pthread_mutex_unlock(&state->chat_mutex);
+
+    /* Strip an existing [SUMMARY]...[/SUMMARY] prefix (kept separately so we
+     * can fold it into the new summary). */
+    size_t sum_off = skip_summary_prefix(hist_copy);
+    char old_summary[4096];
+    copy_summary_prefix(hist_copy, old_summary, sizeof(old_summary));
+    const char *turns = hist_copy + sum_off;
+
+    int total_turns = count_turns(turns);
+    if (total_turns < COMPACT_MIN_TURNS) {
+        snprintf(state->status_msg, sizeof(state->status_msg),
+                 "Nothing to compact (need >=%d turns).",
+                 COMPACT_MIN_TURNS);
+        return;
+    }
+
+    int keep = COMPACT_KEEP_RECENT_TURNS;
+    if (keep >= total_turns) keep = total_turns - 1;
+    int summarise_count = total_turns - keep;
+
+    size_t cut_at = find_nth_turn_start(turns, summarise_count);
+
+    /* Build src_text: existing summary (if any) + raw older turns. */
+    static char src_text[WASTELAND_MAX_CHAT_HISTORY + 4096];
+    int src_len = 0;
+    if (old_summary[0]) {
+        src_len = snprintf(src_text, sizeof(src_text),
+                           "Earlier summary:\n%s\n\nMore recent turns:\n",
+                           old_summary);
+    }
+    size_t copy_n = cut_at;
+    if ((size_t)src_len + copy_n >= sizeof(src_text))
+        copy_n = sizeof(src_text) - (size_t)src_len - 1;
+    memcpy(src_text + src_len, turns, copy_n);
+    src_text[(size_t)src_len + copy_n] = '\0';
+
+    /* Snapshot the verbatim tail to keep. */
+    free(state->compact_keep_tail);
+    state->compact_keep_tail = strdup(turns + cut_at);
+    if (!state->compact_keep_tail) {
+        snprintf(state->status_msg, sizeof(state->status_msg),
+                 "Compact: out of memory.");
+        return;
+    }
+    state->compact_chat_index       = state->selected_chat;
+    state->compact_summarised_turns = summarise_count;
+
+    if (inference_request_summary(state->inference, src_text) != 0) {
+        free(state->compact_keep_tail);
+        state->compact_keep_tail = NULL;
+        snprintf(state->status_msg, sizeof(state->status_msg),
+                 "Compact: worker busy, retry shortly.");
+        return;
+    }
+
+    state->compact_pending = 1;
+    snprintf(state->status_msg, sizeof(state->status_msg),
+             "Compacting %d older turn(s) into a summary...",
+             summarise_count);
+}
+
+/* Splice an inference-published summary into the active chat history. */
+void ui_finalize_compact(app_state_t *state)
+{
+    if (!state->compact_pending) return;
+
+    char summary[WASTELAND_SUMMARY_MAX];
+    int n = inference_take_summary(state->inference, summary, sizeof(summary));
+    if (n <= 0) return;
+
+    /* Build new history = [SUMMARY]\n<text>\n[/SUMMARY]\n + tail. */
+    static char rebuilt[WASTELAND_MAX_CHAT_HISTORY];
+    const char *tail = state->compact_keep_tail ? state->compact_keep_tail : "";
+    int written = snprintf(rebuilt, sizeof(rebuilt),
+                           "[SUMMARY]\n%s\n[/SUMMARY]\n%s",
+                           summary, tail);
+    if (written < 0 || (size_t)written >= sizeof(rebuilt)) {
+        /* Defensive: if the rebuild would overflow, drop the tail entirely. */
+        snprintf(rebuilt, sizeof(rebuilt),
+                 "[SUMMARY]\n%s\n[/SUMMARY]\n", summary);
+    }
+
+    pthread_mutex_lock(&state->chat_mutex);
+    strncpy(state->chat_history, rebuilt, WASTELAND_MAX_CHAT_HISTORY - 1);
+    state->chat_history[WASTELAND_MAX_CHAT_HISTORY - 1] = '\0';
+    state->chat_last_len = strlen(state->chat_history);
+    pthread_mutex_unlock(&state->chat_mutex);
 
     ui_set_chat_history(state);
     ui_update_context_stats(state);
 
-    if (state->selected_chat >= 0 &&
-        state->selected_chat < state->chat_count) {
+    /* Persist if the user is still on the same chat we started compacting. */
+    if (state->compact_chat_index == state->selected_chat &&
+        state->selected_chat >= 0 &&
+        state->selected_chat < state->chat_count)
+    {
         char hist_copy[WASTELAND_MAX_CHAT_HISTORY];
         pthread_mutex_lock(&state->chat_mutex);
         strncpy(hist_copy, state->chat_history, sizeof(hist_copy) - 1);
@@ -758,8 +955,14 @@ static void ui_compact_chat_history(app_state_t *state, int pairs)
         save_chat_history(state->chats[state->selected_chat], hist_copy);
     }
 
+    int summarised = state->compact_summarised_turns;
+    free(state->compact_keep_tail);
+    state->compact_keep_tail        = NULL;
+    state->compact_pending          = 0;
+    state->compact_summarised_turns = 0;
+
     snprintf(state->status_msg, sizeof(state->status_msg),
-             "Compacted %d turn(s).", removed);
+             "Compacted %d turn(s) into summary.", summarised);
 }
 
 /* ---------------------------------------------------------------------------
@@ -1970,12 +2173,17 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                 /* ▶ — click to send */
                 int send = nk_button_label(nk, "\xe2\x96\xb6");
                 if (send && state->input_buffer[0] &&
-                    inference_is_model_loaded(state->inference))
+                    inference_is_model_loaded(state->inference) &&
+                    !state->compact_pending)
                 {
-                    /* Pre-send compact if context is near full. */
+                    /* Pre-send compact if context is near full.
+                     * Triggered async; the SEND itself is deferred to the
+                     * next click after compact finishes (compact_pending
+                     * gates this branch). */
                     if (state->context_max > 0 &&
                         state->context_tokens > (int)(state->context_max * 0.75f)) {
                         ui_compact_chat_history(state, 1);
+                        goto skip_send;
                     }
 
                     /* Auto-create chat if none active */
@@ -2058,6 +2266,7 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                     state->input_buffer[0] = '\0';
                     state->chat_scroll_y = (nk_uint)0x7FFFFFFF;
                 }
+                skip_send:;
             }
             nk_layout_row_end(nk);
 

@@ -139,6 +139,16 @@ typedef struct {
     int          verify_result;         /* 0=idle, 1=ok, 2=fail */
     char         verify_path[512];      /* file being verified */
 
+    /* Async compact (summarisation) state.
+     * When the user clicks [ COMPACT ] (or auto-compact triggers), the older
+     * portion of the chat is sent to inference for a short summary pass.
+     * The recent N turns we promised to keep verbatim are snapshotted here
+     * so the result can be glued back together when the summary lands. */
+    int   compact_pending;              /* 1 = waiting for inference summary */
+    int   compact_chat_index;           /* which chat the in-flight compact is for */
+    int   compact_summarised_turns;     /* informational: how many older turns went in */
+    char *compact_keep_tail;            /* heap, freed when consumed */
+
     volatile int running;
 } app_state_t;
 
@@ -154,6 +164,11 @@ void load_chat_history(const char *chat_name, char *history, size_t max_len);
 
 /* Apply the retro amber-on-black vintage PC terminal aesthetic. */
 void ui_apply_amber_theme(struct nk_context *nk);
+
+/* Polled by main loop each frame: if a compact summary has been published by
+ * the inference worker, splice it into the active chat history, mirror to
+ * inference, persist, and clear compact_pending. No-op when nothing pending. */
+void ui_finalize_compact(app_state_t *state);
 
 /* Launch a detached background thread to SHA-256-verify a model file.
  * Defined in main.c; declared here so ui.c can trigger it from the vault. */

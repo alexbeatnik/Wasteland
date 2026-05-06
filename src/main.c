@@ -935,6 +935,10 @@ int main(int argc, char **argv)
             }
         }
 
+        /* --- Splice an in-flight compact summary into chat history once
+         *     the inference worker publishes it. No-op when nothing pending. */
+        ui_finalize_compact(&state);
+
         /* --- Handle completed background verify --- */
         if (state.verify_active && state.verify_progress >= 100) {
             state.verify_active = 0;
