@@ -139,6 +139,11 @@ typedef struct {
     int          verify_result;         /* 0=idle, 1=ok, 2=fail */
     char         verify_path[512];      /* file being verified */
 
+    /* Collapsible HUB MODELS section. Default expanded so new users see the
+     * available downloads; user can collapse once they've made their pick to
+     * reclaim left-panel vertical space for the local vault and settings. */
+    int   hub_collapsed;
+
     /* Async compact (summarisation) state.
      * When the user clicks [ COMPACT ] (or auto-compact triggers), the older
      * portion of the chat is sent to inference for a short summary pass.

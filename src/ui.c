@@ -1314,13 +1314,155 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
             nk_layout_row_dynamic(nk, 10, 1);
             nk_spacing(nk, 1);
 
-            /* ===== HUB MODELS ===== */
+            /* ===== LOCAL VAULT =====
+             * Pinned to the top of the left panel: this is what the user
+             * actually clicks every session (LOAD a model they already have).
+             * HUB MODELS sits below because it's only relevant for the
+             * one-off "I want to grab a new model" flow. */
             nk_layout_row_dynamic(nk, 20, 1);
-            nk_label_colored(nk, "HUB MODELS", NK_TEXT_LEFT, amber);
+            nk_label_colored(nk, "-- LOCAL VAULT --", NK_TEXT_LEFT, amber);
             nk_layout_row_dynamic(nk, 2, 1);
             nk_button_color(nk, amber); /* horizontal rule */
 
-            if (!state->network_lockdown) {
+            nk_layout_row_dynamic(nk, 28, 1);
+            if (nk_button_label(nk, "[ REFRESH ]")) {
+                state->model_count = scan_local_models(
+                    state->models, WASTELAND_MAX_MODELS);
+                snprintf(state->status_msg, sizeof(state->status_msg),
+                         "Vault refreshed. %d model(s) found.",
+                         state->model_count);
+            }
+
+            if (state->model_count == 0) {
+                nk_layout_row_dynamic(nk, 20, 1);
+                nk_label_colored(nk, "No local models.",
+                                 NK_TEXT_CENTERED, amber);
+            } else {
+                for (int i = 0; i < state->model_count; i++) {
+                    const char *slash = strrchr(state->models[i], '/');
+                    const char *basename = slash ? slash + 1 : state->models[i];
+
+                    /* Row with LOAD + VERIFY + DELETE buttons */
+                    nk_layout_row_begin(nk, NK_DYNAMIC, 26, 3);
+
+                    struct stat fst;
+                    char sz_str[32] = "?";
+                    if (stat(state->models[i], &fst) == 0) {
+                        format_file_size(fst.st_size, sz_str, sizeof(sz_str));
+                    }
+
+                    char btn_label[WASTELAND_MAX_MODEL_PATH_LEN + 32];
+                    int is_loaded  = (state->selected_model == i);
+                    int is_loading = (state->loading_model_index == i);
+                    if (is_loading) {
+                        snprintf(btn_label, sizeof(btn_label),
+                                 "[ LOADING: %s | %s ... ]", basename, sz_str);
+                    } else if (is_loaded) {
+                        snprintf(btn_label, sizeof(btn_label),
+                                 "[ UNLOAD: %s | %s ]", basename, sz_str);
+                    } else {
+                        snprintf(btn_label, sizeof(btn_label),
+                                 "[ LOAD: %s | %s ]", basename, sz_str);
+                    }
+
+                    int load_busy = (state->loading_model_index >= 0);
+                    int gen_busy  = inference_is_generating(state->inference);
+                    nk_layout_row_push(nk, 0.84f);
+                    if (nk_button_label(nk, btn_label) && !load_busy && !gen_busy) {
+                        if (is_loaded) {
+                            inference_unload_model(state->inference);
+                            state->selected_model = -1;
+                            snprintf(state->status_msg,
+                                     sizeof(state->status_msg),
+                                     "Unloaded %s.", basename);
+                        } else {
+                            snprintf(state->status_msg,
+                                     sizeof(state->status_msg),
+                                     "Loading %s (%s)...", basename, sz_str);
+                            if (inference_load_model_async(state->inference,
+                                                           state->models[i]) == 0) {
+                                state->loading_model_index = i;
+                            } else {
+                                snprintf(state->status_msg,
+                                         sizeof(state->status_msg),
+                                         "Failed to start load for %s.",
+                                         basename);
+                            }
+                        }
+                    }
+
+                    nk_layout_row_push(nk, 0.08f);
+                    if (nk_button_label(nk, "\xe2\x9c\x93") && !load_busy && !gen_busy) {
+                        start_verify(state->models[i], state);
+                        snprintf(state->status_msg, sizeof(state->status_msg),
+                                 "Verifying %s...", basename);
+                    }
+
+                    nk_layout_row_push(nk, 0.08f);
+                    if (nk_button_label(nk, "\xc3\x97") && !load_busy && !gen_busy) {
+                        if (remove(state->models[i]) == 0) {
+                            /* If deleted model was loaded, unload it */
+                            if (state->selected_model == i) {
+                                inference_unload_model(state->inference);
+                                state->selected_model = -1;
+                            } else if (state->selected_model > i) {
+                                /* Shift index down since we're removing an element before it */
+                                state->selected_model--;
+                            }
+                            /* Shift remaining entries */
+                            for (int j = i; j < state->model_count - 1; j++) {
+                                strcpy(state->models[j], state->models[j + 1]);
+                            }
+                            state->model_count--;
+                            /* Decrement i so we process the new element at this position */
+                            i--;
+                            snprintf(state->status_msg, sizeof(state->status_msg),
+                                     "Deleted '%s'.", basename);
+                        } else {
+                            snprintf(state->status_msg, sizeof(state->status_msg),
+                                     "Failed to delete '%s'.", basename);
+                        }
+                    }
+                }
+            }
+
+            /* Spacer */
+            nk_layout_row_dynamic(nk, 10, 1);
+            nk_spacing(nk, 1);
+
+            /* ===== HUB MODELS (collapsible) =====
+             * Header row: a borderless button that flips hub_collapsed.
+             * Glyphs are from Geometric Shapes (baked in the embedded font):
+             *   \xe2\x96\xbc = U+25BC ▼ (expanded — click to collapse)
+             *   \xe2\x96\xb6 = U+25B6 ▶ (collapsed — click to expand) */
+            nk_layout_row_begin(nk, NK_DYNAMIC, 22, 2);
+            nk_layout_row_push(nk, 0.10f);
+            {
+                /* Strip the button chrome so the arrow looks like a label. */
+                struct nk_style_button saved_btn = nk->style.button;
+                nk->style.button.normal = nk_style_item_color(nk_rgba(0,0,0,0));
+                nk->style.button.hover  = nk_style_item_color(nk_rgba(0,0,0,0));
+                nk->style.button.active = nk_style_item_color(nk_rgba(0,0,0,0));
+                nk->style.button.border_color = nk_rgba(0,0,0,0);
+                nk->style.button.text_normal  = amber;
+                nk->style.button.text_hover   = amber;
+                nk->style.button.text_active  = amber;
+                if (nk_button_label(nk, state->hub_collapsed
+                                        ? "\xe2\x96\xb6"   /* ▶ collapsed */
+                                        : "\xe2\x96\xbc")) /* ▼ expanded */ {
+                    state->hub_collapsed = !state->hub_collapsed;
+                }
+                nk->style.button = saved_btn;
+            }
+            nk_layout_row_push(nk, 0.90f);
+            nk_label_colored(nk, "HUB MODELS", NK_TEXT_LEFT, amber);
+            nk_layout_row_end(nk);
+            nk_layout_row_dynamic(nk, 2, 1);
+            nk_button_color(nk, amber); /* horizontal rule */
+
+            if (state->hub_collapsed) {
+                /* Skip the entire section (radios, download button, status). */
+            } else if (!state->network_lockdown) {
                 /* --- Predefined hub models (radio buttons) ---
                  * `nk_option_label` returns the option's *current* selected
                  * state, not a click event — so we have to compare
@@ -1453,118 +1595,6 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                 nk_layout_row_dynamic(nk, 20, 1);
                 nk_label_colored(nk, "LOCKDOWN ACTIVE",
                                  NK_TEXT_CENTERED, amber);
-            }
-
-            /* Spacer */
-            nk_layout_row_dynamic(nk, 10, 1);
-            nk_spacing(nk, 1);
-
-            /* ===== LOCAL VAULT ===== */
-            nk_layout_row_dynamic(nk, 20, 1);
-            nk_label_colored(nk, "-- LOCAL VAULT --", NK_TEXT_LEFT, amber);
-            nk_layout_row_dynamic(nk, 2, 1);
-            nk_button_color(nk, amber); /* horizontal rule */
-
-            nk_layout_row_dynamic(nk, 28, 1);
-            if (nk_button_label(nk, "[ REFRESH ]")) {
-                state->model_count = scan_local_models(
-                    state->models, WASTELAND_MAX_MODELS);
-                snprintf(state->status_msg, sizeof(state->status_msg),
-                         "Vault refreshed. %d model(s) found.",
-                         state->model_count);
-            }
-
-            if (state->model_count == 0) {
-                nk_layout_row_dynamic(nk, 20, 1);
-                nk_label_colored(nk, "No local models.",
-                                 NK_TEXT_CENTERED, amber);
-            } else {
-                for (int i = 0; i < state->model_count; i++) {
-                    const char *slash = strrchr(state->models[i], '/');
-                    const char *basename = slash ? slash + 1 : state->models[i];
-
-                    /* Row with LOAD + VERIFY + DELETE buttons */
-                    nk_layout_row_begin(nk, NK_DYNAMIC, 26, 3);
-
-                    struct stat fst;
-                    char sz_str[32] = "?";
-                    if (stat(state->models[i], &fst) == 0) {
-                        format_file_size(fst.st_size, sz_str, sizeof(sz_str));
-                    }
-
-                    char btn_label[WASTELAND_MAX_MODEL_PATH_LEN + 32];
-                    int is_loaded  = (state->selected_model == i);
-                    int is_loading = (state->loading_model_index == i);
-                    if (is_loading) {
-                        snprintf(btn_label, sizeof(btn_label),
-                                 "[ LOADING: %s | %s ... ]", basename, sz_str);
-                    } else if (is_loaded) {
-                        snprintf(btn_label, sizeof(btn_label),
-                                 "[ UNLOAD: %s | %s ]", basename, sz_str);
-                    } else {
-                        snprintf(btn_label, sizeof(btn_label),
-                                 "[ LOAD: %s | %s ]", basename, sz_str);
-                    }
-
-                    int load_busy = (state->loading_model_index >= 0);
-                    int gen_busy  = inference_is_generating(state->inference);
-                    nk_layout_row_push(nk, 0.84f);
-                    if (nk_button_label(nk, btn_label) && !load_busy && !gen_busy) {
-                        if (is_loaded) {
-                            inference_unload_model(state->inference);
-                            state->selected_model = -1;
-                            snprintf(state->status_msg,
-                                     sizeof(state->status_msg),
-                                     "Unloaded %s.", basename);
-                        } else {
-                            snprintf(state->status_msg,
-                                     sizeof(state->status_msg),
-                                     "Loading %s (%s)...", basename, sz_str);
-                            if (inference_load_model_async(state->inference,
-                                                           state->models[i]) == 0) {
-                                state->loading_model_index = i;
-                            } else {
-                                snprintf(state->status_msg,
-                                         sizeof(state->status_msg),
-                                         "Failed to start load for %s.",
-                                         basename);
-                            }
-                        }
-                    }
-
-                    nk_layout_row_push(nk, 0.08f);
-                    if (nk_button_label(nk, "\xe2\x9c\x93") && !load_busy && !gen_busy) {
-                        start_verify(state->models[i], state);
-                        snprintf(state->status_msg, sizeof(state->status_msg),
-                                 "Verifying %s...", basename);
-                    }
-
-                    nk_layout_row_push(nk, 0.08f);
-                    if (nk_button_label(nk, "\xc3\x97") && !load_busy && !gen_busy) {
-                        if (remove(state->models[i]) == 0) {
-                            /* If deleted model was loaded, unload it */
-                            if (state->selected_model == i) {
-                                inference_unload_model(state->inference);
-                                state->selected_model = -1;
-                            } else if (state->selected_model > i) {
-                                /* Shift index down since we're removing an element before it */
-                                state->selected_model--;
-                            }
-                            /* Shift remaining entries */
-                            for (int j = i; j < state->model_count - 1; j++) {
-                                strcpy(state->models[j], state->models[j + 1]);
-                            }
-                            state->model_count--;
-                            /* Decrement i so we process the new element at this position */
-                            i--;
-                            snprintf(state->status_msg, sizeof(state->status_msg),
-                                     "Deleted '%s'.", basename);
-                        } else {
-                            snprintf(state->status_msg, sizeof(state->status_msg),
-                                     "Failed to delete '%s'.", basename);
-                        }
-                    }
-                }
             }
 
             /* Spacer */
