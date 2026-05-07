@@ -17,7 +17,14 @@
 #define NK_INCLUDE_DEFAULT_FONT
 #define NK_INCLUDE_DEFAULT_ALLOCATOR
 #define NK_INCLUDE_VERTEX_BUFFER_OUTPUT
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 5287) /* nuklear: bitwise OR of different enum types */
+#endif
 #include <nuklear.h>
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 
 #include "inference.h"
 

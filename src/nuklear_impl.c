@@ -14,8 +14,17 @@
 #define NK_INCLUDE_DEFAULT_ALLOCATOR
 #define NK_INCLUDE_VERTEX_BUFFER_OUTPUT
 
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 5287) /* nuklear: bitwise OR of different enum types */
+#endif
+
 #define NK_IMPLEMENTATION
 #include <nuklear.h>
 
 #define NK_SDL_GL2_IMPLEMENTATION
 #include "nuklear_sdl_gl2.h"
+
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
