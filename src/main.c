@@ -105,6 +105,9 @@ static void platform_enable_dpi_awareness(void)
 #include "ui.h"
 #include "inference.h"
 #include "network.h"
+#include "agent.h"
+#include "verify.h"
+#include "capability.h"
 
 #define WINDOW_WIDTH  1280
 #define WINDOW_HEIGHT 800
@@ -149,6 +152,49 @@ static int platform_thread_join_timeout(pthread_t thread, int timeout_ms)
         platform_sleep_ms(100);
     }
     return -1;
+}
+
+/* ---------------------------------------------------------------------------
+ * Verify thread (detached background SHA-256 of a model file)
+ * --------------------------------------------------------------------------- */
+typedef struct {
+    char path[512];
+    volatile int *progress;
+    int *result;
+} verify_thread_ctx_t;
+
+static void *verify_thread(void *arg)
+{
+    verify_thread_ctx_t *ctx = (verify_thread_ctx_t *)arg;
+    char hex[65];
+    int rc = verify_compute_sha256(ctx->path, hex, sizeof(hex), ctx->progress);
+    /* Force progress to 100 even on early-return failures (fopen/fseek)
+     * so the main loop's completion handler always fires. */
+    if (ctx->progress) *ctx->progress = 100;
+    *ctx->result = (rc == 0) ? 1 : 2;
+    free(ctx);
+    return NULL;
+}
+
+void start_verify(const char *path, app_state_t *state)
+{
+    if (!path || !path[0]) return;
+    if (state->verify_active) return;
+    verify_thread_ctx_t *ctx = (verify_thread_ctx_t *)malloc(sizeof(*ctx));
+    if (!ctx) return;
+    snprintf(ctx->path, sizeof(ctx->path), "%s", path);
+    ctx->progress = &state->verify_progress;
+    ctx->result   = &state->verify_result;
+    state->verify_progress = 0;
+    state->verify_result   = 0;
+    state->verify_active   = 1;
+    snprintf(state->verify_path, sizeof(state->verify_path), "%s", path);
+    pthread_t t;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_create(&t, &attr, verify_thread, ctx);
+    pthread_attr_destroy(&attr);
 }
 
 /* ---------------------------------------------------------------------------
@@ -352,6 +398,7 @@ void build_update_filename(const char *version, char *fname, size_t fsize)
 static void build_update_filename(const char *version, char *fname, size_t fsize)
 #endif
 {
+    (void)version;
 #ifdef _WIN32
     snprintf(fname, fsize, "Wasteland-windows.exe");
 #elif defined(__APPLE__)
@@ -582,7 +629,24 @@ void launch_updater(const char *new_file)
 int main(int argc, char **argv)
 {
     (void)argc;
-    (void)argv;
+
+    /* Derive the agent-executor binary path from argv[0] so the subprocess
+     * can be found regardless of where the user launched Wasteland from. */
+    if (argc > 0 && argv[0]) {
+        char exec_path[512];
+        snprintf(exec_path, sizeof(exec_path), "%s", argv[0]);
+        char *last_slash = strrchr(exec_path, '/');
+#  ifdef _WIN32
+        if (!last_slash) last_slash = strrchr(exec_path, '\\');
+#  endif
+        if (last_slash) {
+            snprintf(last_slash + 1, sizeof(exec_path) - (size_t)(last_slash - exec_path) - 1,
+                     "wasteland-agent-executor");
+        } else {
+            snprintf(exec_path, sizeof(exec_path), "wasteland-agent-executor");
+        }
+        agent_configure_executor_path(exec_path);
+    }
 
     /* Must run before SDL_Init / CreateWindow so SDL queries the monitor at
      * its real DPI and reports physical pixel sizes. No-op on non-Windows. */
@@ -737,6 +801,8 @@ int main(int argc, char **argv)
     /* Load persistent agent settings (mode toggle + workspace path).
      * Stored as a tiny key=value file alongside system_prompt.txt. */
     state.agent_mode = 0;
+    state.capability_preset = CAP_PRESET_READ_WRITE;
+    state.capability_custom_bits = 0;
     state.agent_workspace[0] = '\0';
     FILE *cfg_fp = fopen("wasteland.cfg", "r");
     if (cfg_fp) {
@@ -753,6 +819,12 @@ int main(int argc, char **argv)
             const char *val = eq + 1;
             if (strcmp(key, "agent_mode") == 0) {
                 state.agent_mode = (val[0] == '1') ? 1 : 0;
+            } else if (strcmp(key, "capability_preset") == 0) {
+                int v = atoi(val);
+                if (v >= CAP_PRESET_OFF && v <= CAP_PRESET_CUSTOM)
+                    state.capability_preset = v;
+            } else if (strcmp(key, "capability_custom_bits") == 0) {
+                state.capability_custom_bits = atoi(val);
             } else if (strcmp(key, "agent_workspace") == 0) {
                 strncpy(state.agent_workspace, val,
                         sizeof(state.agent_workspace) - 1);
@@ -768,6 +840,8 @@ int main(int argc, char **argv)
         fclose(cfg_fp);
     }
     int  last_agent_mode = state.agent_mode;
+    int  last_capability_preset = state.capability_preset;
+    int  last_capability_custom_bits = state.capability_custom_bits;
     char last_agent_ws[1024];
     snprintf(last_agent_ws, sizeof(last_agent_ws), "%s", state.agent_workspace);
     int   last_n_ctx       = state.settings_n_ctx;
@@ -862,6 +936,22 @@ int main(int argc, char **argv)
             }
         }
 
+        /* --- Splice an in-flight compact summary into chat history once
+         *     the inference worker publishes it. No-op when nothing pending. */
+        ui_finalize_compact(&state);
+
+        /* --- Handle completed background verify --- */
+        if (state.verify_active && state.verify_progress >= 100) {
+            state.verify_active = 0;
+            if (state.verify_result == 1) {
+                snprintf(state.status_msg, sizeof(state.status_msg),
+                         "Verify OK: %.240s", state.verify_path);
+            } else {
+                snprintf(state.status_msg, sizeof(state.status_msg),
+                         "Verify FAILED: %.236s", state.verify_path);
+            }
+        }
+
         /* --- UI layout --- */
         /* Auto-save system prompt if changed */
         if (strcmp(state.system_prompt, last_system_prompt) != 0) {
@@ -876,11 +966,15 @@ int main(int argc, char **argv)
         /* Persist agent toggle + workspace + tunables whenever they change.
          * Tiny file so rewriting on every change is fine. */
         if (state.agent_mode != last_agent_mode ||
+            state.capability_preset != last_capability_preset ||
+            state.capability_custom_bits != last_capability_custom_bits ||
             strcmp(state.agent_workspace, last_agent_ws) != 0 ||
             state.settings_n_ctx       != last_n_ctx ||
             state.settings_temperature != last_temperature)
         {
             last_agent_mode    = state.agent_mode;
+            last_capability_preset = state.capability_preset;
+            last_capability_custom_bits = state.capability_custom_bits;
             last_n_ctx         = state.settings_n_ctx;
             last_temperature   = state.settings_temperature;
             snprintf(last_agent_ws, sizeof(last_agent_ws),
@@ -888,6 +982,8 @@ int main(int argc, char **argv)
             FILE *f = fopen("wasteland.cfg", "w");
             if (f) {
                 fprintf(f, "agent_mode=%d\n",      state.agent_mode);
+                fprintf(f, "capability_preset=%d\n", state.capability_preset);
+                fprintf(f, "capability_custom_bits=%d\n", state.capability_custom_bits);
                 fprintf(f, "agent_workspace=%s\n", state.agent_workspace);
                 fprintf(f, "n_ctx=%d\n",           state.settings_n_ctx);
                 fprintf(f, "temperature=%.3f\n",   state.settings_temperature);

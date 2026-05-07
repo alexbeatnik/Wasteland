@@ -1,4 +1,4 @@
-# CLAUDE.md — Wasteland v0.6
+# CLAUDE.md — Wasteland v0.7
 
 ## Agent Context
 
@@ -30,7 +30,10 @@ All mutable cross-thread state is in `app_state_t` (defined in `ui.h`):
 - `loading_model_index` (UI-side) tracks which row is mid-load so the LOAD/DELETE buttons can be gated.
 - `chat_scroll_x`, `chat_scroll_y`, `chat_last_len` drive auto-scroll-to-bottom.
 - `system_prompt` stores user instructions and persists to `system_prompt.txt`.
-- `chats` (2D array sized `WASTELAND_MAX_CHATS × WASTELAND_CHAT_NAME_LEN`), `chat_count`, `selected_chat` manage multi-session functionality, saving state to `chats/*.txt` (4-byte `WSTL` magic + RC4-obfuscated body; files without the magic are read as legacy plaintext).
+- `chats` (2D array sized `WASTELAND_MAX_CHATS × WASTELAND_CHAT_NAME_LEN`), `chat_count`, `selected_chat` manage multi-session functionality, saving state to `chats/*.txt` (4-byte `WST2` magic + 24-byte XChaCha20 nonce + 16-byte Poly1305 tag + ciphertext via `crypto_engine.c`; files without `WST2` are read as legacy plaintext, including the older `WSTL` RC4 format from v0.6).
+- `verify_progress` / `verify_active` / `verify_result` / `verify_path` — drive the SHA-256 model-checksum overlay. Set by the detached verify thread in `main.c::start_verify()` (computes `verify_compute_sha256()` from `verify.c`); the main loop watches `verify_progress >= 100` to flush the result into `status_msg`.
+- `compact_pending` / `compact_chat_index` / `compact_summarised_turns` / `compact_keep_tail` — drive the async summarisation compact. `compact_keep_tail` is heap-owned; freed by `ui_finalize_compact` once the inference summary lands and is spliced back into `chat_history`. While `compact_pending == 1`, the SEND button is gated and the COMPACT button refuses to start a second pass.
+- `capability_preset` (`cap_preset_t` from `capability.h`) and `capability_custom_bits` — agent capability tier (OFF / READ-ONLY / READ+WRITE / CUSTOM). The CUSTOM bitmask is per-tool. Persisted to `wasteland.cfg`. The legacy `agent_mode` flag still gates the whole subsystem; the preset selects which tools are allowed once it's on.
 - `left_panel_collapsed` controls UI layout state.
 - `settings_n_ctx` / `settings_temperature` — UI-side copies of the tunables, pushed to `inference_set_n_ctx` / `inference_set_temperature` every frame and persisted to `wasteland.cfg`.
 - `context_tokens` / `context_max` — updated by `ui_update_context_stats()` after every generation and after compact.
@@ -77,6 +80,51 @@ void* inference_worker_thread(void *arg);
 ```
 
 The worker appends a trailing `\n` to the output buffer before clearing `generating`, so the next `> prompt` line in the chat history is never glued onto the last assistant token.
+
+### Module Map (v0.7)
+
+The codebase is split into single-responsibility modules. Each `*.h` is the contract; the `.c` is the only place to look for implementation details.
+
+| Module | Role |
+|---|---|
+| `main.c` | SDL/Nuklear loop, thread spawn/join, settings I/O (`wasteland.cfg`), updater, **verify thread** (`start_verify` → `verify_compute_sha256`). |
+| `ui.c` / `ui.h` | All Nuklear layout, amber theme, chat encryption helpers (`save_chat_history` / `load_chat_history` use `crypto_engine`), agent-proposal panel, sandbox-status badge, capability preset selector. |
+| `inference.c` / `inference.h` | llama.cpp wrapper, worker thread, `<think>` filter, sampler chain, agent-mode pending approvals. |
+| `network.c` | libcurl downloader + GitHub Releases probe. `lockdown_network()` is a one-line wrapper that delegates to `platform_sandbox_apply(SANDBOX_CAP_NETWORK_LOCKDOWN)`. |
+| `agent.c` / `agent.h` | Tool-call markdown parser, `agent_resolve_path` (legacy), `agent_exec_*` shims that route to either the in-process `fs_sandbox` or the IPC executor (Linux only, when `agent_configure_executor_path` is set). |
+| `agent_protocol.c` / `agent_protocol.h` | Framed binary IPC between main process and the executor subprocess (`agent_ipc_req_hdr_t` / `agent_ipc_resp_hdr_t`, packed). |
+| `agent_executor_main.c` | Stand-alone `wasteland-agent-executor` binary. Spawned by `posix_spawn` from `agent.c::ensure_executor()`, locked down with seccomp + Landlock, services tool requests on stdin/stdout. |
+| `fs_sandbox.c` / `fs_sandbox.h` | Bulletproof file I/O: Linux uses `openat(AT_FDCWD, …, O_NOFOLLOW)` + `/proc/self/fd` verification; macOS / Windows fall back to `realpath()` + parent-dir containment. |
+| `platform_sandbox.c` / `platform_sandbox.h` | OS-level isolation. Linux: seccomp-bpf socket lockdown + Landlock FS restriction. macOS / Windows: honest stubs that report only `SANDBOX_CAP_PROCESS_ISOLATE`. |
+| `capability.c` / `capability.h` | Preset enum (`CAP_PRESET_OFF`, `READ_ONLY`, `READ_WRITE`, `CUSTOM`) + `capability_tool_allowed()` policy gate + custom-bitmask global. |
+| `crypto_engine.c` / `crypto_engine.h` | Thin wrapper over Monocypher: `crypto_seal` / `crypto_open` (XChaCha20-Poly1305, 32-byte key, 24-byte nonce, 16-byte tag) and `crypto_random_bytes()` (getrandom / arc4random / BCryptGenRandom / `/dev/urandom` fallback). |
+| `verify.c` / `verify.h` | Incremental SHA-256 over a file with progress callback (`verify_compute_sha256`) and a hex-compare convenience (`verify_check_file`). Used by the detached verify thread spawned from `main.c`. |
+| `vendor/monocypher/` | Single-file Monocypher 4.x — provides `crypto_aead_lock` / `crypto_aead_unlock`. |
+| `vendor/sha256/` | Tiny incremental SHA-256 (`wasteland_sha256_init/update/final` + hex). No OpenSSL dependency. |
+
+### Agent Tool Backend Selection
+
+`agent_exec_*()` in `agent.c` now have two backends and pick at call time:
+
+1. **IPC executor (Linux, preferred):** if `agent_configure_executor_path()` was called with a non-empty path AND we're on Linux, the call is forwarded over a `socketpair` to the `wasteland-agent-executor` subprocess. The subprocess is spawned lazily on first call by `ensure_executor()` and reused for the lifetime of the main process. Shutdown is signalled by sending `AGENT_IPC_TOOL_SHUTDOWN`. This is the path that gets the seccomp + Landlock cage.
+2. **In-process `fs_sandbox` (everywhere):** legacy fallback. Used on macOS / Windows or when the executor binary is not next to `argv[0]`. Same path-resolution guarantees but no kernel-level cage.
+
+`main()` derives `g_executor_path` by stripping the basename from `argv[0]` and appending `wasteland-agent-executor`. CMake builds and installs the executor next to `Wasteland`, so the lookup just works on every platform that ships both.
+
+The IPC payload for `apply_edit` is `search\0replace` — a single in-band NUL separator. The executor uses `memchr(data, 0, hdr->data_len)` to find it (bounded — never `strlen` on un-terminated wire data) and the read buffer is allocated as `data_len + 1` with an explicit trailing `\0` so `fs_sandbox_write_file` can take a normal C string.
+
+### Chat File Format
+
+```
+[0..3]   magic = "WST2"
+[4..27]  XChaCha20 nonce (24 random bytes per save)
+[28..43] Poly1305 tag (16 bytes)
+[44..]   ciphertext (same length as plaintext)
+```
+
+The 32-byte key is a compile-time pepper duplicated in `ui.c` and the test (`tests/test_string_utils.c::test_key`). Threat model is "casual file-manager snooping" — not a defence against attackers with read access to the binary. The auth tag also catches accidental disk corruption.
+
+`load_chat_history()` falls back to a plaintext read when the magic doesn't match, so legacy `WSTL` (RC4) and even pre-v0.5 plaintext files can still be opened. They are silently re-saved as `WST2` on the next `save_chat_history()` call.
 
 ### Shutdown Protocol
 
@@ -138,11 +186,43 @@ The right panel chat group iterates `local_hist` (a per-frame snapshot of `state
 
 ## Context Management
 
-- `inference_get_context_stats()` formats the full conversation through the chat template, then probe-tokenises (NULL buf, 0 max → negated count) to measure usage without allocating. Returns 0 on success, -1 if no model is loaded.
+- `inference_get_context_stats()` formats the full conversation through the chat template, then probe-tokenises (NULL buf, 0 max → negated count) to measure usage without allocating. Returns 0 on success, -1 if no model is loaded. It also strips any `[SUMMARY]...[/SUMMARY]` prefix and counts a synthetic `system: Summary: ...` message in its place — same shape the worker sees, so the CTX bar matches reality post-compact.
 - CTX display: `CTX: used / max (pct%)`. Colour: amber < 75 %, orange 75–90 %, red > 90 %.
-- Auto-compact: triggered after generation when usage > 80 %. Uses `ui_compact_chat_history()`.
-- Pre-send compact: triggered before submitting a prompt when usage > 75 %. Uses `compact_chat_history()` directly (simpler, mirrors happen in the subsequent `ui_set_chat_history()` call).
-- Manual compact: `[ COMPACT ]` button calls `ui_compact_chat_history(state, 1)`. Refuses during generation.
+- Manual compact: `[ COMPACT ]` button calls `ui_compact_chat_history(state, 1)`. Refuses during generation, when a model isn't loaded, when fewer than 3 turns exist, or when a compact is already in flight.
+- Auto-compact: triggered after generation when usage > 80 %.
+- Pre-send compact: triggered before submitting a prompt when usage > 75 %; the SEND click is dropped that frame — the user clicks again after the summary lands. The send button is also gated by `state->compact_pending` so it can't fire mid-compact.
+
+### Summary-based compact (v0.7+)
+
+The compact pipeline is **summarisation**, not tail-drop. There are three stages, all async:
+
+1. **Snapshot phase** (UI thread, in `ui_compact_chat_history`):
+   - Lock `chat_mutex`, copy `chat_history` into a local buffer, unlock.
+   - `skip_summary_prefix()` / `copy_summary_prefix()` peel off any existing `[SUMMARY]...[/SUMMARY]\n` block at the head and stash the body.
+   - `count_turns()` (boundary = `\n> ` whose previous line is NOT `> `, so multi-line user prompts count as one turn) decides whether there's enough to compact (`>= COMPACT_MIN_TURNS = 3`).
+   - `find_nth_turn_start(turns, total - COMPACT_KEEP_RECENT_TURNS)` (default keeps the last 2 turns verbatim) gives the cut point.
+   - The "older" portion (existing summary preface + raw older turns) is concatenated into a static `src_text[]` buffer.
+   - The "to keep" tail is `strdup`'d into `state->compact_keep_tail`.
+   - `inference_request_summary(ictx, src_text)` queues the work; `state->compact_pending = 1`.
+   - Status message: `Compacting N older turn(s) into a summary...`.
+
+2. **Generation phase** (inference worker, top of every loop iteration):
+   - The worker now waits on `(has_prompt || needs_summary)`. On wakeup it services a queued summary BEFORE any prompt — so a user clicking SEND immediately after COMPACT is gated by `compact_pending` in the UI; if it weren't, the prompt would still see the old history because mirroring happens in `ui_finalize_compact`.
+   - The summary system prompt enforces 3–6 short sentences, max 600 chars, plain text, language-matched, "preserve names, numbers, file paths, decisions, open questions; drop greetings and filler".
+   - `summary_mode = 1` redirects `output_append_locked` into `summary_buffer` (`WASTELAND_SUMMARY_MAX = 4096`) instead of the chat output ring. Pure inference reuses the same `run_one_turn` codepath; the chat `output_buffer` is never touched.
+   - On completion, leading/trailing whitespace is trimmed and `summary_ready = 1` is published under `summary_mutex`.
+
+3. **Splice phase** (UI thread, `ui_finalize_compact`, called from main loop each frame):
+   - `inference_take_summary()` returns 0 if not ready — main loop skips.
+   - When ready, build `[SUMMARY]\n<text>\n[/SUMMARY]\n<tail>` (where `<tail>` is the snapshotted verbatim portion) into `state->chat_history` under `chat_mutex`, mirror via `inference_set_chat_history`, save to disk if the user is still on the same chat (`compact_chat_index == selected_chat`), update CTX stats, free the tail snapshot, clear `compact_pending`.
+
+The worker side reads the summary back during normal prompt processing: `extract_summary_prefix(local_history, hist_summary, ...)` strips the block before passing to `parse_chat_history`, and the body is appended to the system message as `\n\nPrevious conversation summary (older turns compacted from this chat):\n<text>`. Both the chat branch and the agent ReAct branch do this. The UI does NOT render the summary block in the chat view yet — `[SUMMARY]...[/SUMMARY]` lines pass through the rendering loop as plain text inside one box (good enough for v1; can be hidden later).
+
+Tunables to keep in sync if you change either: `COMPACT_KEEP_RECENT_TURNS` and `COMPACT_MIN_TURNS` in `ui.c`, and `WASTELAND_SUMMARY_MAX` in `inference.h` (also bumps `combined_sys_plain` size in the worker — currently `MAX_PROMPT_LEN + 2048 + WASTELAND_SUMMARY_MAX`).
+
+## Title Prompt
+
+The chat-title generator (`needs_title` + `inference_take_title`) tells the model an explicit budget so the produced title fits the on-disk filename. System message: `"Reply with ONLY the title text — 3 to 5 words, no quotes, no markdown, no punctuation, no emoji. Title MUST fit in 40 characters total. Use the same language as the user message."`. User message: `"Give this conversation a short 3-5 word title (max 40 chars) based on the user message below. Match the user's language. Output ONLY the title text, nothing else.\n\nUser: <prompt>"`. Output is capped at 20 sample tokens. The on-disk filename byte cap remains 60 in `generate_chat_name_from_prompt()` — leaves headroom for Cyrillic (≈2 bytes per char) so a 30-Ukrainian-char title still fits.
 
 ## Sampler Stack
 
@@ -172,7 +252,7 @@ Pure greedy is not used — it causes repetition loops on small models.
 
 ## Hub Models & URL Rewrite
 
-- `hub_models[]` in `ui.c` is a fixed-size array (`WASTELAND_MAX_HUB_MODELS = 5`) of HF repo IDs. Entries must be real public GGUF repos. Current set: `Qwen/Qwen2.5-0.5B-Instruct-GGUF`, `ggml-org/gemma-3-1b-it-GGUF`, `Qwen/Qwen2.5-1.5B-Instruct-GGUF`, `ggml-org/SmolLM2-1.7B-Instruct-GGUF`, `unsloth/Qwen3.6-35B-A3B-GGUF`.
+- `hub_models[]` in `ui.c` is now an array of `hub_model_t { repo_id, description }` structs, sized `WASTELAND_MAX_HUB_MODELS = 11`. Each entry MUST be a real public GGUF repo (the HF API resolves it to the first `.gguf` file in the tree); the description is a one-liner ≤ 64 chars rendered in dim amber under the radio button so users know what they're picking before they download. Current set, sorted by parameter count: `Qwen/Qwen2.5-0.5B-Instruct-GGUF`, `ggml-org/gemma-3-1b-it-GGUF`, `Qwen/Qwen2.5-1.5B-Instruct-GGUF`, `ggml-org/SmolLM2-1.7B-Instruct-GGUF`, `bartowski/google_gemma-4-E4B-it-GGUF`, `Qwen/Qwen2.5-7B-Instruct-GGUF`, `bartowski/Qwen2.5.1-Coder-7B-Instruct-GGUF`, `bartowski/OLMo-2-1124-7B-Instruct-GGUF`, `bartowski/Meta-Llama-3.1-8B-Instruct-GGUF`, `bartowski/google_gemma-4-31B-it-GGUF`, `unsloth/Qwen3.6-35B-A3B-GGUF`. The 7B Qwen2.5 entry is the recommended default for usable quality on consumer hardware (~4.4 GB Q4_K_M); the tinies are smoke-test grade — leaving them as the only options is a UX trap because users blame the app for the model's small-size dumbness.
 - `/blob/main/<file>` → `/resolve/main/<file>` rewrite is `+3` bytes: `memmove` tail right by 3 *before* `memcpy`.
 
 ## seccomp Filter Scope
@@ -182,6 +262,42 @@ The Linux lockdown is **deliberately narrow**: only `socket(AF_INET, …)`, `soc
 1. seccomp cannot dereference user-space pointers — a blanket kill would SIGSYS the X11/Wayland socket the GUI uses every frame.
 2. Gating `socket()` is sufficient: no new IP fd can be opened.
 3. Already-open file descriptors keep working unchanged.
+
+The seccomp install lives in `platform_sandbox.c::install_seccomp_network_lockdown()` (gated on `WASTELAND_HAS_SECCOMP`, which CMake defines only when `find_library(seccomp)` succeeds). `network.c::lockdown_network()` and the `wasteland-agent-executor` binary both call it via `platform_sandbox_apply(SANDBOX_CAP_NETWORK_LOCKDOWN)`.
+
+## Landlock FS Restriction
+
+When the kernel exposes the Landlock LSM (`__NR_landlock_create_ruleset` defined, kernel ≥ 5.13, ruleset_create succeeds at runtime), `platform_sandbox_restrict_fs_to(workspace)` installs a ruleset that strictly confines the calling process to the workspace tree.
+
+- Only the `wasteland-agent-executor` subprocess calls this — the main GUI never restricts itself, because Nuklear / SDL / X11 need access to system-wide font and config paths.
+- The handled rights cover read/write/truncate/make-reg/make-dir/remove/refer — enough for `read_file`, `list_dir`, `write_file`, and `apply_edit` to work on regular files inside the workspace.
+- Older kernels return `ENOSYS` from `landlock_create_ruleset` — we log "Kernel does not support Landlock" and the executor still runs, just without the FS cage. The UI surfaces this honestly via `platform_sandbox_query_caps()` → green/amber/red badge.
+
+## Capability Presets
+
+`agent_mode` is the master toggle. Once on, `capability_preset` selects which tool calls are accepted:
+
+| Preset | read_file | list_dir | write_file | apply_edit |
+|---|---|---|---|---|
+| `CAP_PRESET_OFF` | — | — | — | — |
+| `CAP_PRESET_READ_ONLY` | ✓ | ✓ | — | — |
+| `CAP_PRESET_READ_WRITE` | ✓ | ✓ | ✓ | ✓ |
+| `CAP_PRESET_CUSTOM` | bit 1 | bit 2 | bit 3 | bit 4 |
+
+`capability_tool_allowed(preset, tool)` is the single decision point. The CUSTOM bitmask uses `1 << agent_tool_t` — bit positions match the enum (`AGENT_TOOL_READ_FILE = 1`, `LIST_DIR = 2`, etc.). `capability_custom_set()` writes the bitmask into a module-local global; the UI calls it every frame so config changes apply instantly.
+
+Both `capability_preset` (int 0–3) and `capability_custom_bits` (int) persist to `wasteland.cfg`. Default for new installs is `CAP_PRESET_READ_WRITE` so existing agent users see no behavioural change after upgrading from v0.6.
+
+## Model Verification (`✓` button)
+
+Each row in the local vault now has a `[ ✓ ]` button next to LOAD/DELETE. Click triggers `start_verify(state, path)` which:
+
+1. Sets `state->verify_active = 1`, `verify_progress = 0`, `verify_result = 0`, copies the path into `verify_path`.
+2. Spawns a detached pthread running `verify_thread()` → `verify_compute_sha256()` (incremental hash, 64 KiB chunks, progress callback updates `verify_progress` 0..100).
+3. The verify thread always sets `*progress = 100` on exit — even if `verify_compute_sha256` returned early due to `fopen`/`fseek` failure — so the main loop's "verify done" handler always fires.
+4. `result = 1` on success (hash computed), `result = 2` on I/O failure. There is currently no expected-hash registry to compare against, so the UI just reports "Verify OK" or "Verify FAILED" — the hex digest is computed but not surfaced. Treat the button as a "file is readable end-to-end and not corrupted" check.
+
+The progress overlay renders above the prompt input as `Verifying <path>: NN%` while active and stays visible as a coloured "Verification OK / FAILED" line for one frame after completion (cleared the next time `status_msg` is overwritten).
 
 ## Auto-Update
 
@@ -205,25 +321,25 @@ extract-version  →  create-tag        ┐
        test ─────────────────────────┘
 ```
 
-- **`extract-version`** runs only on `push` to `main`. It reads `WASTELAND_VERSION` from `src/ui.h` and emits two outputs: `version=v0.6` (the tag string) and `tag_exists=true|false` (a probe of `git ls-remote --tags`). `tag_exists` is the gate that prevents cosmetic main-pushes from regenerating an already-published release.
-- **`create-tag`** pushes `v0.6` to origin if it doesn't already exist. Runs on main pushes and `workflow_dispatch`. Note: tags pushed via `GITHUB_TOKEN` do NOT trigger a new workflow run (GitHub safety against recursive events) — so the same workflow run must continue to build + release.
-- **`test`** is unconditional — every event runs the 87-test ctest suite before anything else proceeds.
+- **`extract-version`** runs only on `push` to `main`. It reads `WASTELAND_VERSION` from `src/ui.h` and emits two outputs: `version=v0.7` (the tag string) and `tag_exists=true|false` (a probe of `git ls-remote --tags`). `tag_exists` is the gate that prevents cosmetic main-pushes from regenerating an already-published release.
+- **`create-tag`** pushes `v0.7` to origin if it doesn't already exist. Runs on main pushes and `workflow_dispatch`. Note: tags pushed via `GITHUB_TOKEN` do NOT trigger a new workflow run (GitHub safety against recursive events) — so the same workflow run must continue to build + release.
+- **`test`** is unconditional — every event runs the four-suite (98-case) ctest run before anything else proceeds.
 - **`build`** is the 4-platform matrix (Linux amd64, Linux arm64, macOS universal, Windows). Depends on `test` + `create-tag`.
 - **`release`** depends on **both** `build` AND `extract-version` — the `extract-version` dependency is critical because that's the only path through which the resolved tag reaches the release step on a main-branch push.
 
 ### Why `release` reads its tag from a dedicated step, not directly from `tag_name:`
 
-The earlier shape `tag_name: ${{ ... || needs.extract-version.outputs.version || github.ref_name }}` looks correct but had a subtle bug: when `extract-version` wasn't in `needs`, the middle expression silently evaluated to null and the OR fell through to `github.ref_name`. On a main-branch push, `github.ref_name` is the literal string `main` — so `softprops/action-gh-release` would create both a release AND a tag named `main` at the current commit, while ignoring the `v0.6` tag that `create-tag` had just published.
+The earlier shape `tag_name: ${{ ... || needs.extract-version.outputs.version || github.ref_name }}` looks correct but had a subtle bug: when `extract-version` wasn't in `needs`, the middle expression silently evaluated to null and the OR fell through to `github.ref_name`. On a main-branch push, `github.ref_name` is the literal string `main` — so `softprops/action-gh-release` would create both a release AND a tag named `main` at the current commit, while ignoring the `v0.7` tag that `create-tag` had just published.
 
 Current shape: a dedicated `Resolve release tag` step does the priority resolution (`inputs.version` → `extract-version.outputs.version` → `ref_name` only-if-tag), validates the result against `^v[0-9]+\.[0-9]+(\.[0-9]+)?$`, and fails the job loudly if no usable version is found instead of falling through to a branch name. That regex is the canonical version-tag shape — `extract-version`, `create-tag`, and `release` all assume it.
 
 ### Why `release` skips on a main-push when the tag already exists
 
-`needs.extract-version.outputs.tag_exists == 'false'` is part of the release `if`. Without it, every cosmetic push to `main` (README typo, doc tweak, version stays at `0.6`) would rerun the whole build matrix, upload the same `.deb`/`.dmg`/`.exe` to the existing `v0.6` release, and **wipe any hand-edited release notes** from the GitHub UI. With the gate: if `v0.6` is already tagged, the release job is silently skipped on main pushes — you only get a release when `WASTELAND_VERSION` is bumped. Manual `workflow_dispatch` and direct tag pushes still publish unconditionally.
+`needs.extract-version.outputs.tag_exists == 'false'` is part of the release `if`. Without it, every cosmetic push to `main` (README typo, doc tweak, version stays at `0.7`) would rerun the whole build matrix, upload the same `.deb`/`.dmg`/`.exe` to the existing release, and **wipe any hand-edited release notes** from the GitHub UI. With the gate: if `v0.7` is already tagged, the release job is silently skipped on main pushes — you only get a release when `WASTELAND_VERSION` is bumped. Manual `workflow_dispatch` and direct tag pushes still publish unconditionally.
 
 ### Absolute-path resolution before script generation
 
-`pkexec` resets CWD to `/root`, `osascript with administrator privileges` to `/`, Windows ShellExecute to `%TEMP%` — none of them inherit the parent's CWD. A relative `downloads/wasteland_0.6_amd64.deb` passed verbatim into the generated script would not resolve. `launch_updater()` always pre-resolves `new_file` to an absolute path before writing the script: POSIX uses `realpath()` with a `getcwd()/relative` fallback; Windows uses `_fullpath()`. If you ever bypass this layer (e.g. a hot-patch that calls the script directly), make sure the path you pass in is already absolute.
+`pkexec` resets CWD to `/root`, `osascript with administrator privileges` to `/`, Windows ShellExecute to `%TEMP%` — none of them inherit the parent's CWD. A relative `downloads/wasteland_0.7_amd64.deb` passed verbatim into the generated script would not resolve. `launch_updater()` always pre-resolves `new_file` to an absolute path before writing the script: POSIX uses `realpath()` with a `getcwd()/relative` fallback; Windows uses `_fullpath()`. If you ever bypass this layer (e.g. a hot-patch that calls the script directly), make sure the path you pass in is already absolute.
 
 ### Filename matrix (`build_update_filename`)
 
@@ -234,7 +350,7 @@ Current shape: a dedicated `Resolve release tag` step does the priority resoluti
 | Linux x86_64 | `wasteland_<ver>_amd64.deb` |
 | Linux aarch64 | `wasteland_<ver>_arm64.deb` |
 
-`version_newer_than` accepts `X.Y` or `X.Y.Z` with optional leading `v`. Both the API tag (`v0.6`) and `WASTELAND_VERSION` (`0.6`) are normalised by skipping non-digit prefix chars before `sscanf`.
+`version_newer_than` accepts `X.Y` or `X.Y.Z` with optional leading `v`. Both the API tag (`v0.7`) and `WASTELAND_VERSION` (`0.7`) are normalised by skipping non-digit prefix chars before `sscanf`.
 
 ## Chat Creation Lifecycle (lazy)
 
@@ -355,14 +471,16 @@ The action buttons use the same snapshot-and-restore pattern on `nk->style.butto
 - The agent suite **does** link `src/agent.c` directly (`add_executable(test_agent tests/test_agent.c src/agent.c)`) because it has no SDL / llama.cpp dependency — that lets us exercise the real `agent_exec_*` executors end-to-end against a scratch workspace.
 - All tests run automatically in CI via `cmake --build build && ctest --output-on-failure`.
 
-### Suite manifest (89 tests as of v0.6)
+### Suite manifest (98 tests as of v0.7)
 
 | Suite | Tests | Targets |
 |---|---|---|
 | `test_agent` | 35 | `agent_parse_calls` (16 cases inc. malformed `apply_edit`, multi-line blocks, non-tool fences, inline backticks), `agent_resolve_path` (5 sandbox cases), `agent_exec_read_file/write_file/apply_edit/list_dir` (13 round-trip + escape-block cases), `agent_system_prompt` smoke test |
-| `test_chat_history` | 18 | `parse_chat_history` (LF, CRLF, UTF-8, leading newlines, trailing pending prompt, `> ` inside reply, three-turn pending-last, **multi-line user prompt**, **two consecutive multi-line turns**) · `build_system_prompt` (with / without / NULL user prompt, base-then-user order) |
+| `test_chat_history` | 24 | `parse_chat_history` (LF, CRLF, UTF-8, leading newlines, trailing pending prompt, `> ` inside reply, three-turn pending-last, **multi-line user prompt**, **two consecutive multi-line turns**) · `build_system_prompt` (with / without / NULL user prompt, base-then-user order) · **`extract_summary_prefix`** (no-prefix passthrough, basic round-trip, multiline body with numbers/paths preserved, malformed missing-close fallback, in-body `[/SUMMARY]` ignored when not at line start, fixed-buffer truncation still returns correct skip offset) |
 | `test_version` | 15 | `version_newer_than` (X.Y vs X.Y.Z, `v` prefix mix, multi-digit minor, empty / garbage prefix, release-tag-vs-runtime) · `build_update_filename` (current platform + version-difference matrix) |
-| `test_string_utils` | 21 | RC4 chat cipher round-trip (ASCII, UTF-8, empty, determinism) · HF URL rewrite (`/blob/main/` → `/resolve/main/`, already-resolve, too-small-buffer, false-substring) · chat-name sanitisation (punctuation, space runs, trim, UTF-8 passthrough, 40-char cap) · **`strip_tool_fences`** (read_file / list_dir / apply_edit elided, plain code fences preserved, unclosed-fence tail dropped, inline backticks kept, multi-fence chains) |
+| `test_string_utils` | 24 | **XChaCha20-Poly1305 chat cipher** round-trip (ASCII, UTF-8, empty buffer, **auth-failure detection** when the tag is mutated) · **SHA-256** (empty input, "abc" KAT, incremental update == single-shot) · HF URL rewrite (`/blob/main/` → `/resolve/main/`, already-resolve, too-small-buffer, false-substring) · chat-name sanitisation (punctuation, space runs, trim, UTF-8 passthrough, 40-char cap) · `strip_tool_fences` (read_file / list_dir / apply_edit elided, plain code fences preserved, unclosed-fence tail dropped, inline backticks kept, multi-fence chains) |
+
+The string-utils suite links `src/crypto_engine.c`, `src/vendor/monocypher/monocypher.c`, and `src/vendor/sha256/sha256.c` directly so the cipher and hash tests exercise the real production code (not a copy). The crypto round-trip tests use a deterministic nonce so the assertion is reproducible — production code uses `crypto_random_bytes()`.
 
 ## Build Notes
 
@@ -372,7 +490,11 @@ The action buttons use the same snapshot-and-restore pattern on `nk->style.butto
 - llama.cpp lives in `third_party/llama.cpp/` (with a `vendor/llama.cpp` symlink) and is added as a CMake subdirectory with `LLAMA_BUILD_EXAMPLES=OFF`.
 - `seccomp` is optional (Linux only); CMake skips it gracefully on other platforms.
 - The application does **not** auto-load any model on boot.
-- Package version: **0.6** (`CPACK_PACKAGE_VERSION` in `CMakeLists.txt`).
+- Package version: **0.7** (`CPACK_PACKAGE_VERSION` in `CMakeLists.txt`, mirrored as `WASTELAND_VERSION` in `src/ui.h`).
+- Two CMake targets are produced: `Wasteland` (the GUI) and `wasteland-agent-executor` (the sandboxed subprocess). The latter is built from `src/agent_executor_main.c` + `agent_protocol.c` + `fs_sandbox.c` + `platform_sandbox.c` and intentionally avoids SDL / llama.cpp / curl — it must stay tiny and fast to fork.
+- `src/agent_executor_main.c` is excluded from the `Wasteland` source glob via `list(REMOVE_ITEM SOURCES …)` because it has its own `main()`.
+- Bundled vendor libraries: `src/vendor/monocypher/` (Monocypher 4.x — XChaCha20-Poly1305) and `src/vendor/sha256/` (incremental SHA-256). Both are added to `Wasteland`'s SOURCES via `list(APPEND)` and to `test_string_utils` directly.
+- Files that need glibc extensions (`agent.c`, `fs_sandbox.c`, `agent_executor_main.c`) guard their `#define _GNU_SOURCE` with `#ifndef _GNU_SOURCE` because CMake also adds it as a target compile definition on Linux — the unguarded define would warn at `-Wall`.
 - MSVC: `nuklear_impl.c` is compiled with `/wd4701`; `ui.c` with `/wd5287`; `_CRT_SECURE_NO_WARNINGS` applied globally for MSVC builds.
 - Linux `.deb` architecture is detected at CMake configure time from `CMAKE_SYSTEM_PROCESSOR` (`x86_64` → `amd64`, `aarch64` → `arm64`). CI builds both via `ubuntu-22.04` and `ubuntu-22.04-arm` runners.
 

@@ -153,6 +153,46 @@ static void build_system_prompt(const char *user_sys, char *out, size_t out_size
     }
 }
 
+/* Copied from inference.c — extract_summary_prefix.
+ * Strips a leading "[SUMMARY]\n...\n[/SUMMARY]\n" block from `history`,
+ * copies the body into summary_out, returns the byte offset past the
+ * closing marker (so caller can hand the rest to parse_chat_history).
+ * Returns 0 if no valid block is present. */
+#define WST_SUMMARY_OPEN  "[SUMMARY]"
+#define WST_SUMMARY_CLOSE "[/SUMMARY]"
+static size_t extract_summary_prefix(const char *history,
+                                     char *summary_out, size_t out_size)
+{
+    if (summary_out && out_size > 0) summary_out[0] = '\0';
+    if (!history) return 0;
+    const size_t open_len  = sizeof(WST_SUMMARY_OPEN)  - 1;
+    const size_t close_len = sizeof(WST_SUMMARY_CLOSE) - 1;
+    if (strncmp(history, WST_SUMMARY_OPEN, open_len) != 0) return 0;
+    const char *p = history + open_len;
+    if (*p == '\r') p++;
+    if (*p != '\n') return 0;
+    p++;
+    const char *body = p;
+    const char *end = strstr(p, WST_SUMMARY_CLOSE);
+    while (end) {
+        if (end == body || end[-1] == '\n') break;
+        end = strstr(end + 1, WST_SUMMARY_CLOSE);
+    }
+    if (!end) return 0;
+    size_t body_len = (size_t)(end - body);
+    if (body_len > 0 && body[body_len - 1] == '\n') body_len--;
+    if (body_len > 0 && body[body_len - 1] == '\r') body_len--;
+    if (summary_out && out_size > 0) {
+        size_t n = body_len < out_size - 1 ? body_len : out_size - 1;
+        memcpy(summary_out, body, n);
+        summary_out[n] = '\0';
+    }
+    const char *after = end + close_len;
+    if (*after == '\r') after++;
+    if (*after == '\n') after++;
+    return (size_t)(after - history);
+}
+
 /* ------------------------------------------------------------------------- */
 /* parse_chat_history tests                                                  */
 /* ------------------------------------------------------------------------- */
@@ -397,6 +437,85 @@ static void test_build_system_prompt_order(void) {
 }
 
 /* ------------------------------------------------------------------------- */
+/* extract_summary_prefix tests                                              */
+/* ------------------------------------------------------------------------- */
+
+static void test_summary_no_prefix(void) {
+    char out[128] = "X";
+    size_t off = extract_summary_prefix("> hi\nhello\n", out, sizeof(out));
+    ASSERT_EQ_INT(0, (int)off);
+    ASSERT_EQ_STR("", out);
+}
+
+static void test_summary_basic(void) {
+    char out[128];
+    const char *h =
+        "[SUMMARY]\n"
+        "User asked about X. Decided to do Y.\n"
+        "[/SUMMARY]\n"
+        "> next\nreply\n";
+    size_t off = extract_summary_prefix(h, out, sizeof(out));
+    ASSERT_TRUE(off > 0);
+    ASSERT_EQ_STR("User asked about X. Decided to do Y.", out);
+    ASSERT_EQ_STR("> next\nreply\n", h + off);
+}
+
+static void test_summary_multiline_body(void) {
+    char out[256];
+    const char *h =
+        "[SUMMARY]\n"
+        "Line one.\n"
+        "Line two with numbers 42 and path /tmp/foo.\n"
+        "Open question: Z.\n"
+        "[/SUMMARY]\n"
+        "> q\nr\n";
+    size_t off = extract_summary_prefix(h, out, sizeof(out));
+    ASSERT_TRUE(off > 0);
+    ASSERT_TRUE(strstr(out, "Line one.") != NULL);
+    ASSERT_TRUE(strstr(out, "Line two") != NULL);
+    ASSERT_TRUE(strstr(out, "Open question") != NULL);
+    ASSERT_EQ_STR("> q\nr\n", h + off);
+}
+
+static void test_summary_malformed_no_close(void) {
+    char out[128] = "Z";
+    const char *h = "[SUMMARY]\nbody\n> next\nreply\n";
+    size_t off = extract_summary_prefix(h, out, sizeof(out));
+    ASSERT_EQ_INT(0, (int)off);
+    ASSERT_EQ_STR("", out);
+}
+
+static void test_summary_close_must_be_at_line_start(void) {
+    char out[128] = "Z";
+    /* "[/SUMMARY]" appears in the body but is not at line start */
+    const char *h =
+        "[SUMMARY]\n"
+        "x[/SUMMARY] not a real terminator\n"
+        "still body\n"
+        "[/SUMMARY]\n"
+        "> q\nr\n";
+    size_t off = extract_summary_prefix(h, out, sizeof(out));
+    ASSERT_TRUE(off > 0);
+    ASSERT_TRUE(strstr(out, "still body") != NULL);
+    ASSERT_EQ_STR("> q\nr\n", h + off);
+}
+
+static void test_summary_truncates_to_fit_buffer(void) {
+    char out[16];
+    const char *h =
+        "[SUMMARY]\n"
+        "1234567890ABCDEFGHIJKLMNOP\n"
+        "[/SUMMARY]\n"
+        "> q\nr\n";
+    size_t off = extract_summary_prefix(h, out, sizeof(out));
+    ASSERT_TRUE(off > 0);
+    /* out buffer is 16 bytes — body got truncated to fit. */
+    ASSERT_TRUE(strlen(out) <= 15);
+    /* Caller still gets the correct offset to skip the full block. */
+    ASSERT_EQ_STR("> q\nr\n", h + off);
+}
+
+/* ------------------------------------------------------------------------- */
 /* Suite runner                                                              */
 /* ------------------------------------------------------------------------- */
 
@@ -423,6 +542,14 @@ void run_chat_history(void) {
     RUN_TEST(test_build_system_prompt_with_user);
     RUN_TEST(test_build_system_prompt_null_user);
     RUN_TEST(test_build_system_prompt_order);
+
+    printf("\nextract_summary_prefix\n");
+    RUN_TEST(test_summary_no_prefix);
+    RUN_TEST(test_summary_basic);
+    RUN_TEST(test_summary_multiline_body);
+    RUN_TEST(test_summary_malformed_no_close);
+    RUN_TEST(test_summary_close_must_be_at_line_start);
+    RUN_TEST(test_summary_truncates_to_fit_buffer);
 }
 
 TEST_MAIN(chat_history);

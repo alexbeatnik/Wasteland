@@ -1,4 +1,4 @@
-# AGENTS.md — Wasteland v0.6
+# AGENTS.md — Wasteland v0.7
 
 ## Agent Instructions
 
@@ -41,8 +41,27 @@ Anything that can take >100 ms must not run on the UI thread. The UI thread is t
 - Download code lives only in `network.c`. Do not duplicate libcurl logic elsewhere.
 - On non-Linux platforms, `lockdown_network()` is a no-op — do not add fake implementations.
 - The UI hides the entire HUB MODELS section while `state->network_lockdown` is true.
-- The `hub_models[]` array must contain real, public, reachable HF GGUF repos — fictional IDs fail at HF API resolution time with HTTP 404. When adding a new entry, click DOWNLOAD on it once before merging. Current set: `Qwen/Qwen2.5-0.5B-Instruct-GGUF`, `ggml-org/gemma-3-1b-it-GGUF`, `Qwen/Qwen2.5-1.5B-Instruct-GGUF`, `ggml-org/SmolLM2-1.7B-Instruct-GGUF`, `unsloth/Qwen3.6-35B-A3B-GGUF`.
+- The `hub_models[]` array contains `hub_model_t { repo_id, description }` structs. Each `repo_id` must be a real, public, reachable HF GGUF repo — fictional IDs fail at HF API resolution time with HTTP 404. When adding a new entry, click DOWNLOAD on it once before merging. Always include at least one mid-tier (~7-8B) model — leaving only sub-2B tinies makes the app feel dumb on first use even though the issue is the model. Descriptions are one-line ≤ 64 chars and use ASCII-only characters (`·` is fine, but no emoji); they render in dim amber under each radio button. Current set: `Qwen/Qwen2.5-0.5B-Instruct-GGUF`, `ggml-org/gemma-3-1b-it-GGUF`, `Qwen/Qwen2.5-1.5B-Instruct-GGUF`, `ggml-org/SmolLM2-1.7B-Instruct-GGUF`, `bartowski/google_gemma-4-E4B-it-GGUF`, `Qwen/Qwen2.5-7B-Instruct-GGUF`, `bartowski/Qwen2.5.1-Coder-7B-Instruct-GGUF`, `bartowski/OLMo-2-1124-7B-Instruct-GGUF`, `bartowski/Meta-Llama-3.1-8B-Instruct-GGUF`, `bartowski/google_gemma-4-31B-it-GGUF`, `unsloth/Qwen3.6-35B-A3B-GGUF`.
 - The `/blob/main/` → `/resolve/main/` URL rewrite in `network_download_model` must `memmove` the tail right by 3 bytes **before** the `memcpy` overwrite — the obvious order corrupts the first 3 bytes of the filename.
+
+## Platform Sandbox (`src/platform_sandbox.c`)
+
+- `platform_sandbox_query_caps()` returns a bitmask of available capabilities. On Linux this includes `SANDBOX_CAP_NETWORK_LOCKDOWN` (seccomp) and `SANDBOX_CAP_FS_RESTRICT` (Landlock, runtime-probed). On macOS/Windows only `SANDBOX_CAP_PROCESS_ISOLATE` is reported.
+- `platform_sandbox_apply()` installs seccomp-bpf network lockdown; `platform_sandbox_restrict_fs_to()` installs Landlock ruleset restricting the process to a single workspace directory. Both are no-ops on non-Linux platforms.
+- The UI renders a persistent sandbox status indicator (green/amber/red) driven by `platform_sandbox_query_caps()` — never falsely claim security.
+
+## Filesystem Sandbox (`src/fs_sandbox.c`)
+
+- **Linux:** `openat()`-based traversal with `O_NOFOLLOW` at every step. Explicit `".."` is rejected. After opening, `/proc/self/fd/<n>` is verified via `readlink` to still lie under the workspace root. This mitigates symlink traversal, TOCTOU races, and path-escape attempts.
+- **macOS/Windows:** `realpath()` + `path_is_inside()` fallback — honest about weaker guarantees.
+- `fs_sandbox.c` is the **only** place where agent tool I/O (`read_file`, `list_dir`, `write_file`, `apply_edit`) touches the filesystem. `agent.c` delegates to it; do not re-add direct `fopen` paths in agent executors.
+
+## Agent Executor Subprocess (`src/agent_executor_main.c`)
+
+- A separate binary `wasteland-agent-executor` is spawned via `posix_spawn` (Linux) and communicates with the main process over a framed IPC protocol (`src/agent_protocol.c`).
+- The executor applies `platform_sandbox_apply()` + `platform_sandbox_restrict_fs_to()` **before** entering the service loop, so even if the main process is compromised the filesystem surface is minimised.
+- On non-Linux platforms the IPC path is disabled and agent tools fall back to in-process `fs_sandbox.c` calls.
+- **Do not** call `pthread_cancel` on the executor — use `AGENT_IPC_TOOL_SHUTDOWN` for graceful termination.
 
 ## Auto-Update Rules
 
@@ -55,7 +74,7 @@ Anything that can take >100 ms must not run on the UI thread. The UI thread is t
 
 ## CI Release Workflow Rules
 
-- **`release` job MUST list `extract-version` in its `needs:`.** Without it, `needs.extract-version.outputs.version` evaluates to null on a main-branch push, the `||` fallback drops to `github.ref_name` which IS the literal string `main`, and `softprops/action-gh-release` then creates a release AND a tag named `main` at the current commit — silently bypassing the `v0.6` tag that `create-tag` just published.
+- **`release` job MUST list `extract-version` in its `needs:`.** Without it, `needs.extract-version.outputs.version` evaluates to null on a main-branch push, the `||` fallback drops to `github.ref_name` which IS the literal string `main`, and `softprops/action-gh-release` then creates a release AND a tag named `main` at the current commit — silently bypassing the `v0.7` tag that `create-tag` just published.
 - **Resolve the release tag in a dedicated step, not inline in `tag_name:`.** A `bash` step with priority `inputs.version → extract-version.outputs.version → github.ref_name (only if ref_type == tag)` plus a `^v[0-9]+\.[0-9]+(\.[0-9]+)?$` regex validation makes the resolution explicit and fails loudly when nothing matches. Don't rewrite this back into a single-line YAML expression — silent fallthrough to a branch name is exactly the bug we're guarding against.
 - **`release` is gated by `tag_exists == 'false'` on main-push.** Cosmetic pushes to `main` (README tweak, doc fix, anything that doesn't bump `WASTELAND_VERSION` in `src/ui.h`) must NOT regenerate the published release — that would overwrite the `.deb`/`.dmg`/`.exe` artefacts and wipe hand-edited release notes from the GitHub UI. The `extract-version` job probes `git ls-remote --tags` and writes `tag_exists`; the release job's `if:` consults it. `workflow_dispatch` and direct tag-pushes still publish unconditionally.
 - **`GITHUB_TOKEN`-pushed tags do NOT trigger workflow runs.** GitHub safety against recursive events. So the build + release MUST happen in the same workflow run as `create-tag` — don't refactor to "wait for the tag-push event" expecting a second run, because that second run never fires.
@@ -74,6 +93,7 @@ Anything that can take >100 ms must not run on the UI thread. The UI thread is t
 - The `◈` icon copies assistant responses and explicitly skips content inside `-- THINK --` blocks.
 - Each user/assistant turn is rendered in its own `nk_edit_string` box. The rendering loop splits on `\n> ` boundaries unconditionally (not only inside think blocks) so a new user prompt always starts a fresh box. Empty or whitespace-only sections (stray `\n` between markers) are suppressed and produce no box.
 - **Agent diff palette is canonical:** `[ APPLY ]` and the REPLACE block must be `#AACC00` (yellow-green); `[ REJECT ]` and the SEARCH block must be `#FF6020` (orange-red); the `▼ AGENT PROPOSAL — REVIEW` heading and `// SEARCH:` / `// REPLACE WITH:` labels are amber `#FFB000`. These four exact RGB values match the `docs/index.html` `agent-proposal` mock — keep them in sync if either side changes. Use the snapshot-and-restore pattern (`saved_btn = nk->style.button; ...; nk->style.button = saved_btn;`) so per-button tinting never leaks into the global amber theme.
+- **Active-state buttons must flip text colour.** The amber theme uses `text_normal = amber` against a dark background. When you fill a button background with amber to mark it as "selected" (e.g. the active capability preset), you MUST also set `text_normal` / `text_hover` / `text_active` to black — otherwise it's amber-on-amber and the label disappears. Same pattern as the diff buttons: copy `nk->style.button` into a local, override `normal/hover/active` (background) AND `text_normal/text_hover/text_active`, render, restore. Override all three text states because Nuklear picks `text_active` while the user is mid-click and `text_hover` while the cursor is over the button — leaving any of them at amber gives a one-frame "label vanished" flicker.
 - **Diff blocks use `nk_edit_string`, NOT `nk_group + nk_label_colored_wrap`.** The wrap label allocates its own layout rows that don't compose with a fixed-height parent group — text gets clipped past the reserved height, leaving an empty bordered box (the user sees the rectangle, not the content). The proven pattern is `nk_edit_string(NK_EDIT_BOX | NK_EDIT_MULTILINE, …)` writing into a static buffer that's repopulated from the pending-tool pointers each frame. Tint border / text / cursor through a `saved_edit = nk->style.edit; ... ; nk->style.edit = saved_edit;` snapshot-and-restore. Do not switch this to `NK_EDIT_READ_ONLY` — read-only mode disables mouse selection, which kills the user's ability to copy the diff for review.
 - **Pending-panel reserved height:** `pending_panel_h` is `230` for `write_file` (heading 18 + title 16 + label 14 + body 130 + buttons 28 + group padding) and `290` for `apply_edit` (one extra label + one extra body). If you grow either block, update the constants — chat area height is computed as `height - 200 - pending_panel_h`, so under-reserving pushes the input field offscreen.
 - **Prompt input is multi-line `nk_edit_string(NK_EDIT_BOX | NK_EDIT_MULTILINE)`.** Do NOT pass `NK_EDIT_SIG_ENTER` — that would commit on every Enter press, defeating multi-line composition (Enter must insert a newline). Submit is button-only via the `▶` glyph. Pasting a multi-paragraph clipboard works because the box accepts `\n` natively; long content scrolls within the box.
@@ -98,10 +118,13 @@ Anything that can take >100 ms must not run on the UI thread. The UI thread is t
 
 - `state->chat_history` (main thread) and `ictx->chat_history` (inference mirror, protected by `history_mutex`) are two separate buffers. Call `ui_set_chat_history(state)` to sync them before submitting a prompt or after compacting.
 - `parse_chat_history()` in `inference.c` produces user/assistant pairs. A trailing user message with no assistant reply (i.e. the current prompt in mid-submission) is **discarded** — the worker appends the current prompt separately. This prevents duplicating the user turn in the message list.
-- **Agent mode includes history:** the agent ReAct branch calls `parse_chat_history` with a cap of `AGENT_HISTORY_SLOTS = 8` messages before appending the current user prompt. This gives the model multi-turn memory in agent mode at the cost of fewer available tool-call slots (still 10 turns, governed by `AGENT_MAX_MSGS = 30`).
+- **`[SUMMARY]...[/SUMMARY]\n` is a magic prefix** managed by the compact pipeline. It MUST live at byte 0 of `chat_history` (or be absent). Both the inference worker and `inference_get_context_stats` call `extract_summary_prefix()` first to peel it off, then hand the remainder to `parse_chat_history`. Do not invent your own placement (mid-history, between turns, etc.) — the parser does not expect it there. If you add new code that mutates `chat_history` (compact variants, "clear from this turn", import/export, …), preserve the prefix or rebuild it from scratch; never half-strip it (e.g. drop `[SUMMARY]` but leave `[/SUMMARY]`).
+- **The summary body is appended to the system message, not injected as a fake turn.** The worker prepends `\n\nPrevious conversation summary (older turns compacted from this chat):\n<text>` to the system message before the user/assistant turns. This means a model that sees `[SUMMARY]...[/SUMMARY]` rendered as raw text in the chat panel is harmless — only the worker's system-message construction makes it semantic.
+- **Agent mode includes history:** the agent ReAct branch calls `parse_chat_history` with a cap of `AGENT_HISTORY_SLOTS = 8` messages before appending the current user prompt. This gives the model multi-turn memory in agent mode at the cost of fewer available tool-call slots (still 10 turns, governed by `AGENT_MAX_MSGS = 30`). The summary block is folded into `combined_sys` here too — same protocol.
 - **Agent tool output:** `read_file` and `list_dir` results are NOT printed to the chat UI — only the `[ TOOL: name | path ]` header is shown. File contents are still passed to the model via `result_out`. Do not re-add the `emit_raw_str(ictx, result_out)` call — it floods the chat with raw file contents.
-- `ui_compact_chat_history(state, n)` is the **only** correct way to call compact from UI code. It locks `chat_mutex`, runs `compact_chat_history()`, pushes the result to inference via `ui_set_chat_history()`, saves the active chat to disk, updates the CTX bar, and writes a status message. Never call `compact_chat_history()` directly from button handlers.
-- `inference_get_context_stats()` calls `llama_tokenize()` with `tokens=NULL` / `n_tokens_max=0` to count without allocating. The API returns **negative** count in this case (buffer-too-small convention) — negate it to get the real count. Do not treat negative as failure.
+- `ui_compact_chat_history(state, n)` is the **only** correct way to call compact from UI code. It is **async** (v0.7+): it snapshots the verbatim tail to keep, calls `inference_request_summary` with the older portion, sets `state->compact_pending = 1`. Don't try to use the result on the same frame — `ui_finalize_compact()` (called from the main loop) splices in the summary once the worker publishes it. The `pairs` argument is now informational; the actual cut keeps `COMPACT_KEEP_RECENT_TURNS` (= 2) turns verbatim.
+- **SEND must be gated by `compact_pending`.** If the user clicks SEND while a compact is in flight, the prompt would be submitted with the pre-compact history (because mirroring happens in `ui_finalize_compact`). The send button's enable check includes `!state->compact_pending`; pre-send compact uses `goto skip_send` to drop the SEND that frame so the user re-clicks after the summary lands.
+- `inference_get_context_stats()` calls `llama_tokenize()` with `tokens=NULL` / `n_tokens_max=0` to count without allocating. The API returns **negative** count in this case (buffer-too-small convention) — negate it to get the real count. Do not treat negative as failure. It also strips the `[SUMMARY]` prefix and prepends a synthetic `system: Summary: …` message before tokenising, so the CTX bar reflects what the worker will actually feed the model.
 
 ## Sampler Stack
 
@@ -135,10 +158,12 @@ penalties(last_n=64, repeat=1.1) → top_k(40) → top_p(0.95) → temp(ictx->te
 
 ## Settings Persistence
 
-Runtime tunables (N\_CTX, Temperature) are stored in `wasteland.cfg` alongside agent settings:
+Runtime tunables (N\_CTX, Temperature, Capability Preset) are stored in `wasteland.cfg` alongside agent settings:
 
 ```
 agent_mode=0
+capability_preset=2
+capability_custom_bits=0
 agent_workspace=/path/to/ws
 n_ctx=8192
 temperature=0.800
@@ -147,6 +172,7 @@ temperature=0.800
 - Load on startup in `main.c`; push to `inference_set_n_ctx` / `inference_set_temperature` immediately.
 - Persist on every change (compare to `last_*` shadow variables in the main loop).
 - Valid ranges: `n_ctx` 512–262 144, `temperature` 0.01–5.0.
+- Capability presets: `0=OFF`, `1=READ_ONLY`, `2=READ_WRITE`, `3=CUSTOM`. When preset is `CUSTOM`, `capability_custom_bits` stores the per-tool bitmask (bits 1..4 correspond to `read_file`, `list_dir`, `write_file`, `apply_edit`).
 
 ## Testing Protocol
 
@@ -169,10 +195,10 @@ Before declaring a task complete:
 15. Auto-update banner must appear when `state->update_version` is non-empty (can be tested by temporarily hardcoding a different version string).
 16. A new chat's file must be renamed by the model-generated title after the first assistant reply completes (check `chats/` directory).
 17. ARM64 `.deb` built in CI must run on Raspberry Pi 4/5 without `Illegal instruction`.
-18. All CTest suites pass (`ctest --output-on-failure`) — currently **81 tests** across 4 suites (`agent`, `chat_history`, `version`, `string_utils`).
+18. All CTest suites pass (`ctest --output-on-failure`) — currently **98 tests** across 4 suites (`agent` 35, `chat_history` 24, `version` 15, `string_utils` 24).
 19. New logic must have a matching `tests/test_*.c` suite if it is testable without SDL/llama.cpp (pure string / file / math functions). Filesystem-touching tests use `/tmp`-style scratch directories created in `run_<suite>()` *before* `RUN_TEST` calls.
 20. Existing tests must not be broken by the change — run `ctest` before every commit.
-21. **Test parity rule:** when a function lives in `src/*.c` and has been copy-extracted into `tests/test_*.c` (e.g. `parse_chat_history`, `version_newer_than`, `rc4_crypt_buffer`, the HF URL rewrite), edits to the production version MUST be mirrored into the test copy. The duplication is intentional — it lets the test binaries link without SDL2 / llama.cpp / curl — but you have to keep both halves in lockstep or the tests start passing the wrong code.
+21. **Test parity rule:** when a function lives in `src/*.c` and has been copy-extracted into `tests/test_*.c` (e.g. `parse_chat_history`, `version_newer_than`, `crypto_seal` / `crypto_open`, the HF URL rewrite), edits to the production version MUST be mirrored into the test copy. The duplication is intentional — it lets the test binaries link without SDL2 / llama.cpp / curl — but you have to keep both halves in lockstep or the tests start passing the wrong code.
 
 ## Font & DPI Rules
 
@@ -183,4 +209,4 @@ Before declaring a task complete:
 
 ## Version
 
-Current version: **0.6**
+Current version: **0.7**

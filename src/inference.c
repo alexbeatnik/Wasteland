@@ -139,6 +139,19 @@ struct inference_ctx {
     size_t          title_len;
     int             title_mode; /* 1 = emit_filtered_piece writes to title_buffer */
 
+    /* Summary generation (driven by COMPACT). UI sets pending_summary_src and
+     * needs_summary; worker picks it up next tick, runs a short pass, writes
+     * the result into summary_buffer. UI polls and consumes via
+     * inference_take_summary(). */
+    pthread_mutex_t summary_mutex;
+    volatile int    needs_summary;        /* 1 = request queued */
+    volatile int    summary_in_flight;    /* 1 = worker actively generating */
+    int             summary_mode;         /* 1 = piece-emit redirected to summary_buffer */
+    int             summary_ready;        /* 1 = result available, not yet taken */
+    char           *pending_summary_src;  /* heap, owned by inference module */
+    char            summary_buffer[WASTELAND_SUMMARY_MAX];
+    size_t          summary_len;
+
     volatile int running;
 };
 
@@ -148,6 +161,71 @@ struct inference_ctx {
 #define WST_DEFAULT_TEMPERATURE  0.8f
 
 #define MAX_HISTORY_MSGS 1024
+
+/* Markers that wrap a compact summary prepended to a chat history by the
+ * COMPACT pipeline. The block must start at byte 0 of the chat history,
+ * spans whole lines, and is consumed by the worker before the per-turn
+ * parser runs. */
+#define WST_SUMMARY_OPEN  "[SUMMARY]"
+#define WST_SUMMARY_CLOSE "[/SUMMARY]"
+
+/* ---------------------------------------------------------------------------
+ * extract_summary_prefix
+ *
+ * If `history` begins with the line "[SUMMARY]\n", read everything up to a
+ * line "[/SUMMARY]\n" into `summary_out` (NUL-terminated, truncated to fit
+ * `out_size`) and return the byte offset past the closing marker so the
+ * caller can hand the remainder to parse_chat_history(). Trailing newlines
+ * after the closing marker are also skipped.
+ *
+ * If the prefix is missing or malformed, write an empty string into
+ * `summary_out` and return 0. The history pointer is then unchanged.
+ * --------------------------------------------------------------------------- */
+#ifdef TESTING
+size_t extract_summary_prefix(const char *history,
+                              char *summary_out, size_t out_size)
+#else
+static size_t extract_summary_prefix(const char *history,
+                                     char *summary_out, size_t out_size)
+#endif
+{
+    if (summary_out && out_size > 0) summary_out[0] = '\0';
+    if (!history) return 0;
+    const size_t open_len  = sizeof(WST_SUMMARY_OPEN)  - 1;
+    const size_t close_len = sizeof(WST_SUMMARY_CLOSE) - 1;
+
+    /* Must start with the open marker followed by '\n' or '\r\n'. */
+    if (strncmp(history, WST_SUMMARY_OPEN, open_len) != 0) return 0;
+    const char *p = history + open_len;
+    if (*p == '\r') p++;
+    if (*p != '\n') return 0;
+    p++;
+    const char *body = p;
+
+    /* Find the close marker at line start. */
+    const char *end = strstr(p, WST_SUMMARY_CLOSE);
+    while (end) {
+        if (end == body || end[-1] == '\n') break;
+        end = strstr(end + 1, WST_SUMMARY_CLOSE);
+    }
+    if (!end) return 0;
+
+    /* Copy body (excluding the trailing '\n' that precedes [/SUMMARY]). */
+    size_t body_len = (size_t)(end - body);
+    if (body_len > 0 && body[body_len - 1] == '\n') body_len--;
+    if (body_len > 0 && body[body_len - 1] == '\r') body_len--;
+    if (summary_out && out_size > 0) {
+        size_t n = body_len < out_size - 1 ? body_len : out_size - 1;
+        memcpy(summary_out, body, n);
+        summary_out[n] = '\0';
+    }
+
+    /* Advance past the close marker and the optional terminating newline. */
+    const char *after = end + close_len;
+    if (*after == '\r') after++;
+    if (*after == '\n') after++;
+    return (size_t)(after - history);
+}
 
 /* ---------------------------------------------------------------------------
  * Chat-history parser
@@ -344,6 +422,7 @@ inference_ctx_t* inference_init(void)
     pthread_mutex_init(&ictx->pending_mutex, NULL);
     pthread_mutex_init(&ictx->history_mutex, NULL);
     pthread_mutex_init(&ictx->settings_mutex, NULL);
+    pthread_mutex_init(&ictx->summary_mutex, NULL);
 
     ictx->pending_n_ctx = WST_DEFAULT_N_CTX;
     ictx->temperature   = WST_DEFAULT_TEMPERATURE;
@@ -378,10 +457,12 @@ void inference_shutdown(inference_ctx_t *ictx)
     pthread_mutex_destroy(&ictx->pending_mutex);
     pthread_mutex_destroy(&ictx->history_mutex);
     pthread_mutex_destroy(&ictx->settings_mutex);
+    pthread_mutex_destroy(&ictx->summary_mutex);
 
     free(ictx->pending_content);
     free(ictx->pending_search);
     free(ictx->pending_replace);
+    free(ictx->pending_summary_src);
     free(ictx);
 }
 
@@ -615,6 +696,60 @@ int inference_take_title(inference_ctx_t *ictx, char *buf, size_t size)
 }
 
 /* ---------------------------------------------------------------------------
+ * Summary generation (for COMPACT)
+ * --------------------------------------------------------------------------- */
+int inference_request_summary(inference_ctx_t *ictx, const char *src_text)
+{
+    if (!ictx || !src_text) return -1;
+    pthread_mutex_lock(&ictx->summary_mutex);
+    if (ictx->needs_summary || ictx->summary_in_flight) {
+        pthread_mutex_unlock(&ictx->summary_mutex);
+        return -1;
+    }
+    free(ictx->pending_summary_src);
+    ictx->pending_summary_src = strdup(src_text);
+    if (!ictx->pending_summary_src) {
+        pthread_mutex_unlock(&ictx->summary_mutex);
+        return -1;
+    }
+    ictx->needs_summary  = 1;
+    ictx->summary_ready  = 0;
+    ictx->summary_len    = 0;
+    pthread_mutex_unlock(&ictx->summary_mutex);
+
+    /* Wake the worker if it is currently parked on prompt_cond — the worker
+     * loop polls needs_summary at the top of every cycle. */
+    pthread_mutex_lock(&ictx->prompt_mutex);
+    pthread_cond_broadcast(&ictx->prompt_cond);
+    pthread_mutex_unlock(&ictx->prompt_mutex);
+    return 0;
+}
+
+int inference_is_summarizing(inference_ctx_t *ictx)
+{
+    if (!ictx) return 0;
+    return ictx->needs_summary || ictx->summary_in_flight;
+}
+
+int inference_take_summary(inference_ctx_t *ictx, char *buf, size_t size)
+{
+    if (!ictx || !buf || size == 0) return 0;
+    pthread_mutex_lock(&ictx->summary_mutex);
+    if (!ictx->summary_ready) {
+        pthread_mutex_unlock(&ictx->summary_mutex);
+        return 0;
+    }
+    size_t n = ictx->summary_len;
+    if (n >= size) n = size - 1;
+    memcpy(buf, ictx->summary_buffer, n);
+    buf[n] = '\0';
+    ictx->summary_ready = 0;
+    ictx->summary_len   = 0;
+    pthread_mutex_unlock(&ictx->summary_mutex);
+    return (int)n;
+}
+
+/* ---------------------------------------------------------------------------
  * Chat history mirror
  * --------------------------------------------------------------------------- */
 void inference_set_chat_history(inference_ctx_t *ictx, const char *history)
@@ -645,9 +780,41 @@ int inference_get_context_stats(inference_ctx_t *ictx,
 
     if (!model || !ctx) return -1;
 
+    /* Match the worker's view: account for any [SUMMARY] prefix in the
+     * token-count so the CTX bar doesn't undercount when compact has run. */
+    char ctx_summary[WASTELAND_SUMMARY_MAX];
+    size_t ctx_sum_offset = extract_summary_prefix(history,
+                                                   ctx_summary,
+                                                   sizeof(ctx_summary));
+
     struct llama_chat_message msgs[MAX_HISTORY_MSGS];
     char *owned[MAX_HISTORY_MSGS] = {0};
-    int n_msgs = parse_chat_history(history, msgs, owned, MAX_HISTORY_MSGS);
+    int n_msgs = parse_chat_history(history + ctx_sum_offset,
+                                    msgs, owned, MAX_HISTORY_MSGS);
+
+    /* If a summary block was present, prepend a synthetic system message so
+     * its bytes land in the token count too. */
+    if (ctx_summary[0] && n_msgs < MAX_HISTORY_MSGS) {
+        for (int i = n_msgs; i > 0; i--) {
+            msgs[i] = msgs[i - 1];
+            owned[i] = owned[i - 1];
+        }
+        size_t sl = strlen(ctx_summary);
+        char *cs = (char *)malloc(sl + 64);
+        if (cs) {
+            snprintf(cs, sl + 64, "Summary: %s", ctx_summary);
+            msgs[0].role = "system";
+            msgs[0].content = cs;
+            owned[0] = cs;
+            n_msgs++;
+        } else {
+            /* Roll back the shift if alloc failed */
+            for (int i = 0; i < n_msgs; i++) {
+                msgs[i] = msgs[i + 1];
+                owned[i] = owned[i + 1];
+            }
+        }
+    }
 
     const char *tmpl = llama_model_chat_template(model, NULL);
     if (!tmpl) {
@@ -786,6 +953,17 @@ static void output_append_locked(inference_ctx_t *ictx,
         memcpy(ictx->title_buffer + ictx->title_len, src, n);
         ictx->title_len += n;
         ictx->title_buffer[ictx->title_len] = '\0';
+        ictx->tag_prev_char = src[n - 1];
+        return;
+    }
+
+    if (ictx->summary_mode) {
+        size_t space = WASTELAND_SUMMARY_MAX - ictx->summary_len - 1;
+        if (n > space) n = space;
+        if (n == 0) return;
+        memcpy(ictx->summary_buffer + ictx->summary_len, src, n);
+        ictx->summary_len += n;
+        ictx->summary_buffer[ictx->summary_len] = '\0';
         ictx->tag_prev_char = src[n - 1];
         return;
     }
@@ -1185,22 +1363,25 @@ void* inference_worker_thread(void *arg)
     inference_ctx_t *ictx = (inference_ctx_t *)arg;
 
     while (ictx->running) {
-        /* ---- Wait for a prompt ---- */
+        /* ---- Wait for a prompt OR a summary request ---- */
         pthread_mutex_lock(&ictx->prompt_mutex);
-        while (!ictx->has_prompt && ictx->running) {
+        while (!ictx->has_prompt && !ictx->needs_summary && ictx->running) {
             pthread_cond_wait(&ictx->prompt_cond, &ictx->prompt_mutex);
         }
         if (!ictx->running) {
             pthread_mutex_unlock(&ictx->prompt_mutex);
             break;
         }
+        int do_prompt = ictx->has_prompt;
         char prompt[MAX_PROMPT_LEN];
         char sys_prompt[MAX_PROMPT_LEN];
-        strncpy(prompt, ictx->prompt, MAX_PROMPT_LEN - 1);
-        prompt[MAX_PROMPT_LEN - 1] = '\0';
-        strncpy(sys_prompt, ictx->sys_prompt, MAX_PROMPT_LEN - 1);
-        sys_prompt[MAX_PROMPT_LEN - 1] = '\0';
-        ictx->has_prompt = 0;
+        if (do_prompt) {
+            strncpy(prompt, ictx->prompt, MAX_PROMPT_LEN - 1);
+            prompt[MAX_PROMPT_LEN - 1] = '\0';
+            strncpy(sys_prompt, ictx->sys_prompt, MAX_PROMPT_LEN - 1);
+            sys_prompt[MAX_PROMPT_LEN - 1] = '\0';
+            ictx->has_prompt = 0;
+        }
         pthread_mutex_unlock(&ictx->prompt_mutex);
 
         /* ---- Snapshot model + agent settings ---- */
@@ -1208,6 +1389,88 @@ void* inference_worker_thread(void *arg)
         struct llama_model  *model = ictx->model;
         struct llama_context *ctx  = ictx->ctx;
         pthread_mutex_unlock(&ictx->model_mutex);
+
+        /* ---- Service a queued summary request before the prompt ----
+         * Compact pipeline: UI calls inference_request_summary(src) and
+         * shows a "Compacting..." status. We run a short pass redirected
+         * into summary_buffer, then publish via summary_ready. */
+        pthread_mutex_lock(&ictx->summary_mutex);
+        int do_summary = ictx->needs_summary;
+        char *src_text = NULL;
+        if (do_summary) {
+            src_text = ictx->pending_summary_src;
+            ictx->pending_summary_src = NULL;
+            ictx->needs_summary    = 0;
+            ictx->summary_in_flight= 1;
+        }
+        pthread_mutex_unlock(&ictx->summary_mutex);
+
+        if (do_summary) {
+            if (model && ctx && src_text) {
+                struct llama_chat_message smsgs[2];
+                static char sumprompt[WASTELAND_MAX_CHAT_HISTORY + 1024];
+
+                smsgs[0].role = "system";
+                smsgs[0].content =
+                    "You compress conversation history into a compact context note. "
+                    "Reply with ONLY the note text — 3 to 6 short sentences, plain text, "
+                    "no markdown, no headers, no quotes. "
+                    "Preserve concrete facts: names, numbers, file paths, code identifiers, "
+                    "decisions made, and open questions. Drop pleasantries and small-talk. "
+                    "Match the language of the source.";
+
+                snprintf(sumprompt, sizeof(sumprompt),
+                    "Summarise the conversation below into a compact context note "
+                    "(3-6 sentences, max 600 characters) suitable for prepending as "
+                    "background to future turns. Keep names, numbers, paths and decisions; "
+                    "drop greetings and filler.\n\n--- BEGIN ---\n%s\n--- END ---",
+                    src_text);
+                smsgs[1].role = "user";
+                smsgs[1].content = sumprompt;
+
+                pthread_mutex_lock(&ictx->summary_mutex);
+                ictx->summary_mode = 1;
+                ictx->summary_len  = 0;
+                ictx->summary_buffer[0] = '\0';
+                pthread_mutex_unlock(&ictx->summary_mutex);
+
+                /* Reset stream-filter state so think-tag carry from a
+                 * previous turn doesn't leak into the summary. Output
+                 * buffer is NOT cleared — it belongs to the chat. */
+                ictx->cancel_generation = 0;
+                ictx->tag_carry_len  = 0;
+                ictx->tag_prev_char  = '\n';
+
+                run_one_turn(ictx, model, ctx, smsgs, 2, NULL, 0, 256);
+                emit_filtered_flush(ictx);
+
+                pthread_mutex_lock(&ictx->summary_mutex);
+                ictx->summary_mode = 0;
+                /* Trim leading/trailing whitespace */
+                char *sb = ictx->summary_buffer;
+                size_t sl = ictx->summary_len;
+                while (sl > 0 && (sb[sl-1] == '\n' || sb[sl-1] == '\r' ||
+                                  sb[sl-1] == ' '  || sb[sl-1] == '\t'))
+                    sl--;
+                size_t lead = 0;
+                while (lead < sl && (sb[lead] == '\n' || sb[lead] == '\r' ||
+                                     sb[lead] == ' '  || sb[lead] == '\t'))
+                    lead++;
+                if (lead > 0) memmove(sb, sb + lead, sl - lead);
+                sl -= lead;
+                sb[sl] = '\0';
+                ictx->summary_len = sl;
+                pthread_mutex_unlock(&ictx->summary_mutex);
+                fprintf(stderr, "[worker] Generated summary (%zu chars)\n", sl);
+            }
+            free(src_text);
+            pthread_mutex_lock(&ictx->summary_mutex);
+            ictx->summary_in_flight = 0;
+            ictx->summary_ready     = 1;
+            pthread_mutex_unlock(&ictx->summary_mutex);
+        }
+
+        if (!do_prompt) continue;
         if (!model || !ctx) continue;
 
         char workspace[1024];
@@ -1240,20 +1503,37 @@ void* inference_worker_thread(void *arg)
             local_history[sizeof(local_history) - 1] = '\0';
             pthread_mutex_unlock(&ictx->history_mutex);
 
+            /* Pull off any [SUMMARY]...[/SUMMARY] prefix that COMPACT may
+             * have prepended. The summary (if present) is appended to the
+             * system message so the model sees it as background; the
+             * remainder of `local_history` parses as normal turns. */
+            char hist_summary[WASTELAND_SUMMARY_MAX];
+            size_t sum_offset = extract_summary_prefix(local_history,
+                                                      hist_summary,
+                                                      sizeof(hist_summary));
+
             struct llama_chat_message msgs[MAX_HISTORY_MSGS];
             char *owned[MAX_HISTORY_MSGS] = {0};
             int n_msgs = 0;
 
             /* Always include the base system prompt; append user prompt if set. */
-            static char combined_sys_plain[MAX_PROMPT_LEN + 2048];
+            static char combined_sys_plain[MAX_PROMPT_LEN + 2048 + WASTELAND_SUMMARY_MAX];
             build_system_prompt(sys_prompt, combined_sys_plain,
                                 sizeof(combined_sys_plain));
+            if (hist_summary[0]) {
+                size_t cur = strlen(combined_sys_plain);
+                snprintf(combined_sys_plain + cur,
+                         sizeof(combined_sys_plain) - cur,
+                         "\n\nPrevious conversation summary (older turns "
+                         "compacted from this chat):\n%s",
+                         hist_summary);
+            }
             msgs[n_msgs].role    = "system";
             msgs[n_msgs].content = combined_sys_plain;
             n_msgs++;
 
             int sys_offset = n_msgs;
-            int n_hist = parse_chat_history(local_history,
+            int n_hist = parse_chat_history(local_history + sum_offset,
                                             msgs + n_msgs,
                                             owned + n_msgs,
                                             MAX_HISTORY_MSGS - n_msgs - 1);
@@ -1279,10 +1559,17 @@ void* inference_worker_thread(void *arg)
                 static char title_prompt[MAX_PROMPT_LEN + 256];
 
                 tmsgs[0].role    = "system";
-                tmsgs[0].content = "You are a helpful assistant. Generate very short chat titles. Reply with ONLY the title text, no quotes, no markdown, no punctuation.";
+                tmsgs[0].content =
+                    "You generate very short chat titles. "
+                    "Reply with ONLY the title text — 3 to 5 words, "
+                    "no quotes, no markdown, no punctuation, no emoji. "
+                    "Title MUST fit in 40 characters total. "
+                    "Use the same language as the user message.";
 
                 snprintf(title_prompt, sizeof(title_prompt),
-                         "Give this conversation a short 3-5 word title based on the following user message. Output ONLY the title text, nothing else.\n\nUser: %s",
+                         "Give this conversation a short 3-5 word title (max 40 chars) "
+                         "based on the user message below. Match the user's language. "
+                         "Output ONLY the title text, nothing else.\n\nUser: %s",
                          prompt);
                 tmsgs[1].role    = "user";
                 tmsgs[1].content = title_prompt;
@@ -1315,19 +1602,6 @@ void* inference_worker_thread(void *arg)
             char *owned[AGENT_MAX_MSGS] = {0};
             int n_msgs = 0;
 
-            /* Combine base system prompt + optional user prompt + agent tools. */
-            char combined_sys[16384];
-            {
-                char base_and_user[MAX_PROMPT_LEN + 2048];
-                build_system_prompt(sys_prompt, base_and_user,
-                                    sizeof(base_and_user));
-                snprintf(combined_sys, sizeof(combined_sys), "%s\n\n%s",
-                         base_and_user, agent_system_prompt());
-            }
-            msgs[n_msgs].role    = "system";
-            msgs[n_msgs].content = combined_sys;
-            n_msgs++;
-
             /* Include conversation history so the model remembers previous
              * exchanges (same as non-agent mode), capped at AGENT_HISTORY_SLOTS
              * to leave room for tool-call turns inside the ReAct loop. */
@@ -1337,7 +1611,33 @@ void* inference_worker_thread(void *arg)
             local_history[sizeof(local_history) - 1] = '\0';
             pthread_mutex_unlock(&ictx->history_mutex);
 
-            int n_hist = parse_chat_history(local_history,
+            char hist_summary[WASTELAND_SUMMARY_MAX];
+            size_t sum_offset = extract_summary_prefix(local_history,
+                                                       hist_summary,
+                                                       sizeof(hist_summary));
+
+            /* Combine base system prompt + optional user prompt + agent tools
+             * + (optional) compacted-history summary. */
+            char combined_sys[16384 + WASTELAND_SUMMARY_MAX];
+            {
+                char base_and_user[MAX_PROMPT_LEN + 2048];
+                build_system_prompt(sys_prompt, base_and_user,
+                                    sizeof(base_and_user));
+                if (hist_summary[0]) {
+                    snprintf(combined_sys, sizeof(combined_sys),
+                             "%s\n\n%s\n\nPrevious conversation summary "
+                             "(older turns compacted from this chat):\n%s",
+                             base_and_user, agent_system_prompt(), hist_summary);
+                } else {
+                    snprintf(combined_sys, sizeof(combined_sys), "%s\n\n%s",
+                             base_and_user, agent_system_prompt());
+                }
+            }
+            msgs[n_msgs].role    = "system";
+            msgs[n_msgs].content = combined_sys;
+            n_msgs++;
+
+            int n_hist = parse_chat_history(local_history + sum_offset,
                                             msgs + n_msgs, owned + n_msgs,
                                             AGENT_HISTORY_SLOTS);
             n_msgs += n_hist;

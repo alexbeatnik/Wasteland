@@ -4,6 +4,9 @@
 
 #include "ui.h"
 #include "network.h"
+#include "crypto_engine.h"
+#include "platform_sandbox.h"
+#include "capability.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,18 +26,52 @@
  * lives in nuklear_impl.c so the header-guarded NK_IMPLEMENTATION is only
  * compiled once. */
 
+/* Forward declarations for update functions defined in main.c. */
+extern void launch_updater(const char *new_file);
+extern void *update_download_thread(void *arg);
+
 /* ---------------------------------------------------------------------------
  * Predefined Hub Models (HuggingFace repo IDs)
  * These are resolved via the HF API to find the first .gguf file.
- * Sorted by parameter count (ascending). All four are real, public,
+ * Sorted by parameter count (ascending). All entries are real, public,
  * instruction-tuned GGUF repos with a working chat template.
+ *
+ * Tiers: tiny (0.5–1.7B) for fast smoke-tests on weak hardware, mid (7-8B)
+ * for usable conversation quality on consumer hardware, large (31-35B) for
+ * the strongest answers when the user has the disk and RAM for the full
+ * GGUF. The MoE entry (Qwen3.6-35B-A3B) only activates 3B params per token
+ * so it runs on a laptop despite the ~18 GB on-disk size.
  * --------------------------------------------------------------------------- */
-static const char *hub_models[WASTELAND_MAX_HUB_MODELS] = {
-    "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
-    "ggml-org/gemma-3-1b-it-GGUF",
-    "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
-    "ggml-org/SmolLM2-1.7B-Instruct-GGUF",
-    "unsloth/Qwen3.6-35B-A3B-GGUF"
+typedef struct {
+    const char *repo_id;       /* full HF org/repo for the API call */
+    const char *description;   /* one-line, ≤ 64 chars; rendered dim under
+                                  the radio button so the user knows what
+                                  they're picking before they download */
+} hub_model_t;
+
+static const hub_model_t hub_models[WASTELAND_MAX_HUB_MODELS] = {
+    {"Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+     "0.5B Qwen2.5 - tiny, smoke-test on weak hardware"},
+    {"ggml-org/gemma-3-1b-it-GGUF",
+     "1B Google Gemma 3 - small instruct, ~0.8 GB Q4"},
+    {"Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+     "1.5B Qwen2.5 - improved tiny tier, ~1.0 GB Q4"},
+    {"ggml-org/SmolLM2-1.7B-Instruct-GGUF",
+     "1.7B HuggingFace SmolLM2 - small generalist"},
+    {"bartowski/google_gemma-4-E4B-it-GGUF",
+     "Gemma 4 E4B - compact expert variant, ~2-3 GB"},
+    {"Qwen/Qwen2.5-7B-Instruct-GGUF",
+     "7B Qwen2.5 - recommended default, ~4.4 GB Q4"},
+    {"bartowski/Qwen2.5.1-Coder-7B-Instruct-GGUF",
+     "7B Qwen2.5.1 Coder - code specialist (Py/JS/C++)"},
+    {"bartowski/OLMo-2-1124-7B-Instruct-GGUF",
+     "7B OLMo-2 - Allen AI fully-open weights+data"},
+    {"bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
+     "8B Meta Llama 3.1 - strong general chat, ~4.9 GB"},
+    {"bartowski/google_gemma-4-31B-it-GGUF",
+     "31B Google Gemma 4 - flagship dense, needs 32+ GB RAM"},
+    {"unsloth/Qwen3.6-35B-A3B-GGUF",
+     "35B Qwen3.6 MoE - only 3B active, laptop-friendly"}
 };
 
 /* ---------------------------------------------------------------------------
@@ -142,42 +179,25 @@ int scan_local_chats(char chats_list[][WASTELAND_CHAT_NAME_LEN], int max_chats)
 }
 
 /* ---------------------------------------------------------------------------
- * Simple RC4 stream cipher for chat file encryption.
- * Protects chats from casual inspection in a file manager / text editor.
+ * Authenticated encryption for chat file persistence.
+ *
+ * Replaces the old RC4 obfuscation with XChaCha20-Poly1305 (Monocypher).
+ * Format on disk:
+ *   "WST2"   (4 bytes magic)
+ *   nonce    (24 bytes)
+ *   tag      (16 bytes)
+ *   ciphertext (same length as plaintext)
+ *
+ * The key is a compile-time pepper; threat model is casual file-manager
+ * snooping, not nation-state adversaries.  Authentication detects accidental
+ * corruption or manual tampering.
  * --------------------------------------------------------------------------- */
-static const unsigned char chat_key[] = {
+static const unsigned char chat_key[WASTELAND_CRYPTO_KEY_SIZE] = {
     0x7a, 0x13, 0x4f, 0x9e, 0x2b, 0x81, 0xcc, 0x55,
     0x3d, 0x67, 0x10, 0xf8, 0x99, 0x44, 0xae, 0x2e,
     0x5c, 0x77, 0x18, 0xd3, 0xb6, 0x91, 0x0a, 0xe4,
     0xcf, 0x28, 0x83, 0xfb, 0x41, 0x6d, 0x35, 0x1c
 };
-
-static void rc4_crypt_buffer(unsigned char *data, size_t len)
-{
-    unsigned char s[256];
-    int i, j;
-    for (i = 0; i < 256; i++) s[i] = (unsigned char)i;
-    j = 0;
-    size_t key_len = sizeof(chat_key);
-    for (i = 0; i < 256; i++) {
-        j = (j + s[i] + chat_key[i % key_len]) & 255;
-        unsigned char tmp = s[i]; s[i] = s[j]; s[j] = tmp;
-    }
-    i = j = 0;
-    /* RC4-drop256: discard the first 256 keystream bytes to mitigate
-     * known biases in the initial output of the RC4 PRGA. */
-    for (int drop = 0; drop < 256; drop++) {
-        i = (i + 1) & 255;
-        j = (j + s[i]) & 255;
-        unsigned char tmp = s[i]; s[i] = s[j]; s[j] = tmp;
-    }
-    for (size_t k = 0; k < len; k++) {
-        i = (i + 1) & 255;
-        j = (j + s[i]) & 255;
-        unsigned char tmp = s[i]; s[i] = s[j]; s[j] = tmp;
-        data[k] ^= s[(s[i] + s[j]) & 255];
-    }
-}
 
 void save_chat_history(const char *chat_name, const char *history)
 {
@@ -185,22 +205,30 @@ void save_chat_history(const char *chat_name, const char *history)
     char path[512];
     snprintf(path, sizeof(path), "chats/%s", chat_name);
     FILE *f = fopen(path, "wb");
-    if (f) {
-        size_t len = strlen(history);
-        if (len > 0) {
-            unsigned char *buf = (unsigned char *)malloc(len);
-            if (buf) {
-                memcpy(buf, history, len);
-                rc4_crypt_buffer(buf, len);
-                fwrite("WSTL", 1, 4, f);
-                fwrite(buf, 1, len, f);
-                free(buf);
+    if (!f) return;
+
+    size_t len = strlen(history);
+    if (len > 0) {
+        uint8_t *cipher = (uint8_t *)malloc(len);
+        uint8_t *plain  = (uint8_t *)malloc(len);
+        if (cipher && plain) {
+            memcpy(plain, history, len);
+            uint8_t nonce[WASTELAND_CRYPTO_NONCE_SIZE];
+            uint8_t tag[WASTELAND_CRYPTO_TAG_SIZE];
+            crypto_random_bytes(nonce, sizeof(nonce));
+            if (crypto_seal(chat_key, nonce, plain, len, cipher, tag) == 0) {
+                fwrite(WASTELAND_CRYPTO_MAGIC, 1, 4, f);
+                fwrite(nonce, 1, sizeof(nonce), f);
+                fwrite(tag,   1, sizeof(tag),   f);
+                fwrite(cipher, 1, len, f);
             }
-        } else {
-            fwrite("WSTL", 1, 4, f);
         }
-        fclose(f);
+        free(cipher);
+        free(plain);
+    } else {
+        fwrite(WASTELAND_CRYPTO_MAGIC, 1, 4, f);
     }
+    fclose(f);
 }
 
 void load_chat_history(const char *chat_name, char *history, size_t max_len)
@@ -210,23 +238,52 @@ void load_chat_history(const char *chat_name, char *history, size_t max_len)
     char path[512];
     snprintf(path, sizeof(path), "chats/%s", chat_name);
     FILE *f = fopen(path, "rb");
-    if (f) {
-        char magic[4];
-        if (fread(magic, 1, 4, f) == 4 && memcmp(magic, "WSTL", 4) == 0) {
-            size_t n = fread(history, 1, max_len - 1, f);
-            if (n > 0) {
-                rc4_crypt_buffer((unsigned char *)history, n);
-                history[n] = '\0';
-            } else {
-                history[0] = '\0';
+    if (!f) return;
+
+    char magic[4];
+    if (fread(magic, 1, 4, f) == 4 && memcmp(magic, WASTELAND_CRYPTO_MAGIC, 4) == 0) {
+        uint8_t nonce[WASTELAND_CRYPTO_NONCE_SIZE];
+        uint8_t tag[WASTELAND_CRYPTO_TAG_SIZE];
+        if (fread(nonce, 1, sizeof(nonce), f) == sizeof(nonce) &&
+            fread(tag,   1, sizeof(tag),   f) == sizeof(tag)) {
+            size_t cipher_len = 0;
+            uint8_t *cipher = NULL;
+            uint8_t *plain  = NULL;
+
+            /* Determine ciphertext length. */
+            long pos = ftell(f);
+            fseek(f, 0, SEEK_END);
+            long end = ftell(f);
+            fseek(f, pos, SEEK_SET);
+            if (end > pos) cipher_len = (size_t)(end - pos);
+
+            if (cipher_len > 0 && cipher_len < max_len) {
+                cipher = (uint8_t *)malloc(cipher_len);
+                plain  = (uint8_t *)malloc(cipher_len + 1);
+                if (cipher && plain) {
+                    size_t n = fread(cipher, 1, cipher_len, f);
+                    if (n == cipher_len &&
+                        crypto_open(chat_key, nonce, cipher, cipher_len,
+                                    tag, plain) == 0) {
+                        plain[cipher_len] = '\0';
+                        memcpy(history, plain, cipher_len + 1);
+                    } else {
+                        history[0] = '\0';
+                        fprintf(stderr, "[ui] Chat '%s' failed auth or read\n",
+                                chat_name);
+                    }
+                }
             }
-        } else {
-            rewind(f);
-            size_t n = fread(history, 1, max_len - 1, f);
-            history[n] = '\0';
+            free(cipher);
+            free(plain);
         }
-        fclose(f);
+    } else {
+        /* Legacy plaintext (no magic) — read as-is. */
+        rewind(f);
+        size_t n = fread(history, 1, max_len - 1, f);
+        history[n] = '\0';
     }
+    fclose(f);
 }
 
 /* Trim `base` (length *blen) so it doesn't end mid-UTF-8-codepoint. UTF-8
@@ -646,27 +703,123 @@ static void strip_tool_fences(const char *in, char *out, size_t out_size)
 }
 
 /* ---------------------------------------------------------------------------
- * compact_chat_history
+ * Compact (summary-based)
  *
- * Remove the oldest N user/assistant pairs from the flat history string.
- * Returns the number of pairs actually removed (may be < requested if the
- * history has fewer turns). Caller must already hold state->chat_mutex.
+ * v0.7+ behaviour: instead of dropping the oldest user/assistant pair the
+ * compact pipeline asks the inference worker for a short context summary of
+ * everything older than the last KEEP_RECENT turns and prepends the result
+ * as a [SUMMARY] block. Each subsequent compact re-summarises (existing
+ * summary + newly-aged turns) so the summary stays ~600 chars long no
+ * matter how long the conversation runs.
+ *
+ * The pipeline is async: ui_compact_chat_history() snapshots the tail to
+ * keep, kicks off the summary, sets compact_pending; ui_finalize_compact()
+ * polls inference each frame and splices the result back in.
  * --------------------------------------------------------------------------- */
-static int compact_chat_history(app_state_t *state, int pairs)
+#define COMPACT_KEEP_RECENT_TURNS 2  /* turns kept verbatim after compact */
+#define COMPACT_MIN_TURNS         3  /* refuse compact below this many */
+
+/* Return offset of the "[/SUMMARY]\n" terminator in `hist` if it begins
+ * with a summary block, else 0. Mirrors inference.c::extract_summary_prefix
+ * — kept duplicated because ui.c can't pull in the inference internals. */
+static size_t skip_summary_prefix(const char *hist)
 {
-    int removed = 0;
-    for (int i = 0; i < pairs; i++) {
-        char *next = strstr(state->chat_history, "\n> ");
-        if (!next) {
-            /* Only one message left — can't compact further. */
-            break;
-        }
-        size_t len = strlen(next + 1);
-        memmove(state->chat_history, next + 1, len + 1);
-        removed++;
+    if (!hist || strncmp(hist, "[SUMMARY]", 9) != 0) return 0;
+    const char *p = hist + 9;
+    if (*p == '\r') p++;
+    if (*p != '\n') return 0;
+    p++;
+    const char *body = p;
+    const char *end = strstr(p, "[/SUMMARY]");
+    while (end) {
+        if (end == body || end[-1] == '\n') break;
+        end = strstr(end + 1, "[/SUMMARY]");
     }
-    state->chat_last_len = strlen(state->chat_history);
-    return removed;
+    if (!end) return 0;
+    const char *after = end + 10;
+    if (*after == '\r') after++;
+    if (*after == '\n') after++;
+    return (size_t)(after - hist);
+}
+
+/* Extract summary body into `out` (NUL-terminated). Empty if no prefix. */
+static void copy_summary_prefix(const char *hist, char *out, size_t out_size)
+{
+    if (out && out_size) out[0] = '\0';
+    if (!hist || !out || out_size == 0) return;
+    if (strncmp(hist, "[SUMMARY]", 9) != 0) return;
+    const char *p = hist + 9;
+    if (*p == '\r') p++;
+    if (*p != '\n') return;
+    p++;
+    const char *body = p;
+    const char *end = strstr(p, "[/SUMMARY]");
+    while (end) {
+        if (end == body || end[-1] == '\n') break;
+        end = strstr(end + 1, "[/SUMMARY]");
+    }
+    if (!end) return;
+    size_t body_len = (size_t)(end - body);
+    if (body_len > 0 && body[body_len - 1] == '\n') body_len--;
+    if (body_len > 0 && body[body_len - 1] == '\r') body_len--;
+    size_t n = body_len < out_size - 1 ? body_len : out_size - 1;
+    memcpy(out, body, n);
+    out[n] = '\0';
+}
+
+/* Count turn boundaries in the turns-only portion of history.
+ * A turn starts at offset 0 (if it is a `> ` line) or at any `\n> `
+ * whose previous line was NOT itself a `> ` line (so multi-line user
+ * prompts — consecutive `> ` lines glued by the parser — count as a
+ * single turn). */
+static int count_turns(const char *hist)
+{
+    if (!hist || !hist[0]) return 0;
+    int turns = 0;
+    size_t len = strlen(hist);
+    if (len >= 2 && hist[0] == '>' && hist[1] == ' ') turns = 1;
+    for (size_t i = 0; i + 2 < len; i++) {
+        if (hist[i] != '\n') continue;
+        if (hist[i + 1] != '>' || hist[i + 2] != ' ') continue;
+        size_t prev_start = 0;
+        for (size_t j = i; j > 0; j--) {
+            if (hist[j - 1] == '\n') { prev_start = j; break; }
+        }
+        int prev_is_user = (prev_start + 1 < len &&
+                            hist[prev_start] == '>' &&
+                            hist[prev_start + 1] == ' ');
+        if (prev_is_user) continue;
+        turns++;
+    }
+    return turns;
+}
+
+/* Find the byte offset where the N-th turn starts (0-indexed). Same boundary
+ * rule as count_turns. Returns strlen(hist) if fewer than N+1 turns exist. */
+static size_t find_nth_turn_start(const char *hist, int n)
+{
+    if (!hist || !hist[0]) return 0;
+    int idx = -1;
+    size_t len = strlen(hist);
+    if (len >= 2 && hist[0] == '>' && hist[1] == ' ') {
+        idx = 0;
+        if (idx == n) return 0;
+    }
+    for (size_t i = 0; i + 2 < len; i++) {
+        if (hist[i] != '\n') continue;
+        if (hist[i + 1] != '>' || hist[i + 2] != ' ') continue;
+        size_t prev_start = 0;
+        for (size_t j = i; j > 0; j--) {
+            if (hist[j - 1] == '\n') { prev_start = j; break; }
+        }
+        int prev_is_user = (prev_start + 1 < len &&
+                            hist[prev_start] == '>' &&
+                            hist[prev_start + 1] == ' ');
+        if (prev_is_user) continue;
+        idx++;
+        if (idx == n) return i + 1;
+    }
+    return len;
 }
 
 /* ---------------------------------------------------------------------------
@@ -699,34 +852,135 @@ static void ui_set_chat_history(app_state_t *state)
     inference_set_chat_history(state->inference, hist_copy);
 }
 
-/* Full compact pipeline: refuse mid-generation, drop the oldest `pairs` turns
- * under the chat lock, mirror the new history into the inference module so
- * the next prompt sees it, persist the active chat to disk so a chat-switch
- * doesn't restore the old version, and write a status message so the user
- * gets feedback even when nothing was removed. */
+/* Kick off an async compact: snapshot the tail to keep, ask the inference
+ * worker for a summary of everything older, set compact_pending. The result
+ * is spliced back in by ui_finalize_compact() once the worker publishes it.
+ *
+ * `pairs` is currently informational — kept in the signature so existing
+ * call sites (manual button, auto-compact, pre-send compact) compile. The
+ * actual cut point is COMPACT_KEEP_RECENT_TURNS turns from the end. */
 static void ui_compact_chat_history(app_state_t *state, int pairs)
 {
+    (void)pairs;
+
     if (state->is_generating) {
         snprintf(state->status_msg, sizeof(state->status_msg),
                  "Cannot compact while generating.");
         return;
     }
-
-    pthread_mutex_lock(&state->chat_mutex);
-    int removed = compact_chat_history(state, pairs);
-    pthread_mutex_unlock(&state->chat_mutex);
-
-    if (removed == 0) {
+    if (state->compact_pending || inference_is_summarizing(state->inference)) {
         snprintf(state->status_msg, sizeof(state->status_msg),
-                 "Nothing to compact (need >=2 turns).");
+                 "Already compacting...");
         return;
     }
+    if (!inference_is_model_loaded(state->inference)) {
+        snprintf(state->status_msg, sizeof(state->status_msg),
+                 "Compact needs a loaded model.");
+        return;
+    }
+
+    /* Snapshot history under the lock. */
+    char hist_copy[WASTELAND_MAX_CHAT_HISTORY];
+    pthread_mutex_lock(&state->chat_mutex);
+    strncpy(hist_copy, state->chat_history, sizeof(hist_copy) - 1);
+    hist_copy[sizeof(hist_copy) - 1] = '\0';
+    pthread_mutex_unlock(&state->chat_mutex);
+
+    /* Strip an existing [SUMMARY]...[/SUMMARY] prefix (kept separately so we
+     * can fold it into the new summary). */
+    size_t sum_off = skip_summary_prefix(hist_copy);
+    char old_summary[4096];
+    copy_summary_prefix(hist_copy, old_summary, sizeof(old_summary));
+    const char *turns = hist_copy + sum_off;
+
+    int total_turns = count_turns(turns);
+    if (total_turns < COMPACT_MIN_TURNS) {
+        snprintf(state->status_msg, sizeof(state->status_msg),
+                 "Nothing to compact (need >=%d turns).",
+                 COMPACT_MIN_TURNS);
+        return;
+    }
+
+    int keep = COMPACT_KEEP_RECENT_TURNS;
+    if (keep >= total_turns) keep = total_turns - 1;
+    int summarise_count = total_turns - keep;
+
+    size_t cut_at = find_nth_turn_start(turns, summarise_count);
+
+    /* Build src_text: existing summary (if any) + raw older turns. */
+    static char src_text[WASTELAND_MAX_CHAT_HISTORY + 4096];
+    int src_len = 0;
+    if (old_summary[0]) {
+        src_len = snprintf(src_text, sizeof(src_text),
+                           "Earlier summary:\n%s\n\nMore recent turns:\n",
+                           old_summary);
+    }
+    size_t copy_n = cut_at;
+    if ((size_t)src_len + copy_n >= sizeof(src_text))
+        copy_n = sizeof(src_text) - (size_t)src_len - 1;
+    memcpy(src_text + src_len, turns, copy_n);
+    src_text[(size_t)src_len + copy_n] = '\0';
+
+    /* Snapshot the verbatim tail to keep. */
+    free(state->compact_keep_tail);
+    state->compact_keep_tail = strdup(turns + cut_at);
+    if (!state->compact_keep_tail) {
+        snprintf(state->status_msg, sizeof(state->status_msg),
+                 "Compact: out of memory.");
+        return;
+    }
+    state->compact_chat_index       = state->selected_chat;
+    state->compact_summarised_turns = summarise_count;
+
+    if (inference_request_summary(state->inference, src_text) != 0) {
+        free(state->compact_keep_tail);
+        state->compact_keep_tail = NULL;
+        snprintf(state->status_msg, sizeof(state->status_msg),
+                 "Compact: worker busy, retry shortly.");
+        return;
+    }
+
+    state->compact_pending = 1;
+    snprintf(state->status_msg, sizeof(state->status_msg),
+             "Compacting %d older turn(s) into a summary...",
+             summarise_count);
+}
+
+/* Splice an inference-published summary into the active chat history. */
+void ui_finalize_compact(app_state_t *state)
+{
+    if (!state->compact_pending) return;
+
+    char summary[WASTELAND_SUMMARY_MAX];
+    int n = inference_take_summary(state->inference, summary, sizeof(summary));
+    if (n <= 0) return;
+
+    /* Build new history = [SUMMARY]\n<text>\n[/SUMMARY]\n + tail. */
+    static char rebuilt[WASTELAND_MAX_CHAT_HISTORY];
+    const char *tail = state->compact_keep_tail ? state->compact_keep_tail : "";
+    int written = snprintf(rebuilt, sizeof(rebuilt),
+                           "[SUMMARY]\n%s\n[/SUMMARY]\n%s",
+                           summary, tail);
+    if (written < 0 || (size_t)written >= sizeof(rebuilt)) {
+        /* Defensive: if the rebuild would overflow, drop the tail entirely. */
+        snprintf(rebuilt, sizeof(rebuilt),
+                 "[SUMMARY]\n%s\n[/SUMMARY]\n", summary);
+    }
+
+    pthread_mutex_lock(&state->chat_mutex);
+    strncpy(state->chat_history, rebuilt, WASTELAND_MAX_CHAT_HISTORY - 1);
+    state->chat_history[WASTELAND_MAX_CHAT_HISTORY - 1] = '\0';
+    state->chat_last_len = strlen(state->chat_history);
+    pthread_mutex_unlock(&state->chat_mutex);
 
     ui_set_chat_history(state);
     ui_update_context_stats(state);
 
-    if (state->selected_chat >= 0 &&
-        state->selected_chat < state->chat_count) {
+    /* Persist if the user is still on the same chat we started compacting. */
+    if (state->compact_chat_index == state->selected_chat &&
+        state->selected_chat >= 0 &&
+        state->selected_chat < state->chat_count)
+    {
         char hist_copy[WASTELAND_MAX_CHAT_HISTORY];
         pthread_mutex_lock(&state->chat_mutex);
         strncpy(hist_copy, state->chat_history, sizeof(hist_copy) - 1);
@@ -735,8 +989,14 @@ static void ui_compact_chat_history(app_state_t *state, int pairs)
         save_chat_history(state->chats[state->selected_chat], hist_copy);
     }
 
+    int summarised = state->compact_summarised_turns;
+    free(state->compact_keep_tail);
+    state->compact_keep_tail        = NULL;
+    state->compact_pending          = 0;
+    state->compact_summarised_turns = 0;
+
     snprintf(state->status_msg, sizeof(state->status_msg),
-             "Compacted %d turn(s).", removed);
+             "Compacted %d turn(s) into summary.", summarised);
 }
 
 /* ---------------------------------------------------------------------------
@@ -899,14 +1159,12 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
             } else if (state->update_state == 1) {
                 nk_layout_row_dynamic(nk, 24, 1);
                 if (nk_button_label(nk, "[ RESTART TO UPDATE ]")) {
-                    extern void launch_updater(const char *);
                     launch_updater(state->update_file);
                     state->running = 0;
                 }
             } else if (state->update_state == 0) {
                 nk_layout_row_dynamic(nk, 24, 1);
                 if (nk_button_label(nk, "[ DOWNLOAD UPDATE ]")) {
-                    extern void* update_download_thread(void *);
                     pthread_t dl;
                     if (pthread_create(&dl, NULL,
                                        update_download_thread, state) == 0) {
@@ -1058,37 +1316,204 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
             nk_layout_row_dynamic(nk, 10, 1);
             nk_spacing(nk, 1);
 
-            /* ===== HUB MODELS ===== */
+            /* ===== LOCAL VAULT =====
+             * Pinned to the top of the left panel: this is what the user
+             * actually clicks every session (LOAD a model they already have).
+             * HUB MODELS sits below because it's only relevant for the
+             * one-off "I want to grab a new model" flow. */
             nk_layout_row_dynamic(nk, 20, 1);
-            nk_label_colored(nk, "HUB MODELS", NK_TEXT_LEFT, amber);
+            nk_label_colored(nk, "-- LOCAL VAULT --", NK_TEXT_LEFT, amber);
             nk_layout_row_dynamic(nk, 2, 1);
             nk_button_color(nk, amber); /* horizontal rule */
 
-            if (!state->network_lockdown) {
-                /* --- Predefined hub models (radio buttons) --- */
+            nk_layout_row_dynamic(nk, 28, 1);
+            if (nk_button_label(nk, "[ REFRESH ]")) {
+                state->model_count = scan_local_models(
+                    state->models, WASTELAND_MAX_MODELS);
+                snprintf(state->status_msg, sizeof(state->status_msg),
+                         "Vault refreshed. %d model(s) found.",
+                         state->model_count);
+            }
+
+            if (state->model_count == 0) {
+                nk_layout_row_dynamic(nk, 20, 1);
+                nk_label_colored(nk, "No local models.",
+                                 NK_TEXT_CENTERED, amber);
+            } else {
+                for (int i = 0; i < state->model_count; i++) {
+                    const char *slash = strrchr(state->models[i], '/');
+                    const char *basename = slash ? slash + 1 : state->models[i];
+
+                    /* Row with LOAD + VERIFY + DELETE buttons */
+                    nk_layout_row_begin(nk, NK_DYNAMIC, 26, 3);
+
+                    struct stat fst;
+                    char sz_str[32] = "?";
+                    if (stat(state->models[i], &fst) == 0) {
+                        format_file_size(fst.st_size, sz_str, sizeof(sz_str));
+                    }
+
+                    char btn_label[WASTELAND_MAX_MODEL_PATH_LEN + 32];
+                    int is_loaded  = (state->selected_model == i);
+                    int is_loading = (state->loading_model_index == i);
+                    if (is_loading) {
+                        snprintf(btn_label, sizeof(btn_label),
+                                 "[ LOADING: %s | %s ... ]", basename, sz_str);
+                    } else if (is_loaded) {
+                        snprintf(btn_label, sizeof(btn_label),
+                                 "[ UNLOAD: %s | %s ]", basename, sz_str);
+                    } else {
+                        snprintf(btn_label, sizeof(btn_label),
+                                 "[ LOAD: %s | %s ]", basename, sz_str);
+                    }
+
+                    int load_busy = (state->loading_model_index >= 0);
+                    int gen_busy  = inference_is_generating(state->inference);
+                    nk_layout_row_push(nk, 0.84f);
+                    if (nk_button_label(nk, btn_label) && !load_busy && !gen_busy) {
+                        if (is_loaded) {
+                            inference_unload_model(state->inference);
+                            state->selected_model = -1;
+                            snprintf(state->status_msg,
+                                     sizeof(state->status_msg),
+                                     "Unloaded %s.", basename);
+                        } else {
+                            snprintf(state->status_msg,
+                                     sizeof(state->status_msg),
+                                     "Loading %s (%s)...", basename, sz_str);
+                            if (inference_load_model_async(state->inference,
+                                                           state->models[i]) == 0) {
+                                state->loading_model_index = i;
+                            } else {
+                                snprintf(state->status_msg,
+                                         sizeof(state->status_msg),
+                                         "Failed to start load for %s.",
+                                         basename);
+                            }
+                        }
+                    }
+
+                    nk_layout_row_push(nk, 0.08f);
+                    /* \xe2\x96\xa6 = U+25A6 ▦ SQUARE WITH ORTHOGONAL CROSSHATCH
+                     * FILL. From Geometric Shapes (U+25A0..U+25FF), the only
+                     * symbol range baked into the embedded DejaVu Sans Mono
+                     * atlas. The previous \xe2\x9c\x93 ✓ (U+2713) was in
+                     * Dingbats and rendered as `?`. The crosshatch hints at
+                     * "checksum / hash grid", which fits the verify action. */
+                    if (nk_button_label(nk, "\xe2\x96\xa6") && !load_busy && !gen_busy) {
+                        start_verify(state->models[i], state);
+                        snprintf(state->status_msg, sizeof(state->status_msg),
+                                 "Verifying %s...", basename);
+                    }
+
+                    nk_layout_row_push(nk, 0.08f);
+                    if (nk_button_label(nk, "\xc3\x97") && !load_busy && !gen_busy) {
+                        if (remove(state->models[i]) == 0) {
+                            /* If deleted model was loaded, unload it */
+                            if (state->selected_model == i) {
+                                inference_unload_model(state->inference);
+                                state->selected_model = -1;
+                            } else if (state->selected_model > i) {
+                                /* Shift index down since we're removing an element before it */
+                                state->selected_model--;
+                            }
+                            /* Shift remaining entries */
+                            for (int j = i; j < state->model_count - 1; j++) {
+                                strcpy(state->models[j], state->models[j + 1]);
+                            }
+                            state->model_count--;
+                            /* Decrement i so we process the new element at this position */
+                            i--;
+                            snprintf(state->status_msg, sizeof(state->status_msg),
+                                     "Deleted '%s'.", basename);
+                        } else {
+                            snprintf(state->status_msg, sizeof(state->status_msg),
+                                     "Failed to delete '%s'.", basename);
+                        }
+                    }
+                }
+            }
+
+            /* Spacer */
+            nk_layout_row_dynamic(nk, 10, 1);
+            nk_spacing(nk, 1);
+
+            /* ===== HUB MODELS (collapsible) =====
+             * Header row: a borderless button that flips hub_collapsed.
+             * Glyphs are from Geometric Shapes (baked in the embedded font):
+             *   \xe2\x96\xbc = U+25BC ▼ (expanded — click to collapse)
+             *   \xe2\x96\xb6 = U+25B6 ▶ (collapsed — click to expand) */
+            nk_layout_row_begin(nk, NK_DYNAMIC, 22, 2);
+            nk_layout_row_push(nk, 0.10f);
+            {
+                /* Strip the button chrome so the arrow looks like a label. */
+                struct nk_style_button saved_btn = nk->style.button;
+                nk->style.button.normal = nk_style_item_color(nk_rgba(0,0,0,0));
+                nk->style.button.hover  = nk_style_item_color(nk_rgba(0,0,0,0));
+                nk->style.button.active = nk_style_item_color(nk_rgba(0,0,0,0));
+                nk->style.button.border_color = nk_rgba(0,0,0,0);
+                nk->style.button.text_normal  = amber;
+                nk->style.button.text_hover   = amber;
+                nk->style.button.text_active  = amber;
+                if (nk_button_label(nk, state->hub_collapsed
+                                        ? "\xe2\x96\xb6"   /* ▶ collapsed */
+                                        : "\xe2\x96\xbc")) /* ▼ expanded */ {
+                    state->hub_collapsed = !state->hub_collapsed;
+                }
+                nk->style.button = saved_btn;
+            }
+            nk_layout_row_push(nk, 0.90f);
+            nk_label_colored(nk, "HUB MODELS", NK_TEXT_LEFT, amber);
+            nk_layout_row_end(nk);
+            nk_layout_row_dynamic(nk, 2, 1);
+            nk_button_color(nk, amber); /* horizontal rule */
+
+            if (state->hub_collapsed) {
+                /* Skip the entire section (radios, download button, status). */
+            } else if (!state->network_lockdown) {
+                /* --- Predefined hub models (radio buttons) ---
+                 * `nk_option_label` returns the option's *current* selected
+                 * state, not a click event — so we have to compare
+                 * before/after to detect the actual click edge. Without this
+                 * the body re-fires every frame and would clobber the
+                 * Custom ID buffer continuously. */
+                struct nk_color amber_dim = nk_rgb(0xB0, 0x78, 0x00);
                 for (int i = 0; i < WASTELAND_MAX_HUB_MODELS; i++) {
                     nk_layout_row_dynamic(nk, 22, 1);
-                    if (nk_option_label(nk, hub_models[i],
-                                        state->selected_hub_model == i)) {
+                    int was_sel = (state->selected_hub_model == i);
+                    int is_sel  = nk_option_label(nk, hub_models[i].repo_id,
+                                                  was_sel);
+                    if (is_sel && !was_sel) {
                         state->selected_hub_model = i;
                         state->custom_hf_id[0] = '\0';
-                        strncpy(state->hf_model_id, hub_models[i],
+                        strncpy(state->hf_model_id, hub_models[i].repo_id,
                                 sizeof(state->hf_model_id) - 1);
                         state->hf_model_id[sizeof(state->hf_model_id)-1] = '\0';
                     }
+                    /* Description row — dim, slightly indented, smaller. */
+                    nk_layout_row_begin(nk, NK_DYNAMIC, 14, 2);
+                    nk_layout_row_push(nk, 0.05f);
+                    nk_spacing(nk, 1);
+                    nk_layout_row_push(nk, 0.95f);
+                    nk_label_colored(nk, hub_models[i].description,
+                                     NK_TEXT_LEFT, amber_dim);
+                    nk_layout_row_end(nk);
                 }
 
                 /* --- Custom ID input --- */
                 nk_layout_row_dynamic(nk, 22, 1);
                 nk_label_colored(nk, "Custom ID or URL:", NK_TEXT_LEFT, amber);
                 nk_layout_row_dynamic(nk, 28, 1);
-                int custom_len = (int)strlen(state->custom_hf_id);
                 nk_edit_string_zero_terminated(nk, NK_EDIT_FIELD,
                     state->custom_hf_id,
                     sizeof(state->custom_hf_id),
                     nk_filter_default);
-                /* If user types into custom field, drop hub selection */
-                if (custom_len > 0 && state->selected_hub_model >= 0) {
+                /* If the user has anything in the custom field, drop the hub
+                 * selection so the radio buttons go back to "no choice".
+                 * Measured AFTER the edit so the very first character the
+                 * user types switches the source-of-truth immediately. */
+                if (state->custom_hf_id[0] != '\0' &&
+                    state->selected_hub_model >= 0) {
                     state->selected_hub_model = -1;
                     state->hf_model_id[0] = '\0';
                 }
@@ -1096,7 +1521,7 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                 /* --- Resolve download target --- */
                 const char *target_id = NULL;
                 if (state->selected_hub_model >= 0) {
-                    target_id = hub_models[state->selected_hub_model];
+                    target_id = hub_models[state->selected_hub_model].repo_id;
                 } else if (state->custom_hf_id[0]) {
                     target_id = state->custom_hf_id;
                 }
@@ -1184,109 +1609,25 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
             nk_layout_row_dynamic(nk, 10, 1);
             nk_spacing(nk, 1);
 
-            /* ===== LOCAL VAULT ===== */
-            nk_layout_row_dynamic(nk, 20, 1);
-            nk_label_colored(nk, "-- LOCAL VAULT --", NK_TEXT_LEFT, amber);
-            nk_layout_row_dynamic(nk, 2, 1);
-            nk_button_color(nk, amber); /* horizontal rule */
-
-            nk_layout_row_dynamic(nk, 28, 1);
-            if (nk_button_label(nk, "[ REFRESH ]")) {
-                state->model_count = scan_local_models(
-                    state->models, WASTELAND_MAX_MODELS);
-                snprintf(state->status_msg, sizeof(state->status_msg),
-                         "Vault refreshed. %d model(s) found.",
-                         state->model_count);
-            }
-
-            if (state->model_count == 0) {
-                nk_layout_row_dynamic(nk, 20, 1);
-                nk_label_colored(nk, "No local models.",
-                                 NK_TEXT_CENTERED, amber);
-            } else {
-                for (int i = 0; i < state->model_count; i++) {
-                    const char *slash = strrchr(state->models[i], '/');
-                    const char *basename = slash ? slash + 1 : state->models[i];
-
-                    /* Row with LOAD button + DELETE button */
-                    nk_layout_row_begin(nk, NK_DYNAMIC, 26, 2);
-
-                    struct stat fst;
-                    char sz_str[32] = "?";
-                    if (stat(state->models[i], &fst) == 0) {
-                        format_file_size(fst.st_size, sz_str, sizeof(sz_str));
-                    }
-
-                    char btn_label[WASTELAND_MAX_MODEL_PATH_LEN + 32];
-                    int is_loaded  = (state->selected_model == i);
-                    int is_loading = (state->loading_model_index == i);
-                    if (is_loading) {
-                        snprintf(btn_label, sizeof(btn_label),
-                                 "[ LOADING: %s | %s ... ]", basename, sz_str);
-                    } else if (is_loaded) {
-                        snprintf(btn_label, sizeof(btn_label),
-                                 "[ UNLOAD: %s | %s ]", basename, sz_str);
-                    } else {
-                        snprintf(btn_label, sizeof(btn_label),
-                                 "[ LOAD: %s | %s ]", basename, sz_str);
-                    }
-
-                    int load_busy = (state->loading_model_index >= 0);
-                    int gen_busy  = inference_is_generating(state->inference);
-                    nk_layout_row_push(nk, 0.92f);
-                    if (nk_button_label(nk, btn_label) && !load_busy && !gen_busy) {
-                        if (is_loaded) {
-                            inference_unload_model(state->inference);
-                            state->selected_model = -1;
-                            snprintf(state->status_msg,
-                                     sizeof(state->status_msg),
-                                     "Unloaded %s.", basename);
-                        } else {
-                            snprintf(state->status_msg,
-                                     sizeof(state->status_msg),
-                                     "Loading %s (%s)...", basename, sz_str);
-                            if (inference_load_model_async(state->inference,
-                                                           state->models[i]) == 0) {
-                                state->loading_model_index = i;
-                            } else {
-                                snprintf(state->status_msg,
-                                         sizeof(state->status_msg),
-                                         "Failed to start load for %s.",
-                                         basename);
-                            }
-                        }
-                    }
-
-                    nk_layout_row_push(nk, 0.08f);
-                    if (nk_button_label(nk, "\xc3\x97") && !load_busy && !gen_busy) {
-                        if (remove(state->models[i]) == 0) {
-                            /* If deleted model was loaded, unload it */
-                            if (state->selected_model == i) {
-                                inference_unload_model(state->inference);
-                                state->selected_model = -1;
-                            } else if (state->selected_model > i) {
-                                /* Shift index down since we're removing an element before it */
-                                state->selected_model--;
-                            }
-                            /* Shift remaining entries */
-                            for (int j = i; j < state->model_count - 1; j++) {
-                                strcpy(state->models[j], state->models[j + 1]);
-                            }
-                            state->model_count--;
-                            /* Decrement i so we process the new element at this position */
-                            i--;
-                            snprintf(state->status_msg, sizeof(state->status_msg),
-                                     "Deleted '%s'.", basename);
-                        } else {
-                            snprintf(state->status_msg, sizeof(state->status_msg),
-                                     "Failed to delete '%s'.", basename);
-                        }
-                    }
-                }
+            /* ===== SANDBOX STATUS ===== */
+            {
+                int caps = platform_sandbox_query_caps();
+                char sb_desc[128];
+                platform_sandbox_describe(caps, sb_desc, sizeof(sb_desc));
+                const char *col = platform_sandbox_status_colour(caps);
+                struct nk_color sb_col;
+                if (strcmp(col, "green") == 0)
+                    sb_col = nk_rgb(0x66, 0xCC, 0x66); /* dim green for amber theme */
+                else if (strcmp(col, "amber") == 0)
+                    sb_col = amber;
+                else
+                    sb_col = nk_rgb(0xCC, 0x33, 0x00); /* red */
+                nk_layout_row_dynamic(nk, 18, 1);
+                nk_label_colored(nk, sb_desc, NK_TEXT_LEFT, sb_col);
             }
 
             /* Spacer */
-            nk_layout_row_dynamic(nk, 10, 1);
+            nk_layout_row_dynamic(nk, 6, 1);
             nk_spacing(nk, 1);
 
             /* ===== AGENT MODE ===== */
@@ -1302,6 +1643,49 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                               &state->agent_mode);
 
             if (state->agent_mode) {
+                /* Capability preset selector */
+                nk_layout_row_dynamic(nk, 18, 1);
+                nk_label_colored(nk, "Capability preset:", NK_TEXT_LEFT, amber);
+                nk_layout_row_dynamic(nk, 24, 4);
+                static const char *preset_labels[] = {"OFF", "READ", "RW", "CUST"};
+                struct nk_color black = nk_rgb(0, 0, 0);
+                for (int p = 0; p < 4; p++) {
+                    int active = (state->capability_preset == p);
+                    if (active) {
+                        /* Amber-filled "selected" state — flip text to black
+                         * so the label stays legible against the amber bg. */
+                        struct nk_style_button saved_btn = nk->style.button;
+                        nk->style.button.normal       = nk_style_item_color(amber);
+                        nk->style.button.hover        = nk_style_item_color(amber);
+                        nk->style.button.active       = nk_style_item_color(amber);
+                        nk->style.button.text_normal  = black;
+                        nk->style.button.text_hover   = black;
+                        nk->style.button.text_active  = black;
+                        if (nk_button_label(nk, preset_labels[p]))
+                            state->capability_preset = p;
+                        nk->style.button = saved_btn;
+                    } else {
+                        if (nk_button_label(nk, preset_labels[p]))
+                            state->capability_preset = p;
+                    }
+                }
+                if (state->capability_preset == CAP_PRESET_CUSTOM) {
+                    nk_layout_row_dynamic(nk, 20, 2);
+                    int rf = (state->capability_custom_bits & (1 << AGENT_TOOL_READ_FILE)) != 0;
+                    int ld = (state->capability_custom_bits & (1 << AGENT_TOOL_LIST_DIR)) != 0;
+                    int wf = (state->capability_custom_bits & (1 << AGENT_TOOL_WRITE_FILE)) != 0;
+                    int ae = (state->capability_custom_bits & (1 << AGENT_TOOL_APPLY_EDIT)) != 0;
+                    nk_checkbox_label(nk, "read_file", &rf);
+                    nk_checkbox_label(nk, "list_dir", &ld);
+                    nk_checkbox_label(nk, "write_file", &wf);
+                    nk_checkbox_label(nk, "apply_edit", &ae);
+                    state->capability_custom_bits =
+                        (rf ? (1 << AGENT_TOOL_READ_FILE) : 0) |
+                        (ld ? (1 << AGENT_TOOL_LIST_DIR)  : 0) |
+                        (wf ? (1 << AGENT_TOOL_WRITE_FILE): 0) |
+                        (ae ? (1 << AGENT_TOOL_APPLY_EDIT): 0);
+                }
+                capability_custom_set(state->capability_custom_bits);
                 nk_layout_row_dynamic(nk, 18, 1);
                 nk_label_colored(nk, "Workspace (sandbox root):",
                                  NK_TEXT_LEFT, amber);
@@ -1466,7 +1850,11 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                                  NK_TEXT_LEFT, warn);
 
                 char title[640];
-                snprintf(title, sizeof(title), "%s \xe2\x86\x92 %s",
+                /* "->" is ASCII because U+2192 RIGHTWARDS ARROW lives in the
+                 * Arrows block (U+2190..U+21FF) which is NOT baked into the
+                 * embedded font atlas — would render as `?`. The baked
+                 * General Punctuation subset is U+2010..U+2027 only. */
+                snprintf(title, sizeof(title), "%s -> %s",
                          pending == 1 ? "WRITE_FILE" : "APPLY_EDIT",
                          p_path ? p_path : "");
                 nk_layout_row_dynamic(nk, 16, 1);
@@ -1876,12 +2264,17 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                 /* ▶ — click to send */
                 int send = nk_button_label(nk, "\xe2\x96\xb6");
                 if (send && state->input_buffer[0] &&
-                    inference_is_model_loaded(state->inference))
+                    inference_is_model_loaded(state->inference) &&
+                    !state->compact_pending)
                 {
-                    /* Pre-send compact if context is near full. */
+                    /* Pre-send compact if context is near full.
+                     * Triggered async; the SEND itself is deferred to the
+                     * next click after compact finishes (compact_pending
+                     * gates this branch). */
                     if (state->context_max > 0 &&
                         state->context_tokens > (int)(state->context_max * 0.75f)) {
                         ui_compact_chat_history(state, 1);
+                        goto skip_send;
                     }
 
                     /* Auto-create chat if none active */
@@ -1964,8 +2357,26 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                     state->input_buffer[0] = '\0';
                     state->chat_scroll_y = (nk_uint)0x7FFFFFFF;
                 }
+                skip_send:;
             }
             nk_layout_row_end(nk);
+
+            /* Verify progress indicator */
+            if (state->verify_active) {
+                nk_layout_row_dynamic(nk, 18, 1);
+                char vbuf[256];
+                snprintf(vbuf, sizeof(vbuf), "Verifying %.100s: %d%%",
+                         state->verify_path, state->verify_progress);
+                nk_label_colored(nk, vbuf, NK_TEXT_CENTERED, amber);
+            } else if (state->verify_result == 1) {
+                nk_layout_row_dynamic(nk, 18, 1);
+                nk_label_colored(nk, "Verification OK", NK_TEXT_CENTERED,
+                                 nk_rgb(0x66, 0xCC, 0x66));
+            } else if (state->verify_result == 2) {
+                nk_layout_row_dynamic(nk, 18, 1);
+                nk_label_colored(nk, "Verification FAILED", NK_TEXT_CENTERED,
+                                 nk_rgb(0xCC, 0x33, 0x00));
+            }
 
             /* Status message row */
             if (state->status_msg[0]) {

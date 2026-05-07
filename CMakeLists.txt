@@ -32,6 +32,11 @@ add_subdirectory(third_party/llama.cpp)
 # Source files
 # ---------------------------------------------------------------------------
 file(GLOB SOURCES CONFIGURE_DEPENDS src/*.c)
+list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/agent_executor_main.c")
+list(APPEND SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/monocypher/monocypher.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/vendor/sha256/sha256.c"
+)
 
 # On Windows, embed src/wasteland.rc → Wasteland.exe carries the icon for
 # Explorer / taskbar / Alt-Tab. MSVC and MinGW both accept .rc directly when
@@ -55,11 +60,32 @@ else()
     add_executable(Wasteland ${SOURCES})
 endif()
 
+# Agent Executor subprocess — spawned by the main binary for sandboxed
+# filesystem operations.  Links the same pure-C modules but no SDL/llama.cpp.
+# The IPC executor is Linux-only; on other platforms agent tools fall back to
+# in-process fs_sandbox.c calls.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(AGENT_EXEC_SOURCES
+        src/agent_executor_main.c
+        src/agent_protocol.c
+        src/fs_sandbox.c
+        src/platform_sandbox.c
+    )
+    add_executable(wasteland-agent-executor ${AGENT_EXEC_SOURCES})
+    target_include_directories(wasteland-agent-executor PRIVATE src include)
+    target_compile_definitions(wasteland-agent-executor PRIVATE _GNU_SOURCE)
+    if(SECCOMP_LIBRARY)
+        target_link_libraries(wasteland-agent-executor PRIVATE ${SECCOMP_LIBRARY})
+        target_compile_definitions(wasteland-agent-executor PRIVATE WASTELAND_HAS_SECCOMP=1)
+    endif()
+endif()
+
 # ---------------------------------------------------------------------------
 # Include directories
 # ---------------------------------------------------------------------------
 target_include_directories(Wasteland PRIVATE
     include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor/llama.cpp/include
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor/llama.cpp/ggml/include
 )
@@ -86,23 +112,33 @@ else()
         /W4
     )
     # Silence MSVC deprecation warnings for standard C string functions
-    # (strcpy, strncpy, strerror, etc.). All uses in our code are bounded
-    # and safe — the MSVC _s variants add no correctness benefit here.
-    target_compile_definitions(Wasteland PRIVATE _CRT_SECURE_NO_WARNINGS)
+    # (strcpy, strncpy, strerror, etc.) and POSIX names (strdup, stricmp).
+    # All uses in our code are bounded and safe — the MSVC _s variants add
+    # no correctness benefit here.
+    target_compile_definitions(Wasteland PRIVATE _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_DEPRECATE)
     # nuklear.h is a single-header library compiled inside nuklear_impl.c.
-    # MSVC C4701 ("potentially uninitialized variable") fires inside nuklear.h's
-    # own code at /W4 level and is a known false-positive in that codebase.
-    # Suppress it only for that translation unit to keep our own code clean.
+    # Suppress MSVC warnings that fire inside nuklear.h's own code at /W4:
+    # C4701 potentially uninitialized variable (known false-positive)
+    # C4127 conditional expression is constant
+    # C4116 unnamed type definition in parentheses
     set_source_files_properties(
         "${CMAKE_CURRENT_SOURCE_DIR}/src/nuklear_impl.c"
-        PROPERTIES COMPILE_OPTIONS "/wd4701"
+        PROPERTIES COMPILE_OPTIONS "/wd4701;/wd4127;/wd4116;/wd5287"
     )
     # nuklear.h ORs together enum values from different enum types
     # (nk_edit_types | nk_edit_flags, nk_panel_set | nk_panel_type, etc.)
     # triggering C5287 in every TU that includes the header for API calls.
-    # Suppress it only for the affected translation unit.
+    # Suppress it only for the affected translation units.
     set_source_files_properties(
         "${CMAKE_CURRENT_SOURCE_DIR}/src/ui.c"
+        PROPERTIES COMPILE_OPTIONS "/wd5287"
+    )
+    set_source_files_properties(
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/inference.c"
+        PROPERTIES COMPILE_OPTIONS "/wd5287"
+    )
+    set_source_files_properties(
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/main.c"
         PROPERTIES COMPILE_OPTIONS "/wd5287"
     )
 endif()
@@ -242,7 +278,7 @@ endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(CPACK_PACKAGE_NAME            "wasteland")
-    set(CPACK_PACKAGE_VERSION         "0.6")
+    set(CPACK_PACKAGE_VERSION         "0.7")
     set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
         "Offline-first amber-CRT LLM chat client built on llama.cpp")
     set(CPACK_PACKAGE_CONTACT         "Wasteland Maintainers")
@@ -295,7 +331,7 @@ endif()
 enable_testing()
 
 # Agent tests
-add_executable(test_agent tests/test_agent.c src/agent.c)
+add_executable(test_agent tests/test_agent.c src/agent.c src/fs_sandbox.c src/agent_protocol.c)
 target_compile_definitions(test_agent PRIVATE TESTING)
 target_include_directories(test_agent PRIVATE src include)
 add_test(NAME agent COMMAND test_agent)
@@ -312,10 +348,15 @@ target_compile_definitions(test_version PRIVATE TESTING)
 target_include_directories(test_version PRIVATE src include)
 add_test(NAME version COMMAND test_version)
 
-# String utility tests — RC4 chat cipher round-trip, HF URL rewrite,
-# chat-name sanitisation. Pure functions copied out of ui.c / network.c
-# so the suite stays SDL/curl-free.
-add_executable(test_string_utils tests/test_string_utils.c)
+# String utility tests — authenticated chat cipher round-trip, HF URL rewrite,
+# chat-name sanitisation, SHA-256. Pure functions copied out of ui.c / network.c
+# so the suite stays SDL/curl-free.  crypto_engine.c and its Monocypher/sha256
+# dependencies are linked directly so the cipher tests exercise the real code.
+add_executable(test_string_utils
+    tests/test_string_utils.c
+    src/crypto_engine.c
+    src/vendor/monocypher/monocypher.c
+    src/vendor/sha256/sha256.c)
 target_compile_definitions(test_string_utils PRIVATE TESTING)
 target_include_directories(test_string_utils PRIVATE src include)
 add_test(NAME string_utils COMMAND test_string_utils)
