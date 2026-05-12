@@ -13,6 +13,7 @@
 
 #include "inference.h"
 #include "agent.h"
+#include "capability.h"
 #include "ui.h"
 #include <stdlib.h>
 #include <string.h>
@@ -109,6 +110,8 @@ struct inference_ctx {
     pthread_mutex_t agent_mutex;
     volatile int    agent_mode;
     char            agent_workspace[1024];
+    int             capability_preset;      /* cap_preset_t */
+    int             capability_custom_bits; /* bitmask for CAP_PRESET_CUSTOM */
 
     /* Pending mutating-tool action awaiting user APPLY/REJECT in the UI.
      * pending_kind = 0 (none) / 1 (write_file) / 2 (apply_edit). The worker
@@ -151,6 +154,11 @@ struct inference_ctx {
     char           *pending_summary_src;  /* heap, owned by inference module */
     char            summary_buffer[WASTELAND_SUMMARY_MAX];
     size_t          summary_len;
+
+    /* Project context (CLAUDE.md, .cursorrules, skills, etc.) injected by the
+     * UI when the "Read project context" option is enabled. Heap-allocated,
+     * NULL when not set. Protected by agent_mutex (same lock as workspace). */
+    char *project_context;
 
     volatile int running;
 };
@@ -463,6 +471,7 @@ void inference_shutdown(inference_ctx_t *ictx)
     free(ictx->pending_search);
     free(ictx->pending_replace);
     free(ictx->pending_summary_src);
+    free(ictx->project_context);
     free(ictx);
 }
 
@@ -903,6 +912,24 @@ void inference_set_agent(inference_ctx_t *ictx, int mode, const char *workspace)
     pthread_mutex_unlock(&ictx->agent_mutex);
 }
 
+void inference_set_capability(inference_ctx_t *ictx, int preset, int custom_bits)
+{
+    if (!ictx) return;
+    pthread_mutex_lock(&ictx->agent_mutex);
+    ictx->capability_preset      = preset;
+    ictx->capability_custom_bits = custom_bits;
+    pthread_mutex_unlock(&ictx->agent_mutex);
+}
+
+void inference_set_project_context(inference_ctx_t *ictx, const char *ctx_text)
+{
+    if (!ictx) return;
+    pthread_mutex_lock(&ictx->agent_mutex);
+    free(ictx->project_context);
+    ictx->project_context = (ctx_text && ctx_text[0]) ? strdup(ctx_text) : NULL;
+    pthread_mutex_unlock(&ictx->agent_mutex);
+}
+
 int inference_get_pending(inference_ctx_t *ictx,
                           const char **path_out,
                           const char **content_out,
@@ -1265,6 +1292,7 @@ static void emit_raw_str(inference_ctx_t *ictx, const char *s)
 static void process_tool_call(inference_ctx_t *ictx,
                               const char *workspace,
                               const agent_call_t *call,
+                              int cap_preset,
                               char *result_out, size_t result_size)
 {
     char hdr[1280];
@@ -1276,6 +1304,14 @@ static void process_tool_call(inference_ctx_t *ictx,
         const char *err = "  ERROR: agent workspace not configured\n";
         emit_raw_str(ictx, err);
         snprintf(result_out, result_size, "ERROR: agent workspace not set");
+        return;
+    }
+
+    if (!capability_tool_allowed((cap_preset_t)cap_preset, call->kind)) {
+        emit_raw_str(ictx, "  BLOCKED: capability preset does not allow this tool\n");
+        snprintf(result_out, result_size,
+                 "ERROR: tool '%s' is blocked by current capability preset",
+                 tool_name_of(call->kind));
         return;
     }
 
@@ -1475,14 +1511,22 @@ void* inference_worker_thread(void *arg)
 
         char workspace[1024];
         int  agent_mode_now;
+        int  cap_preset_now;
+        int  cap_custom_now;
+        char *proj_ctx_now = NULL;
         pthread_mutex_lock(&ictx->agent_mutex);
-        agent_mode_now = ictx->agent_mode;
+        agent_mode_now  = ictx->agent_mode;
+        cap_preset_now  = ictx->capability_preset;
+        cap_custom_now  = ictx->capability_custom_bits;
+        if (ictx->project_context)
+            proj_ctx_now = strdup(ictx->project_context);
         snprintf(workspace, sizeof(workspace), "%s", ictx->agent_workspace);
         pthread_mutex_unlock(&ictx->agent_mutex);
         if (agent_mode_now && workspace[0] == '\0') {
             /* Agent toggled ON but no workspace set — treat as plain chat */
             agent_mode_now = 0;
         }
+        capability_custom_set(cap_custom_now);
 
         /* ---- Reset for the new user prompt ---- */
         ictx->cancel_generation = 0;
@@ -1617,24 +1661,43 @@ void* inference_worker_thread(void *arg)
                                                        sizeof(hist_summary));
 
             /* Combine base system prompt + optional user prompt + agent tools
-             * + (optional) compacted-history summary. */
+             * + (optional) project context + (optional) compacted-history summary. */
             char combined_sys[16384 + WASTELAND_SUMMARY_MAX];
+            char *combined_sys_heap = NULL; /* used if project_context overflows the stack buf */
             {
                 char base_and_user[MAX_PROMPT_LEN + 2048];
                 build_system_prompt(sys_prompt, base_and_user,
                                     sizeof(base_and_user));
-                if (hist_summary[0]) {
-                    snprintf(combined_sys, sizeof(combined_sys),
-                             "%s\n\n%s\n\nPrevious conversation summary "
+
+                /* Estimate size needed; fall back to heap if proj_ctx is large. */
+                size_t proj_len = proj_ctx_now ? strlen(proj_ctx_now) : 0;
+                size_t sum_len  = hist_summary[0] ? strlen(hist_summary) : 0;
+                size_t needed   = strlen(base_and_user) + strlen(agent_system_prompt())
+                                  + proj_len + sum_len + 512;
+                char *dst = combined_sys;
+                size_t dst_size = sizeof(combined_sys);
+                if (needed > dst_size) {
+                    combined_sys_heap = (char *)malloc(needed);
+                    if (combined_sys_heap) { dst = combined_sys_heap; dst_size = needed; }
+                }
+
+                int off = snprintf(dst, dst_size, "%s\n\n%s",
+                                   base_and_user, agent_system_prompt());
+                if (off > 0 && proj_ctx_now && proj_ctx_now[0]) {
+                    off += snprintf(dst + off, dst_size - (size_t)off,
+                                    "\n\n--- PROJECT CONTEXT ---\n"
+                                    "%s\n--- END PROJECT CONTEXT ---",
+                                    proj_ctx_now);
+                }
+                if (off > 0 && hist_summary[0]) {
+                    snprintf(dst + off, dst_size - (size_t)off,
+                             "\n\nPrevious conversation summary "
                              "(older turns compacted from this chat):\n%s",
-                             base_and_user, agent_system_prompt(), hist_summary);
-                } else {
-                    snprintf(combined_sys, sizeof(combined_sys), "%s\n\n%s",
-                             base_and_user, agent_system_prompt());
+                             hist_summary);
                 }
             }
             msgs[n_msgs].role    = "system";
-            msgs[n_msgs].content = combined_sys;
+            msgs[n_msgs].content = combined_sys_heap ? combined_sys_heap : combined_sys;
             n_msgs++;
 
             int n_hist = parse_chat_history(local_history + sum_offset,
@@ -1678,6 +1741,7 @@ void* inference_worker_thread(void *arg)
                 {
                     static char one_result[AGENT_TOOL_RESULT_BUF];
                     process_tool_call(ictx, workspace, &calls[c],
+                                      cap_preset_now,
                                       one_result, sizeof(one_result));
                     int wrote = snprintf(tool_results + tr_len,
                                          sizeof(tool_results) - tr_len,
@@ -1699,7 +1763,13 @@ void* inference_worker_thread(void *arg)
             }
 
             for (int i = 0; i < n_msgs; i++) free(owned[i]);
+            free(combined_sys_heap);
+            free(proj_ctx_now);
+            proj_ctx_now = NULL;
         }
+
+        free(proj_ctx_now); /* also free if agent branch was not taken */
+        proj_ctx_now = NULL;
 
         pthread_mutex_lock(&ictx->output_mutex);
         ictx->generating = 0;

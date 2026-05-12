@@ -35,7 +35,7 @@
 #define WASTELAND_MAX_CHATS        64
 #define WASTELAND_CHAT_NAME_LEN    256
 
-#define WASTELAND_VERSION          "0.7"
+#define WASTELAND_VERSION          "0.8"
 
 /* Agent-mode UI buffer sizes (mirrored from agent.h to avoid the include
  * chain dragging agent internals into every UI compilation unit). */
@@ -106,6 +106,7 @@ typedef struct {
     int  capability_preset;                /* cap_preset_t when agent_mode==1 */
     int  capability_custom_bits;           /* bitmask for CAP_PRESET_CUSTOM */
     char agent_workspace[1024];            /* user-set sandbox root */
+    int  project_context_scan;             /* 1 = auto-read CLAUDE.md/.cursorrules/skills before each task */
 
     volatile int   agent_pending;          /* 0=none, 1=write_file, 2=apply_edit */
     char           agent_pending_path[AGENT_MAX_PATH_LEN_UI];
@@ -185,6 +186,10 @@ void ui_finalize_compact(app_state_t *state);
 /* Launch a detached background thread to SHA-256-verify a model file.
  * Defined in main.c; declared here so ui.c can trigger it from the vault. */
 void start_verify(const char *path, app_state_t *state);
+
+/* Collect project context files (CLAUDE.md, .cursorrules, skills) from workspace.
+ * Returns a heap-allocated string the caller must free(), or NULL if nothing found. */
+char *collect_project_context(const char *workspace);
 
 /* Render one complete frame of the UI. Called from the main thread. */
 void ui_render(struct nk_context *nk, app_state_t *state, int width, int height);

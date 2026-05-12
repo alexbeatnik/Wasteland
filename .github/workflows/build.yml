@@ -112,11 +112,9 @@ jobs:
         os: [ubuntu-22.04, ubuntu-22.04-arm, macos-14, windows-latest]
         include:
           - os: ubuntu-22.04
-            file_name: wasteland_0.6_amd64.deb
             artifact_name: wasteland-linux-amd64-deb
             target_os: linux
           - os: ubuntu-22.04-arm
-            file_name: wasteland_0.6_arm64.deb
             artifact_name: wasteland-linux-arm64-deb
             target_os: linux
           - os: macos-14
@@ -197,11 +195,14 @@ jobs:
       run: cmake --build build --config Release -j 4
 
     - name: Package (Linux)
+      id: pkg_linux
       if: matrix.target_os == 'linux'
       run: |
         cd build
         cpack -G DEB
         ls -la *.deb
+        DEB=$(ls *.deb | head -1)
+        echo "file_name=${DEB}" >> "$GITHUB_OUTPUT"
 
     - name: Package (macOS)
       if: matrix.target_os == 'macos'
@@ -217,12 +218,19 @@ jobs:
       run: |
         Copy-Item build/Release/Wasteland.exe build/${{ matrix.file_name }}
 
-    - name: Upload Artifacts
+    - name: Upload Artifacts (Linux)
+      if: matrix.target_os == 'linux'
       uses: actions/upload-artifact@v5
       with:
         name: ${{ matrix.artifact_name }}
-        path: |
-          build/${{ matrix.file_name }}
+        path: build/${{ steps.pkg_linux.outputs.file_name }}
+
+    - name: Upload Artifacts (non-Linux)
+      if: matrix.target_os != 'linux'
+      uses: actions/upload-artifact@v5
+      with:
+        name: ${{ matrix.artifact_name }}
+        path: build/${{ matrix.file_name }}
 
   release:
     name: Create Release

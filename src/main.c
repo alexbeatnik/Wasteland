@@ -803,6 +803,7 @@ int main(int argc, char **argv)
     state.agent_mode = 0;
     state.capability_preset = CAP_PRESET_READ_WRITE;
     state.capability_custom_bits = 0;
+    state.project_context_scan = 0;
     state.agent_workspace[0] = '\0';
     FILE *cfg_fp = fopen("wasteland.cfg", "r");
     if (cfg_fp) {
@@ -825,6 +826,8 @@ int main(int argc, char **argv)
                     state.capability_preset = v;
             } else if (strcmp(key, "capability_custom_bits") == 0) {
                 state.capability_custom_bits = atoi(val);
+            } else if (strcmp(key, "project_context_scan") == 0) {
+                state.project_context_scan = (val[0] == '1') ? 1 : 0;
             } else if (strcmp(key, "agent_workspace") == 0) {
                 strncpy(state.agent_workspace, val,
                         sizeof(state.agent_workspace) - 1);
@@ -842,6 +845,7 @@ int main(int argc, char **argv)
     int  last_agent_mode = state.agent_mode;
     int  last_capability_preset = state.capability_preset;
     int  last_capability_custom_bits = state.capability_custom_bits;
+    int  last_project_context_scan = state.project_context_scan;
     char last_agent_ws[1024];
     snprintf(last_agent_ws, sizeof(last_agent_ws), "%s", state.agent_workspace);
     int   last_n_ctx       = state.settings_n_ctx;
@@ -886,6 +890,12 @@ int main(int argc, char **argv)
      * Main loop
      * ----------------------------------------------------------------------- */
     int startup_frames = 30; /* ignore SDL_QUIT for first ~500 ms */
+
+    /* Track last-seen values for project context so we only re-scan when
+     * the user changes the toggle or workspace, not every frame. */
+    int   proj_ctx_last_scan      = -1;
+    char  proj_ctx_last_workspace[1024] = {0};
+
     while (state.running) {
         /* --- Input --- */
         SDL_Event evt;
@@ -902,8 +912,28 @@ int main(int argc, char **argv)
          * the worker sees them at the moment the next prompt is dequeued. */
         inference_set_agent(state.inference, state.agent_mode,
                             state.agent_workspace);
+        inference_set_capability(state.inference, state.capability_preset,
+                                 state.capability_custom_bits);
         inference_set_n_ctx(state.inference,       state.settings_n_ctx);
         inference_set_temperature(state.inference, state.settings_temperature);
+
+        /* Re-scan project context only when toggle or workspace changes. */
+        if (state.project_context_scan != proj_ctx_last_scan ||
+            strcmp(state.agent_workspace, proj_ctx_last_workspace) != 0)
+        {
+            proj_ctx_last_scan = state.project_context_scan;
+            strncpy(proj_ctx_last_workspace, state.agent_workspace,
+                    sizeof(proj_ctx_last_workspace) - 1);
+            proj_ctx_last_workspace[sizeof(proj_ctx_last_workspace) - 1] = '\0';
+
+            if (state.project_context_scan && state.agent_workspace[0] != '\0') {
+                char *ctx = collect_project_context(state.agent_workspace);
+                inference_set_project_context(state.inference, ctx);
+                free(ctx);
+            } else {
+                inference_set_project_context(state.inference, NULL);
+            }
+        }
 
         /* --- Drain inference output into chat history --- */
         char chunk[1024];
@@ -968,6 +998,7 @@ int main(int argc, char **argv)
         if (state.agent_mode != last_agent_mode ||
             state.capability_preset != last_capability_preset ||
             state.capability_custom_bits != last_capability_custom_bits ||
+            state.project_context_scan != last_project_context_scan ||
             strcmp(state.agent_workspace, last_agent_ws) != 0 ||
             state.settings_n_ctx       != last_n_ctx ||
             state.settings_temperature != last_temperature)
@@ -975,6 +1006,7 @@ int main(int argc, char **argv)
             last_agent_mode    = state.agent_mode;
             last_capability_preset = state.capability_preset;
             last_capability_custom_bits = state.capability_custom_bits;
+            last_project_context_scan = state.project_context_scan;
             last_n_ctx         = state.settings_n_ctx;
             last_temperature   = state.settings_temperature;
             snprintf(last_agent_ws, sizeof(last_agent_ws),
@@ -984,6 +1016,7 @@ int main(int argc, char **argv)
                 fprintf(f, "agent_mode=%d\n",      state.agent_mode);
                 fprintf(f, "capability_preset=%d\n", state.capability_preset);
                 fprintf(f, "capability_custom_bits=%d\n", state.capability_custom_bits);
+                fprintf(f, "project_context_scan=%d\n", state.project_context_scan);
                 fprintf(f, "agent_workspace=%s\n", state.agent_workspace);
                 fprintf(f, "n_ctx=%d\n",           state.settings_n_ctx);
                 fprintf(f, "temperature=%.3f\n",   state.settings_temperature);

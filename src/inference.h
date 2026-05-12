@@ -113,6 +113,8 @@ int    inference_take_summary(inference_ctx_t *ctx, char *buf, size_t size);
  * fall back to plain single-shot chat. Safe to call between prompts.
  */
 void   inference_set_agent(inference_ctx_t *ctx, int mode, const char *workspace);
+void   inference_set_capability(inference_ctx_t *ctx, int preset, int custom_bits);
+void   inference_set_project_context(inference_ctx_t *ctx, const char *ctx_text);
 
 /**
  * Probe whether the worker is currently waiting for the user to approve a
