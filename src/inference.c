@@ -1472,8 +1472,12 @@ void* inference_worker_thread(void *arg)
 
                 /* Reset stream-filter state so think-tag carry from a
                  * previous turn doesn't leak into the summary. Output
-                 * buffer is NOT cleared — it belongs to the chat. */
-                ictx->cancel_generation = 0;
+                 * buffer is NOT cleared — it belongs to the chat.
+                 * Do NOT clear cancel_generation if a shutdown/stop is
+                 * already pending — inference_request_stop() raised it and
+                 * llama.cpp must be allowed to bail out promptly. */
+                if (ictx->running)
+                    ictx->cancel_generation = 0;
                 ictx->tag_carry_len  = 0;
                 ictx->tag_prev_char  = '\n';
 
@@ -1529,7 +1533,8 @@ void* inference_worker_thread(void *arg)
         capability_custom_set(cap_custom_now);
 
         /* ---- Reset for the new user prompt ---- */
-        ictx->cancel_generation = 0;
+        if (ictx->running)
+            ictx->cancel_generation = 0;
         ictx->tag_carry_len  = 0;
         ictx->tag_prev_char  = '\n';
         pthread_mutex_lock(&ictx->output_mutex);

@@ -81,7 +81,7 @@ void* inference_worker_thread(void *arg);
 
 The worker appends a trailing `\n` to the output buffer before clearing `generating`, so the next `> prompt` line in the chat history is never glued onto the last assistant token.
 
-### Module Map (v0.7)
+### Module Map (v0.8)
 
 The codebase is split into single-responsibility modules. Each `*.h` is the contract; the `.c` is the only place to look for implementation details.
 
