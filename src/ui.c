@@ -946,6 +946,135 @@ static void ui_compact_chat_history(app_state_t *state, int pairs)
              summarise_count);
 }
 
+/* Read a file into buf (up to max-1 bytes), null-terminate. Returns bytes read. */
+static size_t read_file_into(const char *path, char *buf, size_t max)
+{
+    if (!path || !buf || max == 0) return 0;
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    size_t n = fread(buf, 1, max - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+    return n;
+}
+
+/* Build a combined project context string from well-known context files
+ * (CLAUDE.md, .cursorrules, .github/copilot-instructions.md, .claude/skills/).
+ * Returns a heap-allocated string (caller must free), or NULL if nothing found. */
+char *collect_project_context(const char *workspace)
+{
+    if (!workspace || !workspace[0]) return NULL;
+
+    /* Candidate files (relative to workspace root). */
+    static const char * const candidates[] = {
+        "CLAUDE.md",
+        ".cursorrules",
+        ".github/copilot-instructions.md",
+        NULL
+    };
+
+    /* Accumulate into a dynamic buffer. */
+    size_t   total   = 0;
+    size_t   cap     = 32768;
+    char    *buf     = (char *)malloc(cap);
+    if (!buf) return NULL;
+    buf[0] = '\0';
+
+    for (int i = 0; candidates[i]; i++) {
+        char path[2048];
+        snprintf(path, sizeof(path), "%s/%s", workspace, candidates[i]);
+        char tmp[16384];
+        size_t n = read_file_into(path, tmp, sizeof(tmp));
+        if (n == 0) continue;
+
+        /* Ensure capacity. */
+        size_t needed = total + n + strlen(candidates[i]) + 32;
+        if (needed >= cap) {
+            cap = needed * 2 + 1;
+            char *nb = (char *)realloc(buf, cap);
+            if (!nb) { free(buf); return NULL; }
+            buf = nb;
+        }
+        if (total > 0) buf[total++] = '\n';
+        int hlen = snprintf(buf + total, cap - total,
+                            "=== %s ===\n", candidates[i]);
+        if (hlen > 0) total += (size_t)hlen;
+        memcpy(buf + total, tmp, n);
+        total += n;
+        buf[total] = '\0';
+    }
+
+    /* Scan .claude/skills/ for *.md skill files. */
+    {
+        char skills_dir[2048];
+        snprintf(skills_dir, sizeof(skills_dir), "%s/.claude/skills", workspace);
+
+#ifdef _WIN32
+        char pattern[2100];
+        snprintf(pattern, sizeof(pattern), "%s\\*.md", skills_dir);
+        WIN32_FIND_DATAA fd;
+        HANDLE h = FindFirstFileA(pattern, &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do {
+                char sp[2200];
+                snprintf(sp, sizeof(sp), "%s\\%s", skills_dir, fd.cFileName);
+                char tmp[8192];
+                size_t n = read_file_into(sp, tmp, sizeof(tmp));
+                if (n > 0) {
+                    size_t needed = total + n + strlen(fd.cFileName) + 32;
+                    if (needed >= cap) {
+                        cap = needed * 2 + 1;
+                        char *nb = (char *)realloc(buf, cap);
+                        if (!nb) { FindClose(h); free(buf); return NULL; }
+                        buf = nb;
+                    }
+                    if (total > 0) buf[total++] = '\n';
+                    int hlen = snprintf(buf + total, cap - total,
+                                        "=== .claude/skills/%s ===\n", fd.cFileName);
+                    if (hlen > 0) total += (size_t)hlen;
+                    memcpy(buf + total, tmp, n);
+                    total += n;
+                    buf[total] = '\0';
+                }
+            } while (FindNextFileA(h, &fd));
+            FindClose(h);
+        }
+#else
+        DIR *d = opendir(skills_dir);
+        if (d) {
+            struct dirent *de;
+            while ((de = readdir(d)) != NULL) {
+                size_t nl = strlen(de->d_name);
+                if (nl < 4 || strcmp(de->d_name + nl - 3, ".md") != 0) continue;
+                char sp[2200];
+                snprintf(sp, sizeof(sp), "%s/%s", skills_dir, de->d_name);
+                char tmp[8192];
+                size_t n = read_file_into(sp, tmp, sizeof(tmp));
+                if (n == 0) continue;
+                size_t needed = total + n + nl + 32;
+                if (needed >= cap) {
+                    cap = needed * 2 + 1;
+                    char *nb = (char *)realloc(buf, cap);
+                    if (!nb) { closedir(d); free(buf); return NULL; }
+                    buf = nb;
+                }
+                if (total > 0) buf[total++] = '\n';
+                int hlen = snprintf(buf + total, cap - total,
+                                    "=== .claude/skills/%s ===\n", de->d_name);
+                if (hlen > 0) total += (size_t)hlen;
+                memcpy(buf + total, tmp, n);
+                total += n;
+                buf[total] = '\0';
+            }
+            closedir(d);
+        }
+#endif
+    }
+
+    if (total == 0) { free(buf); return NULL; }
+    return buf;
+}
+
 /* Splice an inference-published summary into the active chat history. */
 void ui_finalize_compact(app_state_t *state)
 {
@@ -1737,6 +1866,16 @@ void ui_render(struct nk_context *nk, app_state_t *state, int width, int height)
                 } else {
                     nk_label_colored(nk, "OK", NK_TEXT_LEFT, amber);
                 }
+
+                /* Project context auto-scan toggle */
+                nk_layout_row_dynamic(nk, 22, 1);
+                int scan_was = state->project_context_scan;
+                nk_checkbox_label(nk,
+                    state->project_context_scan
+                        ? "Read project context (ON)"
+                        : "Read project context (OFF)",
+                    &state->project_context_scan);
+                (void)scan_was; /* change is picked up by main.c each frame */
             }
 
             /* Spacer */

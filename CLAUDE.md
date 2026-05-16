@@ -1,4 +1,4 @@
-# CLAUDE.md — Wasteland v0.7
+# CLAUDE.md — Wasteland v0.8
 
 ## Agent Context
 
@@ -81,7 +81,7 @@ void* inference_worker_thread(void *arg);
 
 The worker appends a trailing `\n` to the output buffer before clearing `generating`, so the next `> prompt` line in the chat history is never glued onto the last assistant token.
 
-### Module Map (v0.7)
+### Module Map (v0.8)
 
 The codebase is split into single-responsibility modules. Each `*.h` is the contract; the `.c` is the only place to look for implementation details.
 
@@ -490,7 +490,7 @@ The string-utils suite links `src/crypto_engine.c`, `src/vendor/monocypher/monoc
 - llama.cpp lives in `third_party/llama.cpp/` (with a `vendor/llama.cpp` symlink) and is added as a CMake subdirectory with `LLAMA_BUILD_EXAMPLES=OFF`.
 - `seccomp` is optional (Linux only); CMake skips it gracefully on other platforms.
 - The application does **not** auto-load any model on boot.
-- Package version: **0.7** (`CPACK_PACKAGE_VERSION` in `CMakeLists.txt`, mirrored as `WASTELAND_VERSION` in `src/ui.h`).
+- Package version: **0.8** (`CPACK_PACKAGE_VERSION` in `CMakeLists.txt`, mirrored as `WASTELAND_VERSION` in `src/ui.h`).
 - Two CMake targets are produced: `Wasteland` (the GUI) and `wasteland-agent-executor` (the sandboxed subprocess). The latter is built from `src/agent_executor_main.c` + `agent_protocol.c` + `fs_sandbox.c` + `platform_sandbox.c` and intentionally avoids SDL / llama.cpp / curl — it must stay tiny and fast to fork.
 - `src/agent_executor_main.c` is excluded from the `Wasteland` source glob via `list(REMOVE_ITEM SOURCES …)` because it has its own `main()`.
 - Bundled vendor libraries: `src/vendor/monocypher/` (Monocypher 4.x — XChaCha20-Poly1305) and `src/vendor/sha256/` (incremental SHA-256). Both are added to `Wasteland`'s SOURCES via `list(APPEND)` and to `test_string_utils` directly.
