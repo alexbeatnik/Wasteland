@@ -3,6 +3,14 @@ name: Build and Release
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+# Serialise runs per ref so a PR-close and the resulting push-to-main don't
+# race two concurrent build matrices into the same immutable v5 artifact name
+# (the second uploader would get a 409 Conflict). Tag pushes get their own
+# group so a release run is never cancelled by a branch run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   push:
     branches: [ "main" ]
